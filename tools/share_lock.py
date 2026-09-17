@@ -120,6 +120,28 @@ def _lock_ttl(info) -> int:
         return DEFAULT_TTL
 
 
+def _retire(path: str, lock_dir: str) -> bool:
+    """把锁文件挪出活动区（**不删除**）。
+
+    F-R10 家族（2026-09-18 稳定复现）：本机 shim 的删除（回收站）异常
+    （`SHFileOperationW 0x2`）⇒ 仓库内 Python `unlink/remove` fail-closed，
+    且反复尝试会触发进程级强制终止。⇒ 本工具**一律不删除**，改用
+    `rename` 挪移到 `<lock_dir>/_retired/`（已验证 rename 可用）。
+    成功返回 True；失败返回 False（不抛异常）。
+    """
+    try:
+        import time as _t
+        retire_dir = os.path.join(lock_dir, "_retired")
+        os.makedirs(retire_dir, exist_ok=True)
+        dst = os.path.join(
+            retire_dir,
+            f"{os.path.basename(path)}.{_t.strftime('%Y%m%d-%H%M%S')}-{_t.time_ns() % 1000000:06d}")
+        os.rename(path, dst)
+        return True
+    except OSError:
+        return False
+
+
 # ---------- 命令 ----------
 def cmd_acquire(args) -> int:
     lock_dir = args.lock_dir
@@ -158,13 +180,10 @@ def cmd_acquire(args) -> int:
         print("           （仅当确认对方崩死/走失时）用 stale-clean --force-slot 清理后重试")
         return 2
 
-    # ④ 清理过期锁（含自己的与无主的）
+    # ④ 清理过期锁（含自己的与无主的；F-R10 家族：挪移而非删除）
     for p, s, info, age in stale:
-        try:
-            os.remove(p)
-            print(f"[-] 已清理过期锁 {os.path.basename(p)} (slot={s}, age={age / 60:.1f}min)")
-        except OSError:
-            pass
+        if _retire(p, lock_dir):
+            print(f"[-] 已移出过期锁 {os.path.basename(p)} (slot={s}, age={age / 60:.1f}min)")
 
     # ⑤ 原子创建
     path = _lock_path(lock_dir, slot)
@@ -203,13 +222,12 @@ def cmd_release(args) -> int:
         print(f"[注意] 无锁可放（{path} 不存在）")
         return 1
     info = _read_lock(path)
-    try:
-        os.remove(path)
-    except OSError as e:
-        print(f"[错误] 删除失败: {e}")
-        return 1
     who = (info or {}).get("label") or _slot_label(args.slot)
-    print(f"[OK] 已释放锁: {args.slot} ({who})")
+    if _retire(path, args.lock_dir):
+        print(f"[OK] 已释放锁: {args.slot} ({who})（挪移至 _retired/——本机不删除，F-R10 家族）")
+    else:
+        print("[注意] 释放未能物理移走锁文件（环境 rename 异常）")
+        print("       ——不致命：锁将按 TTL 自动失效（acquire 侧自动接管陈旧锁）")
     return 0
 
 
@@ -276,13 +294,11 @@ def cmd_stale_clean(args) -> int:
             print(f"  [保留] {s}: age={age / 60:.1f}min < ttl={ttl}s（活跃）")
         return 0
     for p, s, age in targets:
-        action = "已删除" if args.yes else "将删除"
+        action = "已移出" if args.yes else "将移出"
         print(f"  [{action}] {os.path.basename(p)} (slot={s}, age={age / 60:.1f}min)")
         if args.yes:
-            try:
-                os.remove(p)
-            except OSError as e:
-                print(f"          删除失败: {e}")
+            if not _retire(p, args.lock_dir):
+                print("          移出失败（环境 rename 异常）——锁将按 TTL 自动失效")
     if not args.yes:
         print("（dry-run；确认无误后加 --yes 执行）")
     return 0

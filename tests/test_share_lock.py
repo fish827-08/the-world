@@ -83,7 +83,7 @@ def test_stale_auto_clean_on_acquire(lock_dir):
     # 他人 acquire 应自动清掉过期锁并通过
     r = run("acquire", "--slot", "eval", "--lock-dir", lock_dir)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "已清理过期锁" in r.stdout
+    assert "已移出过期锁" in r.stdout
     j2 = json.loads(run("status", "--json", "--lock-dir", lock_dir).stdout)
     assert len(j2["locks"]) == 1 and j2["locks"][0]["slot"] == "eval"
 
@@ -91,13 +91,13 @@ def test_stale_auto_clean_on_acquire(lock_dir):
 def test_stale_clean_dry_run_and_yes(lock_dir):
     assert run("acquire", "--slot", "dev", "--ttl", "1", "--lock-dir", lock_dir).returncode == 0
     time.sleep(2.1)
-    # dry-run: 不删
+    # dry-run: 不挪
     r = run("stale-clean", "--lock-dir", lock_dir)
-    assert r.returncode == 0 and "将删除" in r.stdout
+    assert r.returncode == 0 and "将移出" in r.stdout
     assert os.path.exists(os.path.join(lock_dir, "dev.lock"))
-    # --yes: 删除
+    # --yes: 挪出（F-R10 家族：本机不删除，挪移至 _retired/）
     r2 = run("stale-clean", "--yes", "--lock-dir", lock_dir)
-    assert r2.returncode == 0 and "已删除" in r2.stdout
+    assert r2.returncode == 0 and "已移出" in r2.stdout
     assert not os.path.exists(os.path.join(lock_dir, "dev.lock"))
 
 
