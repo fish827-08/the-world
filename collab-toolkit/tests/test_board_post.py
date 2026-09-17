@@ -154,13 +154,15 @@ def test_push_conflict_keeps_commit_and_releases_lock(repo_pair, tmp_path,
     """push 被拒绝（模拟竞态：pull 后远端又前进）-> rc=3，提交留本地，锁已放。"""
     real_run_git = bp.run_git
 
-    def fake_run_git(root, args, check=True, credential_helper=None):
+    def fake_run_git(root, args, check=True, credential_helper=None, **kwargs):
+        # **kwargs：测试替身必须容忍工具新增参数——2026-09-18 实测教训：
+        # 工具加 `retries=` 之后，替身 TypeError ⇒ 2 例确定性失败（曾被误当 flaky）
         if args and args[0] == "push":
             return subprocess.CompletedProcess(
                 ["git", "push"], 1, "",
                 "! [rejected] main -> main (fetch first)")
         return real_run_git(root, args, check=check,
-                            credential_helper=credential_helper)
+                            credential_helper=credential_helper, **kwargs)
 
     monkeypatch.setattr(bp, "run_git", fake_run_git)
     msg = tmp_path / "post.md"
@@ -192,11 +194,11 @@ def test_rerun_after_failed_push_is_idempotent(repo_pair, tmp_path, monkeypatch)
     real_run_git = bp.run_git
     state = {"fail_push": True}
 
-    def fake_run_git(root, args, check=True, credential_helper=None):
+    def fake_run_git(root, args, check=True, credential_helper=None, **kwargs):
         if state["fail_push"] and args and args[0] == "push":
             return subprocess.CompletedProcess(["git", "push"], 1, "", "rejected")
         return real_run_git(root, args, check=check,
-                            credential_helper=credential_helper)
+                            credential_helper=credential_helper, **kwargs)
 
     monkeypatch.setattr(bp, "run_git", fake_run_git)
     assert bp.main(_post_args(repo_pair, msg)) == 3   # 第一次：push 失败

@@ -279,9 +279,9 @@ def cmd_post(args) -> int:
         if not os.path.isfile(args.lock_tool):
             raise PostError(f"锁工具不存在: {args.lock_tool}")
         message = ensure_signature(load_message(args.message_file), args.role)
+        prev = journal_read(root, args.slot)   # 先读上次记录，再写本次
         journal_write("start", {"message_sha16": sha256_text(message),
                                 "message_chars": len(message)})
-        prev = journal_read(root, args.slot)
         if prev and prev.get("stage") not in (None, "done") \
                 and prev.get("message_sha16") == sha256_text(message):
             print(f"[提示] 阶段日志显示上次同期运行中断在 '{prev.get('stage')}'，"
@@ -339,7 +339,7 @@ def cmd_post(args) -> int:
             print("[5/7] 提交（仅讨论板路径）...")
             run_git(root, ["add", "--", args.board])
             staged = run_git(root, ["diff", "--cached", "--quiet", "--", args.board],
-                             check=False).returncode
+                             check=False, retries=0).returncode
             if staged == 0:
                 print("      暂存区无实际变更（可能是行尾归一化）——跳过提交")
             else:
