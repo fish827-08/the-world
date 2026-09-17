@@ -123,6 +123,13 @@ def acquire_lock(args) -> None:
     sys.stdout.write(r.stdout or "")
     if r.returncode == 2:
         raise PostError("他人持活跃锁 —— 按 §3.1.2 等待，不得强行写入", code=2)
+    if r.returncode == 4:
+        # 同槽位锁已存在：可能是你上次进程被中途终止（环境已知问题）留下的
+        raise PostError(
+            f"槽位 {args.slot} 已有锁（可能是上次进程被中断的残留）。"
+            f"先确认: `share_lock.py status`；确认为残留后 "
+            f"`share_lock.py release --slot {args.slot}`，再重跑本脚本（幂等，不会重复上帖）",
+            code=2)
     if r.returncode != 0:
         raise PostError(f"取锁失败(rc={r.returncode}): {(r.stderr or '').strip()[:200]}")
 
@@ -211,7 +218,8 @@ def cmd_post(args) -> int:
         if dirty:
             print("[5/7] 提交（仅讨论板路径）...")
             run_git(root, ["add", "--", args.board])
-            run_git(root, ["commit", "-m", f"share: {args.slot} {args.task}"])
+            who = (args.role or f"[{args.slot}]").strip()
+            run_git(root, ["commit", "-m", f"share: {who} {args.task}"])
             stat = run_git(root, ["show", "--stat", "--format=", "HEAD"]).stdout
             files = [ln for ln in stat.splitlines() if "|" in ln]
             if len(files) != 1:
