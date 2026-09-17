@@ -1,7 +1,7 @@
 # AGENTS.md — the-world 项目代理指南（工程口径）
 
 > 供 AI 代理/协作者快速了解**代码约束、构建命令和关键流程**。
-> 详细模块说明见 `MODULES.md`。
+> 详细模块说明以代码为准（旧版 `MODULES.md` 手册已归档至 `_archive/2026-09-17-瘦身/`；项目全景见 `HISTORY.md`）。
 >
 > ⚠️ **别与 `AGENT.md` 混**：本文件（**复数**）= 工程指南（"代码怎么写"）；
 > `AGENT.md`（**单数**）= 团队协作章程（"团队怎么合作"：交流规则、评审红线、分支与仓库纪律）。
@@ -47,20 +47,20 @@ cd .. && python3 -m pytest tests/ -q --ignore=tests/test_broker.py
 
 ## 加基因五步曲（C3 G1）
 
-新增基因位必须按顺序执行（详见 `MODULES.md` 模块五）：
+新增基因位必须按顺序执行（详见 `simulation/genes.py` 注册表与 `tests/test_genes_registry.py`；旧版 `MODULES.md` 模块五手册已归档）：
 
 1. Python `Gene` 枚举末尾追加 + `GENE_SEMANTICS` + `GENE_META` + `GENE_WIRED`
 2. Rust `sim_core/src/genes.rs` 追加同名常量
 3. `lib.rs` 的 `validate_gene_wiring` 中 `rust_all` 追加
 4. 引擎用 `Gene.NEW_TRAIT` 消费（Rust 侧用 `crate::genes::G_NEW_TRAIT`）
-5. 跑 `tests/test_genes_registry.py` + 全量测试 + 更新 PROGRESS.md
+5. 跑 `tests/test_genes_registry.py` + 全量测试
 
 **禁止**：改已有基因索引、在枚举中间插入、只改 Python 不改 Rust。
 
 ## 预留位接管规则（C3 G4）
 
 6 个预留位（g17/g18/g20/g21/g22/g23）优先复用，耗尽前不扩 gene_count。
-扩位时触发存档格式升级提示。详见 `MODULES.md` 模块五 G4。
+扩位时触发存档格式升级提示（细节见代码注释；旧版手册已归档）。
 
 ## D2 信息结构开发约定（2026-09-09）
 
