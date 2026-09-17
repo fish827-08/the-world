@@ -163,3 +163,21 @@ def test_load_reads_only_recognized_names(tmp_path):
     assert set(rows) == {"oracle_m1.3_s42"}
     assert rows["oracle_m1.3_s42"]["is_cal"] is True
     assert rows["oracle_m1.3_s42"]["ratio"] == 1.25
+
+
+# ------------------------------------------------------------ F-R23（2026-09-17）
+def test_f_r23_q1_sign_test_k_is_positive_count():
+    """🔴 F-R23 回归（C 步判读侧）：k = 正向配对数；5 正 1 负 ⇒ p = 0.1094。"""
+    rows = _synth(m13_ratio=1.25, m10_ratio=0.80)
+    rows["oracle_m1.3_s46"] = dict(rows["oracle_m1.3_s46"], ratio=0.70)   # 造一个反向
+    v = cj.q1_verdict(rows, 1.3, 1.0)
+    assert v["n_positive"] == 5
+    assert v["sign_test_p"] == pytest.approx(0.109375)
+    assert v["pair_all_positive"] is False
+    assert "正向配对数" in v["sign_test_k_definition"]
+
+
+def test_f_r23_q1_sign_test_all_positive_unchanged():
+    """对照：真全正（6/6）仍为 1/64 = 0.0156。"""
+    v = cj.q1_verdict(_synth(m13_ratio=1.25, m10_ratio=0.80), 1.3, 1.0)
+    assert v["n_positive"] == 6 and v["sign_test_p"] == pytest.approx(0.015625)

@@ -191,7 +191,11 @@ def q1_verdict(rows: dict[str, dict], m: float, baseline_m: float) -> dict:
                       float(A[sd]["ratio"]) - float(B[sd]["ratio"])])
     deltas = [p[3] for p in pairs]
     pair_ok = bool(pairs) and all(d > 0 for d in deltas) and not missing
-    pv = sign_test_pvalue(len(pairs), len(pairs)) if pairs else 1.0
+    # 🔴 F-R23（2026-09-17 内评抽核，本线修复）：`k` 必须是**实际为正的配对数**，
+    # 不是 `n_pairs`。原写法 ⇒ 检验退化为"全正假设"的常数（n=6 恒 0.0156），
+    # 与实际几个 seed 为正无关；60k 实测是 5/6 为正 ⇒ 正确值 P(X≥5|6)=0.1094（不显著）。
+    n_pos = sum(1 for d in deltas if d > 0)
+    pv = sign_test_pvalue(n_pos, len(pairs)) if pairs else 1.0
 
     # ---- ② 域内 k-of-n（域 = seed 级生态门）----
     in_dom = [(v["seed"], float(v["ratio"])) for v in _arm(rows, "oracle", m)
@@ -220,7 +224,15 @@ def q1_verdict(rows: dict[str, dict], m: float, baseline_m: float) -> dict:
     state = "pass" if passed else ("insufficient" if insufficient else "fail")
     reasons: list[str] = []
     if not pair_ok:
-        reasons.append("配对未全正/缺配对（缺 %s）" % missing)
+        # 失败原因分三类，**不得混写**（原写法对"无缺失但未全正"也打印「缺 []」⇒ 会被误读）
+        if missing:
+            reasons.append("**缺配对**的 seed %s ⇒ 不判（配对是判定前置）" % missing)
+        elif not pairs:
+            reasons.append("**配对样本为空** ⇒ 不判")
+        else:
+            _rev = [p[0] for p in pairs if p[3] <= 0]
+            reasons.append("配对**未全正**（反向 seed %s；正向 %d/%d）"
+                           % (_rev, sum(1 for d in deltas if d > 0), len(deltas)))
     if insufficient:
         reasons.append("域内可用 seed %d < %d ⇒ **样本不足、不判**（停下上板）"
                        % (n_dom, Q1_DOMAIN_MIN_SEEDS))
@@ -231,6 +243,7 @@ def q1_verdict(rows: dict[str, dict], m: float, baseline_m: float) -> dict:
             "pairs": pairs, "deltas": [round(d, 6) for d in deltas],
             "missing_seeds": missing,
             "pair_all_positive": pair_ok, "sign_test_p": pv,
+            "n_positive": n_pos, "sign_test_k_definition": "k = 正向配对数（F-R23 修复）",
             "domain": {"n_seeds": n_dom, "seeds": [int(sd) for sd, _ in in_dom],
                        "values": [round(x, 6) for _, x in in_dom],
                        "seeds_found": found, "exceptions": exceptions,
@@ -336,7 +349,8 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
         d = v["domain"]
         L.append(f"  m={m} vs m=1.0：配对 {len(v['pairs'])} 对"
                  f"（缺 {v['missing_seeds']}）Δ = {v['deltas']}"
-                 f" ⇒ 全正 {v['pair_all_positive']}；符号检验 p={v['sign_test_p']:.4f}")
+                 f" ⇒ 全正 {v['pair_all_positive']}；正向 {v['n_positive']}/{len(v['pairs'])}"
+                 f" ⇒ 符号检验 **p={v['sign_test_p']:.4f}**（F-R23 修后：k=正向数）")
         L.append(f"    域（seed 级生态门）：可用 {d['n_seeds']} 个 seed={d['seeds']}"
                  f"；ratio={d['values']}")
         L.append(f"    落带 {d['n_inside']}/{d['n_seeds']}；例外 seed={d['exceptions']}"

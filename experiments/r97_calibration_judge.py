@@ -327,11 +327,16 @@ def report(rows: dict[str, dict]) -> tuple[str, dict]:
         p = pairs_by_m[m]
         mark = "✅ 全正" if p["all_positive"] else f"❌ 未全正（反向 seed {p['reversed_seeds']}）"
         # 加固 1 的量化：配对全正须配**显式**检验（内评 21:38 §二 补；R107 原稿未给）
-        pv = sign_test_pvalue(p["n_pairs"], p["n_pairs"]) if p["n_pairs"] else 1.0
+        # 🔴 F-R23（2026-09-17 内评抽核，本线修复）：`k` 必须是**实际为正的配对数**，
+        # 不能写成 `n_pairs` —— 原写法把 k 恒等于 n ⇒ 检验退化成"全正假设"下的**常数**
+        # （n=6 恒 0.0156，与实际几个为正无关）。数据是 5/6 为正时，正确值 = P(X≥5|6)
+        # = 7/64 = **0.1094**（不显著）。
+        n_pos = sum(1 for _x in p["pairs"] if _x[3] > 0)
+        pv = sign_test_pvalue(n_pos, p["n_pairs"]) if p["n_pairs"] else 1.0
         sign[m] = pv
         L.append(f"  ⇒ m={m}: n={p['n_pairs']} 对（缺 {p['n_missing']}）；"
                  f"Δ ∈ [{_fmt(p['worst_delta'])}, {_fmt(p['best_delta'])}] ⇒ {mark}")
-        L.append(f"     单侧**符号检验** P(X≥{p['n_pairs']} | n={p['n_pairs']}) = {pv:.4f}"
+        L.append(f"     单侧**符号检验** P(X≥{n_pos} | n={p['n_pairs']}) = {pv:.4f}"
                  f"（精确二项）⇒ 配对证据{'显著' if pv < 0.05 else '**不显著**'}"
                  f"；⚠️ 配对证据**无法区分 m=1.3 与 m=1.5**（两者都 6/6）")
 
