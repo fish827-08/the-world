@@ -103,6 +103,8 @@ git push gitee HEAD:main                            # ② 发言后：立刻推�
 python tools/share_lock.py release --slot <你>      # ③ 放锁
 ```
 
+> 💡 **推荐路径（非强制，R116）**：以上 7 步可用 `python collab-toolkit/tools/board_post.py --slot <你> --message-file <md> --role "[角色]"` 一键执行（含幂等补推与 `ls-remote` 对账）。**手工 7 步仍然合法**。
+
 | 不 pull 的后果 | 不 push 的后果 |
 |---------------|---------------|
 | 读到过期讨论，答非所问 | **发言别人看不到 = 没说过** |
