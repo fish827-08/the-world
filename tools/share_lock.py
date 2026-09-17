@@ -161,11 +161,10 @@ def cmd_acquire(args) -> int:
         print(f"[拒绝] 你（{slot}）已持有锁: {p}")
         print(f"        {_fmt_entry(s, info, age)}")
         if getattr(args, "refresh", False):
-            try:
-                os.remove(p)
-                print("        --refresh: 旧锁已移除，继续重新获取")
-            except OSError as e:
-                print(f"        --refresh 失败: {e}")
+            if _retire(p, lock_dir):
+                print("        --refresh: 旧锁已挪移至 _retired/（不删除，F-R10 家族），继续重新获取")
+            else:
+                print("        --refresh 失败：无法挪移旧锁（可能被占用）")
                 return 1
         else:
             print("        如需刷新 TTL: 先 release 再加 --refresh；或直接继续用（TTL 内有效）")
