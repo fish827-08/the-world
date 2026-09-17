@@ -65,13 +65,19 @@ def test_build_appended_is_prefix_extension():
 # ---------------- 端到端（本地裸仓库） ----------------
 @pytest.fixture()
 def repo_pair(tmp_path):
-    """bare 远端 + 工作克隆，含 _share/讨论板.md 初始提交。"""
+    """bare 远端 + 工作克隆，含 _share/讨论板.md 初始提交。
+
+    夹具显式关闭平台噪声（autocrlf/gpgsign/fileMode）——2026-09-18 flaky 定位：
+    全局 git 配置会干扰"是否有变更/能否提交"的判定，导致同一用例时好时坏。
+    """
     bare = tmp_path / "remote.git"
     work = tmp_path / "work"
     git(tmp_path, "init", "--bare", str(bare))
     git(tmp_path, "clone", str(bare), str(work))
-    git(work, "config", "user.email", "t@t")
-    git(work, "config", "user.name", "t")
+    for k, v in (("user.email", "t@t"), ("user.name", "t"),
+                 ("core.autocrlf", "false"), ("core.fileMode", "false"),
+                 ("commit.gpgsign", "false"), ("core.safecrlf", "false")):
+        git(work, "config", k, v)
     share = work / "_share"
     (share / ".locks").mkdir(parents=True)
     (share / "讨论板.md").write_text(
@@ -114,6 +120,33 @@ def test_end_to_end_post(repo_pair, tmp_path):
     # 锁已释放
     locks = list((tmp_path / "work" / "_share" / ".locks").glob("*.lock"))
     assert locks == []
+    # 阶段日志：done（幂等恢复依据）
+    j = json.loads((tmp_path / "work" / "_share" / ".locks" /
+                    "collab.post-journal.json").read_text(encoding="utf-8"))
+    assert j["stage"] == "done" and j["head"] == head
+
+
+def test_take_own_lock_recovers_residual(repo_pair, tmp_path):
+    """本槽位残留锁（模拟上次被 SIGTERM）→ --take-own-lock 自动挪移重取并完成。"""
+    locks = tmp_path / "work" / "_share" / ".locks"
+    r = subprocess.run([sys.executable, REAL_LOCK_TOOL, "acquire", "--slot", "collab",
+                        "--task", "上次被杀残留", "--lock-dir", str(locks)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0
+    msg = tmp_path / "post.md"
+    msg.write_text("**主题**：残留锁恢复\n", encoding="utf-8")
+
+    # 不带旗标：应当被拒（rc=2），板面不变
+    before = (tmp_path / "work" / "_share" / "讨论板.md").read_bytes()
+    assert bp.main(_post_args(repo_pair, msg)) == 2
+    assert (tmp_path / "work" / "_share" / "讨论板.md").read_bytes() == before
+
+    # 带旗标：自动挪移重取 → 成功
+    assert bp.main(_post_args(repo_pair, msg, take_own_lock=True)) == 0
+    board = (tmp_path / "work" / "_share" / "讨论板.md").read_text(encoding="utf-8")
+    assert "残留锁恢复" in board
+    assert list(locks.glob("*.lock")) == []
+    assert list((locks / "_retired").glob("collab.lock*"))  # 旧锁被挪移而非删除
 
 
 def test_push_conflict_keeps_commit_and_releases_lock(repo_pair, tmp_path,

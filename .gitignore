@@ -89,3 +89,8 @@ _reclone_tmp/
 # === R111：写入锁（同机机制，锁文件不入库；说明见 _share/.locks/README.md）===
 _share/.locks/*.lock
 _share/.locks/_retired/
+
+# === 协作线：测试临时目录（pytest --basetemp；F-R10 家族下用 git clean/rm 清理）===
+_tmp_pytest_collab/
+_pt_*/
+_share/.locks/*.post-journal.json

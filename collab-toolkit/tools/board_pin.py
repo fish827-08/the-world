@@ -141,6 +141,26 @@ def lock(args, *lock_args) -> subprocess.CompletedProcess:
                 args.root)
 
 
+def install_signal_guard() -> None:
+    """被杀兜底（F-R10 家族）：打印现场后退出；本工具全程不做删除动作。"""
+    import signal as _sig
+
+    def handler(signum, frame):
+        print()
+        print(f"[中断] 收到信号 {signum} —— 本机环境可能对进程级操作强制终止"
+              f"（F-R10 家族）")
+        print("       恢复: 重跑本命令（操作幂等）；若锁残留 → "
+              "`python tools/share_lock.py release --slot <slot>`（挪移，不删除）")
+        raise SystemExit(130)
+
+    for s in (getattr(_sig, "SIGTERM", None), getattr(_sig, "SIGINT", None)):
+        if s is not None:
+            try:
+                _sig.signal(s, handler)
+            except Exception:
+                pass
+
+
 def write_board(args, new_text: str) -> None:
     """写板：取锁 → 写 → 放锁（写失败也放锁）。"""
     acq = lock(args, "acquire", "--slot", args.slot, "--task", args.task,
@@ -293,6 +313,7 @@ def main(argv=None) -> int:
     p_rm.set_defaults(fn=cmd_remove)
 
     args = ap.parse_args(argv)
+    install_signal_guard()
     args.root = os.path.abspath(args.root)
     if args.board is None:
         args.board = os.path.join(args.root, "_share", "讨论板.md")

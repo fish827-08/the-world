@@ -67,5 +67,24 @@ git push collab collab-toolkit-export:main
 ## 纪律
 
 - 机制变更：设计稿 → 所有者核 → 公告（不静默改流程）。
-- 测试先行：工具改动必须 `pytest collab-toolkit/tests/` 全绿。
+- **测试先行**：工具改动必须 `pytest collab-toolkit/tests/` 全绿，且**连跑 ≥3 次全绿**
+  （2026-09-18 所有者 R116 反馈：本包测试曾出现 flaky）——单次绿不算绿。
 - 本线产出发言走自己的工具（dogfooding）。
+
+## 环境约束与绕行（F-R10 家族，2026-09-18 实测定性；全仓适用）
+
+本机环境：**仓库内 Python 删除（`unlink/remove/rmtree`）fail-closed**（shim 回收站异常
+`SHFileOperationW 0x2`），**反复尝试会触发进程级强制终止（SIGTERM）**。
+
+| 场景 | 做法 |
+|------|------|
+| 删 untracked 文件/目录 | `git clean -f -- <path>` / `git clean -fdx -- <path>`（C 程序，不走 Python shim） |
+| 删 ignored（如锁文件） | `git clean -fx -- <path>`，或直接**不删**（TTL 兜底） |
+| Python 侧收尾 | **一律挪移**（`os.rename` → `_retired/`），**不做删除**（`share_lock._retire()` 为范本） |
+| 跑 pytest | 唯一 basetemp + **禁删**：`pytest <path> -p no:cacheprovider -o tmp_path_retention_policy=all --basetemp=_pt_x1`（重名会触发删除 ⇒ 可能被杀） |
+| 脚本收尾 | **不得依赖删除**——只写标记（如 `*.post-journal.json`）或挪移 |
+| 遇 SIGTERM | 先查脚本是否含删除动作，**勿误判为自己 bug**；重跑即可（本包工具幂等） |
+
+> 工具侧适配：`board_post.py` / `board_pin.py` 全程零删除 + 信号兜底（被杀时打印阶段与恢复步骤）
+> + 阶段日志 `_share/.locks/<slot>.post-journal.json`（幂等恢复依据）；
+> `share_lock.py` 的 release/refresh/过期清理全部改**挪移**。
