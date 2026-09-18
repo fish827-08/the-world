@@ -355,6 +355,19 @@ class OracleConfig:
     # 校准臂登记（R100 条件 5「机器强制拒收」+ R103 §二.2）。
     # 未登记而 `m ≠ 1` ⇒ **硬失败**；标了旗而 `m == 1` 亦报错（m=1 属科学臂，防登记口径漂移）。
     is_calibration_arm: bool = False
+    # ---- R123/B② 门控臂（2026-09-18 实施；R122 移交清单 #3）----
+    # 动机（内评交叉核验 §一 判定 `[云端开发]` 质疑**成立**）：现付款条件 `sel = true_sig`
+    # **不引用**"接收者的选择是否被信号改变" ⇒ 阳性可能是"食物占位"（谁站在猎物旁谁收款）。
+    # 本档把 D-18 ⑥ 探针**已算**的反事实 Δ_i 接成付款闸：`ok = ... & (Δ_i > 0)`。
+    #   · `gate_delta="content"`（**默认、付款闸口径**）= 只去**内容项** `0.4*perc*interp`、
+    #     **保留存在性项** `sp*sig_weight` ⇒ 闸门问的是"**内容**是否有用"。若用 `full`，
+    #     闸门会被"信标"穿透（存在性单独就够引路）⇒ 重演本要修的问题（本板 23:37 帖 §三）。
+    #   · `gate_delta="full"` = 去掉存在性 + 内容（现探针口径）⇒ 并列报告用。
+    # ⚠️ 门控臂是**仪器**（改付款规则、不改机制语义）⇒ 必须 `is_calibration_arm=True`（R100 条件 5），
+    #    且必须同时开 `measure_signal_response` + 信息不对称路径（否则 Δ≡0 ⇒ **付款全消失**，
+    #    看起来像"信号无用"的**假结论**——比没有数据更坏）。三处齐发硬失败（config/引擎/a4）。
+    gate_mode: str = "none"            # "none"（默认=现状）/ "delta_positive"（门控臂）
+    gate_delta: str = "content"        # "content"（付款闸推荐）/ "full"
 
     def __post_init__(self) -> None:
         assert self.donation >= 0, "donation 非负"
@@ -362,6 +375,18 @@ class OracleConfig:
         assert self.gain_multiplier >= 1.0, (
             f"gain_multiplier({self.gain_multiplier}) 不得 < 1.0：增益档只**放宽上限**，不收紧"
         )
+        # ---- R123/B② 门控臂：字段自洽（跨字段检查在 SimConfig 侧 + 引擎入口 + a4）----
+        assert self.gate_mode in ("none", "delta_positive"), (
+            f"gate_mode 非法：{self.gate_mode!r}（只支持 none / delta_positive）"
+        )
+        assert self.gate_delta in ("content", "full"), (
+            f"gate_delta 非法：{self.gate_delta!r}（只支持 content / full）"
+        )
+        if self.gate_mode == "delta_positive":
+            assert self.is_calibration_arm, (
+                "门控臂是仪器（改付款规则、不改机制语义）⇒ 必须登记 "
+                "is_calibration_arm=True（R100 条件 5：校准臂不进科学判定）"
+            )
         # ---- C5 v2 规格自洽（增益档版；2026-09-16）----
         # 三态：① 科学臂（m=1）保持原语义；② 校准臂（m>1）必须登记且 m 落在区间内；
         #      ③ 未登记而 m≠1 / 标旗而 m=1 ⇒ 一律硬失败（防"校准档静默混入科学判读"）。
@@ -454,7 +479,9 @@ class FruitConfig:
 SIGNAL_ALPHABET_STATES: dict[str, int] = {"16": 16, "4": 4, "8": 8}
 SIGNAL_ALPHABET_CODE_MAX: dict[str, int] = {"16": 15, "4": 4, "8": 8}
 # 已落地实现的档位；其余在 config 构造/引擎初始化时**硬失败**（不静默降级，教训 2）
-SIGNAL_ALPHABET_IMPLEMENTED: tuple[str, ...] = ("16", "4")
+# 已落地实现的档位；其余在 config 构造/引擎初始化时**硬失败**（不静默降级，教训 2）
+#   `"8"`（B③ 记忆位，R123 2026-09-18 实施）：`code = e_bin*2 + mem_bit + 1` ⇒ 码域 **1–8**
+SIGNAL_ALPHABET_IMPLEMENTED: tuple[str, ...] = ("16", "4", "8")
 
 
 @dataclass

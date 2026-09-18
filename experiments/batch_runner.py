@@ -376,6 +376,26 @@ PRESETS = {
                  template="_rerun_logs/cstep3alpha/a4_s{seed}.csv"),
         ],
     ),
+    # R123/B② 门控臂对照批（**待令启动**）：现状付款 vs 门控付款（Δ_content）同批、同 seed。
+    #   目的：直接测度"蹭归因占比"（= gate_block / arrivals），并给"只计真通信时是否仍有阳性"
+    #   留数据。⚠️ 门控臂是**仪器** ⇒ `--calibration-arm` 必带（R100 条件 5）。
+    "cstep3gate": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "ticks=12000", "max-count=3240",
+               "snapshot-every=2000", "snapshot-dir=_rerun_logs/cstep_snap3"],
+        variants=[
+            dict(name="ungated",
+                 args=["arm=oracle", "donation=1.0", "gain-multiplier=1.3",
+                       "calibration-arm", "gate-mode=none"],
+                 template="_rerun_logs/cstep3gate/ungated_s{seed}.csv"),
+            dict(name="gated",
+                 args=["arm=oracle", "donation=1.0", "gain-multiplier=1.3",
+                       "calibration-arm", "gate-mode=delta_positive",
+                       "gate-delta=content"],
+                 template="_rerun_logs/cstep3gate/gated_s{seed}.csv"),
+        ],
+    ),
 }
 
 

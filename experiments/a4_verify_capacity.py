@@ -68,7 +68,8 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           gain_multiplier: float | None = None,
           calibration_arm: bool = False,
           signal_mode: str | None = None,
-          signal_alphabet: str | None = None) -> SphereEngine:
+          signal_alphabet: str | None = None,
+          gate_mode: str | None = None, gate_delta: str | None = None) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -119,6 +120,19 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     if signal_mode is not None:
         c.signal_mode = str(signal_mode)
     # R113/R121 信号字母表（默认 "16" = 现状；"4" = 仅能量 2 位）
+    # R123/B② 门控臂（付款闸；仪器 ⇒ 必须登记校准臂）
+    if gate_mode is not None:
+        c.oracle.gate_mode = str(gate_mode)
+    if gate_delta is not None:
+        c.oracle.gate_delta = str(gate_delta)
+    if c.oracle.gate_mode == "delta_positive" and not c.oracle.is_calibration_arm:
+        raise SystemExit(
+            "门控臂是仪器（改付款规则）⇒ 必须同时给 --calibration-arm（R100 条件 5）"
+        )
+    if c.oracle.gate_mode == "delta_positive" and not c.info_structure.measure_signal_response:
+        raise SystemExit(
+            "门控臂需要 measure_signal_response=True（否则 Δ≡0 ⇒ 付款全消失 = 假结论源）"
+        )
     if signal_alphabet is not None:
         _sa = str(signal_alphabet)
         if _sa not in SIGNAL_ALPHABET_IMPLEMENTED:
@@ -180,6 +194,14 @@ def main() -> None:
                     choices=["state", "random", "evolved"],
                     help="覆盖 signal_mode；`random` = 信号与个体状态无关（**无信息**）"
                          "⇒ 供 R100 条件 7「随机信号自检」用")
+    ap.add_argument("--gate-mode", dest="gate_mode", default=None,
+                    choices=["none", "delta_positive"],
+                    help="R123/B② 门控臂：付款闸 = 只对 Δ_i>0 的到达付款（**仪器**，"
+                         "须与 --calibration-arm 同用）")
+    ap.add_argument("--gate-delta", dest="gate_delta", default=None,
+                    choices=["content", "full"],
+                    help="Δ 口径：content=只去**内容项**（保留存在性项，**付款闸推荐**）；"
+                         "full=去两项（现探针口径）")
     ap.add_argument("--signal-alphabet", dest="signal_alphabet", default=None,
                     choices=list(SIGNAL_ALPHABET_IMPLEMENTED),
                     help='信号字母表档位（R113/R121）："16"=现状 4 位（默认）；'
@@ -245,12 +267,18 @@ def main() -> None:
                   gain_multiplier=args.gain_multiplier,
                   calibration_arm=bool(args.calibration_arm),
                   signal_mode=args.signal_mode,
-                  signal_alphabet=args.signal_alphabet)
+                  signal_alphabet=args.signal_alphabet,
+                  gate_mode=args.gate_mode, gate_delta=args.gate_delta)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
         # R121 §3.1 + C4 读回：续跑时配置**由快照自带** ⇒ 命令行若另给档位而快照不同，
         # 必须**硬失败**而非静默忽略（F-R21/C5 同族：传了开关却没生效）
+        if (args.gate_mode is not None or args.gate_delta is not None) and arm != "oracle":
+            raise SystemExit(
+                f"--gate-mode/--gate-delta 仅在 --arm oracle 下生效（当前 arm={arm!r}）"
+                "——请勿静默传参"
+            )
         if args.signal_alphabet is not None and (
             str(args.signal_alphabet) != str(e.config.signal_alphabet)
         ):
@@ -369,6 +397,9 @@ def main() -> None:
             "signal_mode": str(e.config.signal_mode),
             # R113/R121 C4 读回：字母表档位（必须与命令行/预注册一致；跨档不可比）
             "signal_alphabet": str(e.config.signal_alphabet),
+            # R123/B② C4 读回：门控臂档位（仪器参数必须可核对，防"传了没生效"）
+            "oracle_gate_mode": str(e.config.oracle.gate_mode),
+            "oracle_gate_delta": str(e.config.oracle.gate_delta),
         },
         "result": {
             # ⚠️ 必须用引擎真实 tick，不能用 last（=最后一次【采样】的 tick）：

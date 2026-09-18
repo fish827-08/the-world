@@ -312,18 +312,27 @@ def test_convergence_default_matches_legacy_16():
 # ─── 9. 守卫：正反向各一 ───────────────────────────────────────────────
 
 def test_alphabet_guards_positive_and_negative():
-    # 反向①：未实施档位 ⇒ 构造期硬失败（不静默降级）
-    cfg8 = SimConfig(seed=1)
-    cfg8.signal_alphabet = "8"
-    cfg8.simulation.use_sim_core = False
+    # 反向①：**真正未实施**的档位 ⇒ 构造期硬失败（不静默降级）
+    # ⚠️ 2026-09-18 更新：原用 "8" 作反例，但 "8" 已随 R123 实施 ⇒ 改用 "32"
+    cfg32 = SimConfig(seed=1)
+    cfg32.signal_alphabet = "32"
+    cfg32.simulation.use_sim_core = False
     with pytest.raises(NotImplementedError):
-        SphereEngine(cfg8)
+        SphereEngine(cfg32)
     with pytest.raises(NotImplementedError):
-        codebook_init_rows(3, "8")
+        codebook_init_rows(3, "32")
     with pytest.raises(NotImplementedError):
         encode_signal_states(np.ones(1), np.ones(1), np.ones(1), np.ones(1, dtype=np.int64),
                              np.zeros(1, dtype=np.int64), np.zeros(1, dtype=np.int64),
-                             10.0, "8")
+                             10.0, "32")
+
+    # 正向①bis："8" 档（R123）现在**必须可用**且守卫全绿
+    e8 = _make_engine("8")
+    for _ in range(20):
+        e8.step()
+    s8x = e8.alphabet_stats()
+    assert s8x["signal_alphabet"] == "8" and s8x["code_max"] == 8
+    assert s8x["guard_expected_zero"] is True and s8x["bad_code_n"] == 0
 
     # 正向①："4" 档 bad_code_n 恒 0 且守卫标记为"期望为 0"
     e4 = _make_engine("4")
@@ -390,7 +399,9 @@ def test_runner_build_rejects_unimplemented_alphabet():
     from experiments.a4_verify_capacity import build
 
     with pytest.raises(SystemExit):
-        build("on", True, 42, 100, signal_alphabet="8")
+        build("on", True, 42, 100, signal_alphabet="32")   # "8" 已实施 ⇒ 改用真正未实施档
+    e8 = build("on", True, 42, 100, signal_alphabet="8")
+    assert e8.config.signal_alphabet == "8", '"8" 档（R123）必须被 build 接受'
     e4 = build("on", True, 42, 100, signal_alphabet="4")
     assert e4.config.signal_alphabet == "4"
     e16 = build("on", True, 42, 100)

@@ -94,6 +94,7 @@ def encode_signal_states(
     emitters: NDArray[np.int64],
     max_energy: float,
     alphabet: str,
+    work_memory: NDArray[np.int64] | None = None,
 ) -> tuple[NDArray[np.int64], int]:
     """按 `signal_alphabet` 档位把**发射者状态**编码为 `(state, code_offset)`。
 
@@ -119,6 +120,18 @@ def encode_signal_states(
         return (e_bin * 4 + f_bit * 2 + n_bit).astype(np.int64), 0
     if alphabet == "4":
         return e_bin.astype(np.int64), 1
+    if alphabet == "8":
+        # B③（R123 2026-09-18 实施）：能量档 2 位 + **记忆位** 1 位
+        #   `mem_bit = 1` ⟺ 发射者**当前格**在其 `_work_memory` 中（"此地是我记忆中的食物点"）。
+        #   为什么这是"真信息增量"：内评已证**唯一私有位是 e_bin**（其余位接收者能直读或零增量），
+        #   而**记忆是接收者完全无法直读的个体历史**（可含感知半径 4 之外的格位）⇒ 该位首次让
+        #   信号内容带上"新信息"（设计稿 §5.1，本板 23:37 帖 §四 的构造版论证）。
+        if work_memory is None:
+            raise ValueError(
+                'signal_alphabet="8" 需要 work_memory（记忆位 mem_bit 的输入）——收到 None'
+            )
+        mem_hit = (work_memory[emitters] == e_flat[:, None]).any(axis=1).astype(np.int64)
+        return (e_bin * 2 + mem_hit).astype(np.int64), 1
     raise NotImplementedError(
         f"signal_alphabet={alphabet!r} 的编码尚未实施"
         f"（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
@@ -200,6 +213,12 @@ class SphereEngine:
         "_oracle_transfers", "_oracle_count",
         "_resp_decisions", "_resp_exposed", "_resp_delta_sum", "_resp_flip",
         "_measure_resp", "_oracle_on",
+        # ---- R123/B② 门控臂（付款闸用逐个体 Δ；纯观测计数）----
+        "_delta_full_by_id", "_delta_content_by_id", "_delta_tick_by_id",
+        "_gate_on", "_gate_delta",
+        "_diag_gate_pass", "_diag_gate_block",
+        "_gate_arrivals", "_gate_delta_full_sum", "_gate_delta_content_sum",
+        "_resp_delta_content_sum",
         # ---- D-26a：oracle 四环节诊断漏斗（纯观测计数，D-24 G-A 不过后定位瓶颈）----
         # 内评 _eval/D24判读预析 §4.1：分开记 ①发射 ②归因成功 ③true_sig ④实际转移，
         # 否则只有聚合 return_ratio、不知道卡在哪一环。仅在 oracle 开启时累加。
@@ -437,8 +456,41 @@ class SphereEngine:
         self._resp_exposed = 0
         self._resp_delta_sum = 0.0
         self._resp_flip = 0
+        self._resp_delta_content_sum = 0.0   # R123：内容项单去的 Δ_content 累计（并列报告）
         self._measure_resp = bool(config.info_structure.measure_signal_response)
         self._oracle_on = bool(config.oracle.enabled)
+        # R123/B② 门控臂：逐个体 Δ（**按 _id 键控**——死亡压缩会重排槽位，禁槽位键控）；
+        # `_delta_tick_by_id` 记"该 Δ 属于哪一 tick" ⇒ 付款时要求 `== 本 tick`，
+        # **免去每 tick 复位**且杜绝"陈旧正值误触发付款"（静默错型）。
+        self._delta_full_by_id = z(np.float32)
+        self._delta_content_by_id = z(np.float32)
+        self._delta_tick_by_id = np.full(n, -1, dtype=np.int32)
+        self._gate_on = False
+        self._gate_delta = str(config.oracle.gate_delta)
+        self._diag_gate_pass = 0
+        self._diag_gate_block = 0
+        self._gate_arrivals = 0
+        self._gate_delta_full_sum = 0.0
+        self._gate_delta_content_sum = 0.0
+        # ---- 门控臂守卫（三处齐发之一；另两处 = config.__post_init__ / a4 build）----
+        if str(config.oracle.gate_mode) == "delta_positive":
+            if not self._oracle_on:
+                raise ValueError("门控臂需要 oracle.enabled=True（否则根本无付款可闸）")
+            if not self._measure_resp:
+                raise ValueError(
+                    "门控臂需要 info_structure.measure_signal_response=True —— 否则 Δ≡0 "
+                    "⇒ **所有付款消失**（ratio=0），会被读成「信号无用」的**假结论**（比没数据更坏）"
+                )
+            _ifc = config.info_structure
+            if not (_ifc.enabled and _ifc.perception_radius == 4 and _ifc.softmax_tau > 0):
+                raise ValueError(
+                    "门控臂的 Δ 由 ⑥ 探针产生，而探针只存在于**信息不对称路径**"
+                    "（enabled ∧ perception_radius=4 ∧ softmax_tau>0）的 softmax 分支里 "
+                    "⇒ 该组合下 Δ 恒为 0（同上假结论）"
+                )
+            if not config.oracle.is_calibration_arm:
+                raise ValueError("门控臂是仪器（改付款规则）⇒ 必须登记 is_calibration_arm=True")
+            self._gate_on = True
         # D-26a 四环节诊断累计器（纯观测；oracle off 时恒零且不累加）
         self._diag_had_sig = 0        # 移动者落点"有信号"的次数
         self._diag_true_sig = 0       # 其中落点同时"有食物"（oracle 选中的语义）
@@ -880,6 +932,7 @@ class SphereEngine:
                         state, _code_offset = encode_signal_states(
                             energy, self.resources._grid, self.resources._capacity,
                             occ, e_flat, emitters, ocfg.max_energy, self._alpha,
+                            work_memory=self._work_memory,   # B③："8" 档的记忆位输入
                         )
                         # ⚠️ 本行曾被我 2026-09-18 的重写误删（UnboundLocalError 当场暴露）
                         ifcfg = self.config.info_structure
@@ -1084,9 +1137,22 @@ class SphereEngine:
                                 )
                                 probs_wo = exp_w / exp_w.sum()
                                 self._resp_exposed += 1
-                                self._resp_delta_sum += float(
-                                    probs[chosen] - probs_wo[chosen]
+                                d_full = float(probs[chosen] - probs_wo[chosen])
+                                self._resp_delta_sum += d_full
+                                # R123/B②：**内容项单去**的反事实（保留存在性项）⇒ Δ_content。
+                                # `score` 此刻 = ... + 0.4*perc*interp，故减去该行即"无内容"。
+                                score_woc = score - 0.4 * perc * interp
+                                exp_c = np.exp(
+                                    (score_woc - score_woc.max()) / ifcfg3.softmax_tau
                                 )
+                                probs_woc = exp_c / exp_c.sum()
+                                d_content = float(probs[chosen] - probs_woc[chosen])
+                                self._resp_delta_content_sum += d_content
+                                # 逐个体 Δ（按 _id 键控；供付款闸读取）
+                                _iid = int(self._id[idx])
+                                self._delta_full_by_id[_iid] = d_full
+                                self._delta_content_by_id[_iid] = d_content
+                                self._delta_tick_by_id[_iid] = self._tick
                                 if int(np.argmax(score_wo)) != int(np.argmax(score)):
                                     self._resp_flip += 1
                     elif score.max() - score.min() < 1e-9:
@@ -1556,6 +1622,12 @@ class SphereEngine:
         self._rs_cohort = np.concatenate([self._rs_cohort, z(np.uint8)])
         self._emit_count = np.concatenate([self._emit_count, z(np.int32)])
         self._oracle_gain = np.concatenate([self._oracle_gain, z(np.float32)])
+        # R123/B②：门控臂逐个体 Δ（新个体两数组补零、tick 补 -1 ⇒ "本 tick 未参与决策"）
+        self._delta_full_by_id = np.concatenate([self._delta_full_by_id, z(np.float32)])
+        self._delta_content_by_id = np.concatenate(
+            [self._delta_content_by_id, z(np.float32)])
+        _nt = np.full(k, -1, dtype=np.int32)
+        self._delta_tick_by_id = np.concatenate([self._delta_tick_by_id, _nt])
 
     def _observe_selection_cohort(self) -> None:
         """D-17 ⑤：给"首次出现在某窗口的存活个体"记一行观测（预注册口径）。
@@ -1626,6 +1698,26 @@ class SphereEngine:
         self._diag_in_window += int((found & win).sum())
         self._diag_not_self += int((found & win & (s_ids != r_id)).sum())
         self._diag_budget_ok += int((found & win & (s_ids != r_id) & (budget > 0)).sum())
+        # ---- R123/B② 门控臂：只对"**选择确实被信号改变**"（Δ>0）的到达付款 ----
+        # 计数含义：`gate_pass` = 通过闸（可付款）；`gate_block` = 被拦 ⇒
+        #   **蹭归因占比 = block / arrivals**（"碰巧来/信标引路但内容无用"在全部到达中的份额）。
+        if self._gate_on:
+            _arr = found & win & (s_ids != r_id) & (budget > 0)
+            if _arr.any():
+                _rid = r_id[_arr]
+                _fresh = self._delta_tick_by_id[_rid] == self._tick
+                _df = np.where(_fresh, self._delta_full_by_id[_rid], 0.0)
+                _dc = np.where(_fresh, self._delta_content_by_id[_rid], 0.0)
+                self._gate_arrivals += int(_arr.sum())
+                self._gate_delta_full_sum += float(_df.sum())
+                self._gate_delta_content_sum += float(_dc.sum())
+                _sel_d = _dc if self._gate_delta == "content" else _df
+                _pass = _sel_d > 0.0
+                self._diag_gate_pass += int(_pass.sum())
+                self._diag_gate_block += int((~_pass).sum())
+                _g = np.zeros_like(ok)
+                _g[np.flatnonzero(_arr)] = _pass
+                ok = ok & _g
         if not ok.any():
             return
         led: dict = {}
@@ -1673,11 +1765,14 @@ class SphereEngine:
         exp_ = int(self._resp_exposed)
         a = (exp_ / dec) if dec else 0.0
         b = (self._resp_delta_sum / exp_) if exp_ else 0.0
+        b_content = (self._resp_delta_content_sum / exp_) if exp_ else 0.0
         return {
             "decisions": dec,
             "exposed": exp_,
             "resp_a_exposure": round(float(a), 6),
             "resp_b_delta": round(float(b), 6),
+            # R123/B②：**内容项单去**的 Δ（付款闸口径；`resp_b_delta` = 两项全去）
+            "resp_b_content_delta": round(float(b_content), 6),
             "resp_triple": round(float(a * b), 6),
             "argmax_flip_rate": round(
                 float(self._resp_flip / exp_) if exp_ else 0.0, 6
@@ -1749,6 +1844,26 @@ class SphereEngine:
                     if self._diag_true_sig else 0.0
                 ),
                 "band": f"(food_threshold, {FOOD_RICH_LEVEL}]",
+            },
+            # R123/B② 门控臂读数（仪器段；gate off 时 mode="none" 且计数恒 0）
+            "gate": {
+                "mode": ("delta_positive" if self._gate_on else "none"),
+                "delta_metric": (self._gate_delta if self._gate_on else None),
+                "arrivals": int(self._gate_arrivals),
+                "pass": int(self._diag_gate_pass),
+                "block": int(self._diag_gate_block),
+                "block_frac": (
+                    round(self._diag_gate_block / self._gate_arrivals, 6)
+                    if self._gate_arrivals else 0.0
+                ),
+                "mean_delta_full_at_arrivals": (
+                    round(self._gate_delta_full_sum / self._gate_arrivals, 6)
+                    if self._gate_arrivals else 0.0
+                ),
+                "mean_delta_content_at_arrivals": (
+                    round(self._gate_delta_content_sum / self._gate_arrivals, 6)
+                    if self._gate_arrivals else 0.0
+                ),
             },
         }
 
@@ -1852,6 +1967,9 @@ class SphereEngine:
             "attrib_found": self._diag_attrib_found,
             "in_window": self._diag_in_window,
             "not_self": self._diag_not_self,
+            # R123/B② 门控臂（gate off 时恒 0）：`gate_positive` = 闸门放行；`gate_block` = 被拦
+            "gate_positive": self._diag_gate_pass,
+            "gate_block": self._diag_gate_block,
             "budget_ok": self._diag_budget_ok,
             "applied": ap,
             "sel_to_applied": round(ap / self._diag_sel, 6) if self._diag_sel else 0.0,
@@ -2145,6 +2263,15 @@ class SphereEngine:
             data["rs_cohort"] = self._rs_cohort.copy()
             data["emit_count"] = self._emit_count.copy()
             data["oracle_gain"] = self._oracle_gain.copy()
+            # R123/B②：门控臂的逐个体 Δ 与计数（旧快照无此键 ⇒ 载入侧回退）
+            data["delta_full_by_id"] = self._delta_full_by_id.copy()
+            data["delta_content_by_id"] = self._delta_content_by_id.copy()
+            data["delta_tick_by_id"] = self._delta_tick_by_id.copy()
+            data["gate_counters"] = np.array(
+                [self._diag_gate_pass, self._diag_gate_block, self._gate_arrivals,
+                 self._gate_delta_full_sum, self._gate_delta_content_sum],
+                dtype=np.float64,
+            )
         # D-26a 四环节诊断计数（oracle off 时恒零，仍随快照走以保证续跑后累计不失真）
         data["diag_funnel"] = np.array(
             [
@@ -2319,6 +2446,26 @@ class SphereEngine:
             engine._rs_cohort = data["rs_cohort"].copy()
             engine._emit_count = data["emit_count"].copy()
             engine._oracle_gain = data["oracle_gain"].copy()
+            # R123/B②：门控臂状态（旧快照缺键 ⇒ 按零/未变处理，不静默错位）
+            for _k, _attr, _dt in (
+                ("delta_full_by_id", "_delta_full_by_id", np.float32),
+                ("delta_content_by_id", "_delta_content_by_id", np.float32),
+                ("delta_tick_by_id", "_delta_tick_by_id", np.int32),
+            ):
+                if _k in data:
+                    setattr(engine, _attr, data[_k].copy())
+                else:
+                    _arr = np.zeros(int(engine._next_id), dtype=_dt)
+                    if _dt is np.int32:
+                        _arr[:] = -1
+                    setattr(engine, _attr, _arr)
+            if "gate_counters" in data:
+                _gc = data["gate_counters"]
+                (engine._diag_gate_pass, engine._diag_gate_block, engine._gate_arrivals,
+                 engine._gate_delta_full_sum, engine._gate_delta_content_sum) = (
+                    int(_gc[0]), int(_gc[1]), int(_gc[2]), float(_gc[3]), float(_gc[4]))
+            engine._gate_on = bool(engine.config.oracle.gate_mode == "delta_positive")
+            engine._gate_delta = str(engine.config.oracle.gate_delta)
         else:
             # 旧快照（无探针数组）：_id 键控账本扩到 _next_id（全零 = 未观测/未发射）
             need = int(engine._next_id) - len(engine._rs_children)
