@@ -1,0 +1,54 @@
+{
+  "_doc": "C8 前提对账声明（R127，2026-09-19）。键 = preset 名。items[].kind ∈ {preset_arg_equals, capacity_lat_r2_max, summary_switches_equals}。retrospective=true ⇒ 事后登记（用于验证『C8 本可拦住历史批次』），其 FAIL 不影响退出码但在报告中标红。",
+  "cstep3patchy": {
+    "science_question": "patchy 世界（食物成斑块）下，信号内容（含 \"8\" 档 mem_bit）是否有方向性效应 —— 即『信息是否有价值』这一前提本身是否成立",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "本批问的正是 patchy 世界；若实际跑 uniform ⇒ 信息价值≈0 ⇒ 前提不成立（= C1a/C1b/C2/α/gate/α8 的原事故）"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "容量若几乎全由纬度解释 ⇒ 食物位置可预测 ⇒『知道』不比『看到』多 ⇒ 信息价值≈0 ⇒ 一切『信息价值』类判读前提不成立"
+      }
+    ]
+  },
+  "cstep3alpha8": {
+    "science_question": "uniform 世界下 \"8\" 档（记忆位）是否有方向性效应",
+    "retrospective": true,
+    "items": [
+      {
+        "id": "dist_is_uniform",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "uniform",
+        "default": "uniform",
+        "why": "该批实际口径（当时 distribution 在 a4 里硬编码为 uniform，无 CLI）—— 用于固定历史事实"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "distribution": "uniform",
+        "why": "**事后登记**：该批跑在 uniform（lat_r2 = 1.000）⇒ 本项 FAIL ⇒ 这就是『为何所有信息价值类读数都是 null』的前提性原因（C8 本可拦住）"
+      }
+    ]
+  },
+  "cstep3gate": {
+    "science_question": "付款闸（Δ_content）能否把『蹭归因』从阳性里剥离（仪器构念问题，非信息价值）",
+    "items": [
+      {
+        "id": "gate_is_on_for_gated_arm",
+        "kind": "preset_arg_equals",
+        "key": "gate-mode",
+        "value": "delta_positive",
+        "why": "门控臂必须真开门；否则该臂 = 对照臂（构念未改动）"
+      }
+    ]
+  }
+}

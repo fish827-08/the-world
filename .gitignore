@@ -19,6 +19,10 @@ results/
 *.csv
 *.json
 !pyproject.toml
+# 🔴 例外（2026-09-19，R127 C8）：`experiments/prerequisites.json` 是**手写的源文件**
+# （每批的机器可读前提声明），不是跑批产物 ⇒ 必须入库。
+# ⚠️ 负向规则**必须写在 `*.json` 之后**（后来者胜）——本项目在 D-23a 已为此付过学费。
+!experiments/prerequisites.json
 
 # 前端
 node_modules/
