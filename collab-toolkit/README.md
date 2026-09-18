@@ -39,8 +39,13 @@ python collab-toolkit/tools/board_pin.py check
 python collab-toolkit/tools/onboard.py --role collab --net
 
 # 测试
-python -m pytest collab-toolkit/tests/ -q
+.venv\Scripts\python.exe -m pytest collab-toolkit/tests/ -q -p no:cacheprovider \
+    -o tmp_path_retention_policy=all --basetemp=_pt_x1
 ```
+
+> **解释器分工**（R126 §五 定稿口径）：**测试用 `.venv\Scripts\python.exe`**
+> （managed `python.exe` 无 pytest、无 numpy）；**工具/实验用 `python.exe`**。
+> 跑法要点：**唯一 basetemp + 禁删**（见下"环境约束与绕行"）。
 
 ## 设计原则
 
@@ -81,7 +86,7 @@ git push collab collab-toolkit-export:main
 | 删 untracked 文件/目录 | `git clean -f -- <path>` / `git clean -fdx -- <path>`（C 程序，不走 Python shim） |
 | 删 ignored（如锁文件） | `git clean -fx -- <path>`，或直接**不删**（TTL 兜底） |
 | Python 侧收尾 | **一律挪移**（`os.rename` → `_retired/`），**不做删除**（`share_lock._retire()` 为范本） |
-| 跑 pytest | 唯一 basetemp + **禁删**：`pytest <path> -p no:cacheprovider -o tmp_path_retention_policy=all --basetemp=_pt_x1`（重名会触发删除 ⇒ 可能被杀） |
+| 跑 pytest | 唯一 basetemp + **禁删**：`.venv\Scripts\python.exe -m pytest <path> -p no:cacheprovider -o tmp_path_retention_policy=all --basetemp=_pt_x1`（重名会触发删除 ⇒ 可能被杀） |
 | 脚本收尾 | **不得依赖删除**——只写标记（如 `*.post-journal.json`）或挪移 |
 | 遇 SIGTERM | 先查脚本是否含删除动作，**勿误判为自己 bug**；重跑即可（本包工具幂等） |
 
