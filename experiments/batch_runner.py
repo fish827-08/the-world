@@ -396,6 +396,34 @@ PRESETS = {
                  template="_rerun_logs/cstep3gate/gated_s{seed}.csv"),
         ],
     ),
+    # β（`"8"` 档 B③ 记忆位）：**信号里第一次携带接收者读不到的信息** ⇒ 是否出现方向性选择压？
+    # ------------------------------------------------------------------
+    # 🔴 科学问题（R125 / 内评）：`"8"` 档 `state = e_bin*2 + mem_bit`，其中 `mem_bit`
+    #    标记「发送者**当前格**在它自己的 `_work_memory` 里」—— 而记忆可含**半径 4 之外**的格位
+    #    ⇒ 这是**唯一**接收者无法直读、也不与直读冗余的信号内容（`n_bit`/`f_bit` 均为冗余）。
+    # 🔴 为什么与 `"4"` 同批：字母表是**纪元变更**（R113/R121：跨批 `ratio`/`codebook_conv` 不可比）
+    #    ⇒ 因果结论只能在**同批内**用可逆开关取；`"4"` = α 批后的**新纪元基线**。
+    # 🔴 为什么 **12k**（不是 α 的 8k）：α 批实测 **8k 区制不可分**（饱和度重叠），
+    #    ρ 判读需终态 N 可分层 ⇒ 12k（`N`: SAT≥2715 vs PRED≤1522，09-18 实测分离）。
+    # 🔴 为什么 **main 臂**（非 oracle）：本批问的是**科学臂**里记忆位有没有用；
+    #    oracle 通道与 `"8"` 档的因果问题正交，且 oracle 臂慢 2.4×（成本）。
+    # ⚠️ 臂名用 `b4`/`b8` + 独立快照目录 `cstep_snap8`：**防止与 α/gate 批的快照名冲突**
+    #    （`cstep_snap3` 已有 48 个快照：a16/a4/gated/ungated × 12；快照名 = `<臂名>_s<seed>`）。
+    # ⚠️ `donation` 不得进 `fixed`（非 oracle 臂收到 oracle 专属参数 ⇒ a4 硬失败；C1a 首跑实测）。
+    # 成本：α 批实测 12 run × 8k = 26.4 min（main 臂）⇒ 12k 外推 ≈ **40 min**（35–55 区间）。
+    "cstep3alpha8": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap8"],
+        variants=[
+            dict(name="b4", args=["signal-alphabet=4"],
+                 template="_rerun_logs/cstep3alpha8/b4_s{seed}.csv"),
+            dict(name="b8", args=["signal-alphabet=8"],
+                 template="_rerun_logs/cstep3alpha8/a8_s{seed}.csv"),
+        ],
+    ),
 }
 
 
