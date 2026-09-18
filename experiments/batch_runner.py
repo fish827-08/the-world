@@ -424,6 +424,32 @@ PRESETS = {
                  template="_rerun_logs/cstep3alpha8/a8_s{seed}.csv"),
         ],
     ),
+    # γ（R127/C8）：**在"信息有价值"的世界里重测信号内容效应** —— patchy 侧（2×2 的另一格）
+    # ------------------------------------------------------------------
+    # 🔴 为什么必须跑这一批：`[实测]` 冒烟（2026-09-19 02:3x）证明
+    #    **uniform 世界下「纬度」100% 解释了容量（R²=1.000）** ⇒ 位置完全可预测 ⇒ **信息价值 = 0**
+    #    ⇒ C1a/C1b/C2/α/gate/α8 全部跑在"测信息价值 = 0"的世界里（R127 C8 首例事故）
+    #    而 **patchy 下纬度只解释 31.7%**（不可解释 68.3%）⇒ 经度方向有真信息 ⇒ 前提成立。
+    # 🔴 为什么是 2×2 的另一格：本批用 `distribution=patchy` × {`"4"`,`"8"`}，
+    #    与 **α8（uniform × {`"4"`,`"8"`}，12k，已完成）** 同 tick / 同 seed / 同臂
+    #    ⇒ 直接构成 `distribution × alphabet` 的 **2×2**，**α8 的数据不必重跑**（省一半机时）。
+    # ⚠️ 臂名 `p4`/`p8` + 独立快照目录 `cstep_snap9`：防与 a16/a4/gated/ungated/b4/a8 快照名冲突。
+    # ⚠️ 已过前提冒烟（R127 §12.2.1）：C4 读回 ✓ / C8 前提 ✓ / 200 tick 生态存活 ✓（N=82）。
+    # 成本：α8 实测 12 run × 12k = 35.6 min；patchy 生态可能更脆（早崩更快）⇒ 估 **30–45 min**。
+    "cstep3patchy": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap9",
+               "distribution=patchy"],
+        variants=[
+            dict(name="p4", args=["signal-alphabet=4"],
+                 template="_rerun_logs/cstep3patchy/p4_s{seed}.csv"),
+            dict(name="p8", args=["signal-alphabet=8"],
+                 template="_rerun_logs/cstep3patchy/p8_s{seed}.csv"),
+        ],
+    ),
 }
 
 

@@ -69,14 +69,20 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           calibration_arm: bool = False,
           signal_mode: str | None = None,
           signal_alphabet: str | None = None,
-          gate_mode: str | None = None, gate_delta: str | None = None) -> SphereEngine:
+          gate_mode: str | None = None, gate_delta: str | None = None,
+          distribution: str | None = None) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
     c.simulation.history_limit = 100           # 环形缓冲，限内存（不改变语义）
     c.population.initial_count = 200           # R4 manifest 真实口径
     c.population.max_count = max_count         # R41：标杆批口径 3240（⑤ 不饱和前提）
-    c.resources.distribution = "uniform"       # R4 manifest 真实口径
+    # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
+    # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
+    # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
+    # C4 对账"开关 vs 设计"时两边都是 uniform ⇒ 判通过。⇒ 见 R127 的 **C8 前提对账**。
+    # 现改为**可配**：默认仍 "uniform"（与历史批可比）；"patchy" 须**显式指定**且**先过前提冒烟**。
+    c.resources.distribution = str(distribution) if distribution else "uniform"
     d2 = InfoStructureConfig(enabled=True)
     d2.learning_bottleneck = True
     d2.learning_rate = 0.05
@@ -207,6 +213,10 @@ def main() -> None:
                     help='信号字母表档位（R113/R121）："16"=现状 4 位（默认）；'
                          '"4"=仅能量 2 位（code=e_bin+1∈{1..4}，删 f_bit/n_bit）。'
                          '⚠️ 与 "16" 批次（C1a/C1b/C2）的 ratio/codebook_conv 不可直接比较')
+    ap.add_argument("--distribution", dest="distribution", default=None,
+                    choices=("uniform", "patchy"),
+                    help="食物分布（R127/C8 前提开关）：uniform=默认（与历史批可比）；"
+                         "patchy=空间斑块（**须先过前提冒烟**：容量空间异质性）")
     ap.add_argument("--calibration-arm", action="store_true",
                     help="登记本臂为**校准臂**（`is_calibration_arm=True`）；"
                          "R100 条件 5：未登记而 m≠1 ⇒ 硬失败")
@@ -268,7 +278,8 @@ def main() -> None:
                   calibration_arm=bool(args.calibration_arm),
                   signal_mode=args.signal_mode,
                   signal_alphabet=args.signal_alphabet,
-                  gate_mode=args.gate_mode, gate_delta=args.gate_delta)
+                  gate_mode=args.gate_mode, gate_delta=args.gate_delta,
+                  distribution=args.distribution)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
@@ -285,6 +296,14 @@ def main() -> None:
             raise SystemExit(
                 f"signal_alphabet 冲突：命令行 {args.signal_alphabet!r} vs "
                 f"快照 {e.config.signal_alphabet!r} —— 跨档不得续跑（R121 §3.1，特性非缺陷）"
+            )
+        # R127/C8：distribution 是**前提开关** ⇒ 续跑时必须与快照一致（否则前提被静默换掉）
+        if args.distribution is not None and (
+            str(args.distribution) != str(e.config.resources.distribution)
+        ):
+            raise SystemExit(
+                f"distribution 冲突：命令行 {args.distribution!r} vs "
+                f"快照 {e.config.resources.distribution!r} —— 前提开关不得跨批混用（R127 C8）"
             )
     # R121 §3.4：**指标口径必须随档位走**（"16"⇒16、"4"⇒4）。
     # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
