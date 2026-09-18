@@ -628,6 +628,24 @@ GC 无效（`.npz` 被历史引用，GC 只清未引用对象）。
 
 **修订（R118，2026-09-18）**：**同一实验计划内**（已获 fish 启动令的批族，如 C 步链）——**后续串行段可自动接力**；**跨计划 / 新实验**仍需 fish 令。
 
+### 12.6 跑批入口：`tools/run_batch.py`（R118，2026-09-19 立）
+
+**默认跑批入口 = `tools/run_batch.py`**（外挂启动器）——在**跑批终端内原地刷新**：整体进度条 + 各 run 行 + ETA + runner 日志尾，不再刷屏。
+
+```
+python.exe tools/run_batch.py --preset <预设名> --skip-existing
+```
+
+（`--preset` 之后的参数**原样转发**给 `experiments/batch_runner.py`，用法与直接调 runner 一致）
+
+| 要点 | 说明 |
+|---|---|
+| 子进程 | 跑 `batch_runner.py`（`-u` 关缓冲 ⇒ 日志实时）；runner 输出 → `_rerun_logs/<preset>/_runner.log` |
+| 本进程 | **只启动子进程 + 只读产物** ⇒ **批跑期亦可用**（不违反 F-R9：不碰被 import 的代码） |
+| 只读旁观 | 另开终端：`python.exe tools/batch_progress.py --preset <名> --watch`（`--plain` 强制滚动） |
+| 直接调 runner | **仍可用**（无进度条、输出刷屏）；`batch_runner.py` 本身**不改** |
+| 并入 runner？ | **降级为可选**（外挂已满足需求且更安全）；若日后并入，属 `[本地开发]` 可选项、**非阻塞** |
+
 ---
 
 *本文件由项目所有者授权建立。修改需所有者同意；成员之间的相互约束（§二）永久有效。*
