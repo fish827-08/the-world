@@ -66,7 +66,7 @@ def test_pairs_of_aligns_by_seed_and_skips_missing():
         "gated_s45": _row(45, rho=0.30),
         "ungated_s45": _row(45, rho=0.40),
     }
-    pr = gp.pairs_of(rows, "rho")
+    pr = gp.pairs_of(rows, "gated", "ungated", "rho")
     assert [p[0] for p in pr] == [42, 45], "必须只保留两臂齐备的 seed"
     assert pr[0][3] == pytest.approx(0.05)      # 42: 0.10 − 0.05
     assert pr[1][3] == pytest.approx(-0.10)     # 45: 0.30 − 0.40
@@ -79,7 +79,7 @@ def test_pairs_of_skips_none_values():
         "gated_s42": _row(42, N=100),
         "ungated_s42": _row(42, N=None),
     }
-    assert gp.pairs_of(rows, "N") == []
+    assert gp.pairs_of(rows, "gated", "ungated", "N") == []
 
 
 def test_regime_threshold_constants_are_declared():
@@ -87,3 +87,26 @@ def test_regime_threshold_constants_are_declared():
     assert gp.PRED_DOMAIN_MAX == 0.9
     assert gp.N_SAT == 3000
     assert gp.TRANSITION_LO == 1000
+
+
+def test_oracle_only_labels_exist_and_are_labels_not_field_keys():
+    """守卫：`ORACLE_ONLY_LABELS` 每个名字必须是 `FIELDS` 的**标签**（第 1 元），且**不得**
+    与内部**字段键**（第 2 元）撞名。
+
+    🔴 2026-09-19 真实事故：我把集合写成标签名、而循环里比对的是**字段键**（如 `ratio`
+    vs `oracle_ratio`）⇒ 「非 oracle 臂略去 oracle 指标」**静默失效**（报告照出
+    「不显著 n_eff=0」的误导行）。本测试把约定钉死：集合必须 ⊆ 标签集，且 ∩ 键集 = ∅。
+    """
+    labels = {f[0] for f in gp.FIELDS}
+    keys = {f[1] for f in gp.FIELDS}
+    missing = gp.ORACLE_ONLY_LABELS - labels
+    assert not missing, f"ORACLE_ONLY_LABELS 里有 FIELDS 中不存在的标签：{missing}"
+    collide = gp.ORACLE_ONLY_LABELS & keys
+    assert not collide, f"ORACLE_ONLY_LABELS 与字段键撞名（集合应为**标签**）：{collide}"
+
+
+def test_make_name_re_matches_only_given_arms():
+    """臂名正则由参数决定（通用化后不得写死 gated/ungated）。"""
+    rex = gp.make_name_re("a8", "b4")
+    assert rex.match("a8_s42") and rex.match("b4_s47")
+    assert not rex.match("gated_s42") and not rex.match("a16_s42")
