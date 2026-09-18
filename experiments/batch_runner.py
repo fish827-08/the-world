@@ -354,6 +354,28 @@ PRESETS = {
                "gain-multiplier=1.3", "calibration-arm", "signal-mode=random"],
         template="_rerun_logs/cstep2rand/rand_m1.3_s{seed}.csv",
     ),
+    # α（R121 步骤 2 → 步 4）：**4 码纪元基线 + 同批 16/4 对照**（纪元纪律）
+    # ------------------------------------------------------------------
+    # 🔴 为什么 16 与 4 必须**同批**：内评 09-17 §三.3 —— 字母表是**纪元变更**，
+    #    跨批的 ratio/codebook_conv **不可直接比较** ⇒ 因果结论只能在同批内用可逆开关取。
+    # 🔴 为什么是 **8k 快批**而非 60k：内评 09-18 §三 建议 —— 先过"方向门槛"再上 60k 确认批。
+    #    本项目的最大时间黑洞一直是"用旗舰批做筛选"（R97→R100→R107→R120）。
+    #    成本：main 臂 ≈570 tick/min/run ⇒ 8k 约 **15 min**（12 run 并发）。
+    # ⚠️ `donation` 不得进 `fixed`（非 oracle 臂收到 oracle 专属参数 ⇒ a4 **硬失败**，
+    #    2026-09-16 C1a 首跑实测：18 run 只起了 12 个）——本预设 arm=main，故不写 donation。
+    "cstep3alpha": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap3"],
+        variants=[
+            dict(name="a16", args=["signal-alphabet=16"],
+                 template="_rerun_logs/cstep3alpha/a16_s{seed}.csv"),
+            dict(name="a4", args=["signal-alphabet=4"],
+                 template="_rerun_logs/cstep3alpha/a4_s{seed}.csv"),
+        ],
+    ),
 }
 
 

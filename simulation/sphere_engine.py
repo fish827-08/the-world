@@ -40,7 +40,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from core.lifecycle import DeathCause
-from simulation.config import CALIBRATION_M_RANGE, SIGNAL_COST, SimConfig
+from simulation.config import (
+    CALIBRATION_M_RANGE,
+    FOOD_RICH_LEVEL,
+    SIGNAL_ALPHABET_CODE_MAX,
+    SIGNAL_ALPHABET_IMPLEMENTED,
+    SIGNAL_ALPHABET_STATES,
+    SIGNAL_COST,
+    SimConfig,
+)
 from simulation.genes import Gene
 from simulation.oracle import EMISSION_COST, apply_oracle, attribution_ok
 from simulation.provenance import CountingRNG
@@ -49,6 +57,72 @@ from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
 from world.signal_field import SignalField
 from world.sphere_world import SphereWorld
+
+
+def codebook_init_rows(n_rows: int, alphabet: str) -> NDArray[np.uint8]:
+    """按 `signal_alphabet` 档位构造初始码本（形状 `(n_rows, 16)`，uint8）。
+
+    R113/R121（设计稿 §3.2）——**数组宽度恒为 16**（存档兼容，R113 明文）：
+      · `"16"`：恒等映射 `arange(16)`（0–15）⇒ **与旧版逐位一致**（既有批次口径不动）
+      · `"4"` ：`clip(arange(16)+1, 1, 4)` ⇒ 有效槽 0–3 → `{1,2,3,4}`；槽 4–15 保持初值
+                （**码 0 永不出现** ⇒ 设计稿 §2.4 的"隐形发射 + 清除他人标记"后果消失）
+      · `"8"` ：`clip(arange(16)+1, 1, 8)`（B③ 载体；**本版未实施** ⇒ 调用即硬失败）
+
+    未实施的档位**硬失败**（教训 2：静默 no-op 最危险），不降级、不报警后继续。
+    """
+    if alphabet not in SIGNAL_ALPHABET_IMPLEMENTED:
+        raise NotImplementedError(
+            f"signal_alphabet={alphabet!r} 尚未实施"
+            f"（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+        )
+    if alphabet == "16":
+        row = np.arange(16, dtype=np.int64)
+    else:
+        row = np.clip(np.arange(16, dtype=np.int64) + 1, 1,
+                      SIGNAL_ALPHABET_CODE_MAX[alphabet])
+    return np.asarray(row, dtype=np.uint8)[np.newaxis, :].repeat(
+        int(n_rows), axis=0
+    ).copy()
+
+
+def encode_signal_states(
+    energy: NDArray[np.float64],
+    grid: NDArray[np.float64],
+    capacity: NDArray[np.float64],
+    occ: NDArray[np.int64],
+    e_flat: NDArray[np.int64],
+    emitters: NDArray[np.int64],
+    max_energy: float,
+    alphabet: str,
+) -> tuple[NDArray[np.int64], int]:
+    """按 `signal_alphabet` 档位把**发射者状态**编码为 `(state, code_offset)`。
+
+    抽成**纯函数**的目的（设计稿 §3.6 测试 3）：让"冗余位是否确被删"可**不插桩**直接验证 ——
+    只需给同 `e_bin`、不同 (食物, 邻居) 的两组输入，看 `state` 是否相同。
+
+    · `"16"`：能量档 2 位 + 食物 1 位 + 邻居 1 位 ⇒ `state = e_bin*4 + f_bit*2 + n_bit`（0–15）；
+              `code_offset = 0` ⇒ 无码本时 `code = state`（**0 是合法值** = 无信号，旧语义）
+    · `"4"` ：**仅**能量档 2 位 ⇒ `state = e_bin`（0–3）；`code_offset = 1`
+              ⇒ 无码本时 `code = e_bin + 1 ∈ {1,2,3,4}`，**码 0 永不出现**
+              （删 `f_bit`：阈值错位，拟 F-M2；删 `n_bit`：严格冗余，内评 §二.1）
+    · 其余档位：`NotImplementedError`（不静默降级，教训 2）
+
+    ⚠️ `code_offset` 只在**无码本（恒等映射）**时使用；开码本时 `pattern = codebook[:, state]`，
+    其值域由 `codebook_init_rows` 与变异域共同保证（"4" ⇒ ⊆ [1,4]）。
+    """
+    e_bin = np.clip(
+        (energy[emitters] / max(1e-9, max_energy) * 4).astype(np.int64), 0, 3
+    )
+    if alphabet == "16":
+        f_bit = (grid[e_flat] > FOOD_RICH_LEVEL * capacity[e_flat]).astype(np.int64)
+        n_bit = (occ[e_flat] > 1).astype(np.int64)
+        return (e_bin * 4 + f_bit * 2 + n_bit).astype(np.int64), 0
+    if alphabet == "4":
+        return e_bin.astype(np.int64), 1
+    raise NotImplementedError(
+        f"signal_alphabet={alphabet!r} 的编码尚未实施"
+        f"（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+    )
 
 
 @dataclass(frozen=True)
@@ -132,6 +206,11 @@ class SphereEngine:
         "_diag_had_sig", "_diag_true_sig", "_diag_sel",
         "_diag_attrib_found", "_diag_in_window", "_diag_not_self",
         "_diag_budget_ok", "_diag_applied",
+        # ---- R121 §3/§4（2026-09-18）：信号字母表档位 + 两个零机时观测计数器 ----
+        # ⚠️ __slots__ 是硬约束：新属性**必须**在此登记，否则运行期 AttributeError
+        "_alpha", "_alpha_states", "_alpha_code_max",
+        "_diag_food_band_true_sig", "_mem_inherit_n", "_mem_inherit_far_n",
+        "_alpha_bad_code_n",
         # ---- R102/条件 1（修正版）：守恒三账审计（★在引擎侧**独立**核算，非"同一个数抄三遍"）----
         # 撤销 R100 条件 1 原定的 "system_energy_injected"：机制复核（R102 §三）已证
         # apply_oracle 是**双向转移** ⇒ 纯再分配、**C-2 守恒成立**、无注入。
@@ -306,11 +385,22 @@ class SphereEngine:
         self._mem_ptr = 0
         # 信号解读表（L5 文化传递）：(N,16)，对 16 种信号模式的响应倾向
         # 正值=移向，负值=逃避，0=忽略；初始随机，幼体向周围成体学习
+        # R113/R121 信号字母表档位（fail-loud：未实施的档位在**构造期**即报错，
+        # 不留到运行期 —— 与 :756 的"静默 no-op"教训同族）
+        _alpha = str(config.signal_alphabet)
+        if _alpha not in SIGNAL_ALPHABET_IMPLEMENTED:
+            raise NotImplementedError(
+                f"signal_alphabet={_alpha!r} 尚未实施"
+                f"（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+            )
+        self._alpha = _alpha
+        self._alpha_states = SIGNAL_ALPHABET_STATES[_alpha]
+        self._alpha_code_max = SIGNAL_ALPHABET_CODE_MAX[_alpha]
         self._interpret = self.rng.normal(0.0, 0.3, size=(n, 16))
         # D2 任意性码本：(N,16)，每个状态(0~15)映射到一个信号模式(0~15)
         # 初始恒等映射 codebook[state]=state（与旧版硬编码行为一致）；
         # 繁殖时遗传+突变，映射可漂移可协商。D2 disabled 时不使用。
-        self._codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(n, axis=0).copy()
+        self._codebook = codebook_init_rows(n, config.signal_alphabet)
         # D2 学习瓶颈计数：(N,)，每个个体已完成的观察学习次数；
         # 达到 learning_samples_max 后停止学习（=瓶颈）。D2 disabled 时不使用。
         self._learning_count = np.zeros(n, dtype=np.int32)
@@ -358,6 +448,11 @@ class SphereEngine:
         self._diag_not_self = 0       # 且 发送者 ≠ 接收者（不自反馈）
         self._diag_budget_ok = 0      # 且 C-9 保本额度 > 0
         self._diag_applied = 0        # 实际成交（转移发生）次数
+        # ---- R121 §3.5/§4（2026-09-18）纯观测计数器（零机时；不改状态与随机流）----
+        self._diag_food_band_true_sig = 0   # §4.1：true_sig 中落点 food_ratio ∈ (0.3, 0.5]
+        self._mem_inherit_n = 0             # §4.2：出生继承记忆的槽位总数
+        self._mem_inherit_far_n = 0         # §4.2：其中"距出生格 > 感知半径"的槽位数
+        self._alpha_bad_code_n = 0          # §3.5：码 ==0 或 > 档位上限 的发射次数（须恒 0）
         # 守恒三账审计（R102 条件 1 修正版）
         self._audit_calls = 0
         self._audit_sum_delta = 0.0
@@ -725,9 +820,12 @@ class SphereEngine:
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
         cur_flat = self._flat[:P]
+        # R121 §4.1：字面量 0.5 → 显式常量 `FOOD_RICH_LEVEL`（**只命名、不改数值**）。
+        # 注意比较符仍是 `>`（与改名前逐位一致）；该常量语义 = "多到值得记住"，
+        # 与 `CultureConfig.food_threshold`(0.3，"可食/值得付款") **不同**，见 config.py 注释。
         food_rich = (
             self.resources._grid[cur_flat]
-            > 0.5 * self.resources._capacity[cur_flat]
+            > FOOD_RICH_LEVEL * self.resources._capacity[cur_flat]
         )
         if food_rich.any():
             rich_idx = np.flatnonzero(food_rich)
@@ -752,7 +850,10 @@ class SphereEngine:
         random_patterns = None
         if self.config.signal_mode == "random":
             rng_rand = np.random.default_rng(self.config.seed + 99991)  # 独立种子偏移
-            random_patterns = rng_rand.integers(1, 16, size=P, dtype=np.uint8)
+            # R113/R121：码域随档位（"16"⇒1–15；"4"⇒1–4）；形状与抽取数**不变**
+            random_patterns = rng_rand.integers(
+                1, self._alpha_code_max + 1, size=P, dtype=np.uint8
+            )
         if self._use_sim_core and random_patterns is None and not (
             self.config.info_structure.enabled and self.config.info_structure.arbitrary_codebook
         ):
@@ -775,23 +876,25 @@ class SphereEngine:
                         # D1 random 模式：用独立 rng 预生成的随机模式
                         patterns = random_patterns[emitters]
                     else:
-                        # 模式编码：能量档(2位,bit3-2) + 食物(1位,bit1) + 邻居(1位,bit0)
-                        e_bin = np.clip(
-                            (energy[emitters] / max(1e-9, ocfg.max_energy) * 4).astype(np.int64), 0, 3
+                        # 状态编码（R113/R121）：抽为纯函数 ⇒ "冗余位是否确被删"可免插桩直测
+                        state, _code_offset = encode_signal_states(
+                            energy, self.resources._grid, self.resources._capacity,
+                            occ, e_flat, emitters, ocfg.max_energy, self._alpha,
                         )
-                        f_bit = (
-                            self.resources._grid[e_flat]
-                            > 0.5 * self.resources._capacity[e_flat]
-                        ).astype(np.int64)
-                        n_bit = (occ[e_flat] > 1).astype(np.int64)
-                        state = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.int64)
+                        # ⚠️ 本行曾被我 2026-09-18 的重写误删（UnboundLocalError 当场暴露）
                         ifcfg = self.config.info_structure
                         if ifcfg.enabled and ifcfg.arbitrary_codebook:
                             # D2-2 任意性：pattern = 个体码本[state]，映射可遗传可漂移
                             patterns = self._codebook[emitters, state].astype(np.uint8)
                         else:
-                            # 旧版：pattern = state（恒等映射，硬编码状态函数）
-                            patterns = state.astype(np.uint8)
+                            # 无码本：恒等映射（"16"⇒code=state；"4"⇒code=state+1，避开 0）
+                            patterns = (state + _code_offset).astype(np.uint8)
+                        # R121 §3.5 守卫（纯观测、零机时）：码 0 或越上限 ⇒ 计数。
+                        # "4" 下**必须恒为 0**（非 0 = 隐形发射/清除他人标记 或 接收端读到未学槽）
+                        if self._alpha != "16":
+                            _bad = (patterns == 0) | (patterns > self._alpha_code_max)
+                            if _bad.any():
+                                self._alpha_bad_code_n += int(_bad.sum())
                     self.signals.write_many(e_flat, patterns)
                     if self._oracle_on:
                         # D-8 归因记账：存 **_id** 而非槽位索引（死亡压缩会重排槽位，
@@ -1005,6 +1108,13 @@ class SphereEngine:
                     # D-26a：①②③ 上游环节计数（纯观测，不改状态/随机流）
                     self._diag_had_sig += int(had_signal.sum())
                     self._diag_true_sig += int(true_sig.sum())
+                    # R121 §4.1 零机时 counter：true_sig 落点中 `food_ratio` 落在**阈值错位带**
+                    # `(food_threshold, FOOD_RICH_LEVEL]` 的计数（已被 has_food 过滤，此处只取上界）
+                    if true_sig.any():
+                        _fr_band = food_ratio[target_cells[true_sig]]
+                        self._diag_food_band_true_sig += int(np.count_nonzero(
+                            (_fr_band > ccfg.food_threshold) & (_fr_band <= FOOD_RICH_LEVEL)
+                        ))
                     # R102 条件 1（修正版）：守恒三账审计——**包住调用实测 Σenergy 变化**
                     # （独立核算，非把同一个数抄三遍；C-2 成立 ⇒ 应恒 0）
                     _e_before = float(energy.sum())
@@ -1227,8 +1337,8 @@ class SphereEngine:
                     0.0, pcfg.inheritance_noise, size=(K, 120)
                 )
                 interp_noise = self.rng.normal(0.0, 0.1, size=(K, 16))
-                # Rust 路径：D2 关闭时码本恒等映射（与旧版行为一致）
-                child_codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(K, axis=0).copy()
+                # Rust 路径：D2 关闭时码本恒等映射（按档位；"16" 下与旧版逐位一致）
+                child_codebook = codebook_init_rows(K, self._alpha)
                 child_genes = np.empty((K, gcfg.gene_count), dtype=np.float64)
                 child_energy = np.empty(K, dtype=np.float64)
                 child_stomach = np.empty(K, dtype=np.float64)
@@ -1291,11 +1401,15 @@ class SphereEngine:
                     cb_mut = self.rng.random((K, 16)) < ifcfg.codebook_mutation_rate
                     if cb_mut.any():
                         # 突变位映射到随机模式(1~15，0保留为无信号)
-                        cb_new = self.rng.integers(1, 16, size=(K, 16), dtype=np.uint8)
+                        # R113/R121：取值域随档位（"16"⇒1–15；"4"⇒1–4）；
+                        # 形状 `(K, 16)` 与抽取数**不变** ⇒ RNG 顺序不变（设计稿 §3.3）
+                        cb_new = self.rng.integers(
+                            1, self._alpha_code_max + 1, size=(K, 16), dtype=np.uint8
+                        )
                         child_codebook[cb_mut] = cb_new[cb_mut]
                 else:
-                    # D2 关闭：码本恒等映射（与旧版硬编码行为一致）
-                    child_codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(K, axis=0).copy()
+                    # D2 关闭：码本恒等映射（按档位；"16" 下与旧版逐位一致）
+                    child_codebook = codebook_init_rows(K, self._alpha)
 
             ids = np.arange(self._next_id, self._next_id + K, dtype=np.int64)
             self._next_id += K
@@ -1325,8 +1439,27 @@ class SphereEngine:
             self._baseline = np.concatenate([self._baseline, child_baseline])
             self._trust = np.concatenate([self._trust, child_trust])
             # 工作记忆：子代继承亲代的食物位置记忆（文化传递的一部分）
+            # R121 §4.2 零机时 counter：量化"生而知之"——继承记忆中"距出生格 > 感知半径"
+            # 的槽位占比（纯观测，不改状态/随机流）。距离口径 = **格距**（行差 + 经度环绕
+            # 列差，与邻居表 `_build_neighbor_cache` 同口径；**未做纬度余弦缩放** ⇒ 极区
+            # 高估距离，该读数应作**上界**理解）。
+            _mem_inh = self._work_memory[ri]
+            _br, _bc = self.world.flat_to_rc(self._flat[ri])
+            _mr, _mc = self.world.flat_to_rc(_mem_inh.ravel())
+            _K4 = int(_mem_inh.shape[1])
+            _valid_mem = _mem_inh.ravel() >= 0
+            _dr = (_mr - np.repeat(_br, _K4)).astype(np.float64)
+            _dc = (_mc - np.repeat(_bc, _K4)).astype(np.float64)
+            _cols_w = float(self.world.cols)
+            _dc = (_dc + _cols_w / 2.0) % _cols_w - _cols_w / 2.0
+            _dist = np.sqrt(_dr * _dr + _dc * _dc)
+            self._mem_inherit_n += int(_valid_mem.sum())
+            self._mem_inherit_far_n += int(np.count_nonzero(
+                _valid_mem
+                & (_dist > float(self.config.info_structure.perception_radius))
+            ))
             self._work_memory = np.concatenate(
-                [self._work_memory, self._work_memory[ri].copy()]
+                [self._work_memory, _mem_inh.copy()]
             )
             # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体，Rust 路径已算好）
             self._interpret = np.concatenate([self._interpret, child_interp])
@@ -1551,6 +1684,38 @@ class SphereEngine:
             ),
         }
 
+    def inheritance_stats(self) -> dict:
+        """R121 §4.2：记忆继承卫生的**零机时观测**（"生而知之"量化）。
+
+        `mem_inherit_far_frac` = 出生时继承记忆中"距出生格 > 感知半径"的槽位占比。
+        距离口径 = **格距**（行差 + 经度环绕列差，与邻居表同口径），**未做纬度余弦缩放**
+        ⇒ 极区会高估 ⇒ 该值应读作**上界**。纯观测：不改状态、不消费随机流。
+        """
+        n = int(self._mem_inherit_n)
+        far = int(self._mem_inherit_far_n)
+        return {
+            "mem_inherit_n": n,
+            "mem_inherit_far_n": far,
+            "mem_inherit_far_frac": round(far / n, 6) if n else 0.0,
+            "distance_convention": "grid_ring(行差+经度环绕列差)，未做纬度余弦缩放（上界）",
+        }
+
+    def alphabet_stats(self) -> dict:
+        """R113/R121 §3：字母表档位读数 + 码值域守卫（§3.5，纯观测）。
+
+        `bad_code_n` 在 `"4"`/`"8"` 档下**必须恒为 0**：非零即意味着
+        ① 码 0（"隐形发射" + **清除同格他人标记**，设计稿 §2.4）或
+        ② 码越上限（接收端读到**未学过的槽**）——两者都是**静默**的行为改变。
+        `"16"` 档下 0 是合法值 ⇒ `guard_expected_zero=False`（恒不累加）。
+        """
+        return {
+            "signal_alphabet": self._alpha,
+            "n_states": int(self._alpha_states),
+            "code_max": int(self._alpha_code_max),
+            "bad_code_n": int(self._alpha_bad_code_n),
+            "guard_expected_zero": bool(self._alpha != "16"),
+        }
+
     def oracle_stats(self) -> dict:
         """D-8 oracle 累计统计（O-4/O-7 判读 + manifest 必录 `oracle_return_ratio`）。"""
         emissions = int(self._emit_count.sum())
@@ -1574,6 +1739,17 @@ class SphereEngine:
             # 与 R100 条件 5（机器强制拒收依据 `is_calibration_arm`）。
             "gain_multiplier": float(self.config.oracle.gain_multiplier),
             "is_calibration_arm": bool(self.config.oracle.is_calibration_arm),
+            # R121 §4.1 零机时 counter：**阈值错位带** `(food_threshold, FOOD_RICH_LEVEL]`
+            # 在 `true_sig` 中的计数与占比 ⇒ **裁定点**：占比 >5% 再议是否对齐阈值
+            # （对齐属行为变更 ⇒ 须预注册，R121 明文）
+            "food_band_true_sig": {
+                "n": int(self._diag_food_band_true_sig),
+                "frac_of_true_sig": (
+                    round(self._diag_food_band_true_sig / self._diag_true_sig, 6)
+                    if self._diag_true_sig else 0.0
+                ),
+                "band": f"(food_threshold, {FOOD_RICH_LEVEL}]",
+            },
         }
 
     def oracle_ledger(self) -> dict:
@@ -1978,6 +2154,14 @@ class SphereEngine:
             ],
             dtype=np.int64,
         )
+        # R121 §3/§4 计数器（续跑后累计不失真；旧快照无此键 ⇒ 回退零值）
+        data["r121_counters"] = np.array(
+            [
+                self._diag_food_band_true_sig, self._mem_inherit_n,
+                self._mem_inherit_far_n, self._alpha_bad_code_n,
+            ],
+            dtype=np.int64,
+        )
 
         # --- 6. RNG 状态（可复现的关键）---
         data["rng_state"] = np.array(
@@ -2078,9 +2262,7 @@ class SphereEngine:
         if "codebook" in data:
             engine._codebook = data["codebook"].copy()
         else:
-            engine._codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(
-                len(engine._id), axis=0
-            ).copy()
+            engine._codebook = codebook_init_rows(len(engine._id), engine._alpha)
         if "learning_count" in data:
             engine._learning_count = data["learning_count"].copy()
         else:
@@ -2123,6 +2305,10 @@ class SphereEngine:
             (engine._diag_had_sig, engine._diag_true_sig, engine._diag_sel,
              engine._diag_attrib_found, engine._diag_in_window, engine._diag_not_self,
              engine._diag_budget_ok, engine._diag_applied) = (int(x) for x in _df)
+        if "r121_counters" in data:   # R121 §3/§4：旧快照回退零值（不报错，语义=未观测）
+            _rc = data["r121_counters"]
+            (engine._diag_food_band_true_sig, engine._mem_inherit_n,
+             engine._mem_inherit_far_n, engine._alpha_bad_code_n) = (int(x) for x in _rc)
         if "rs_children" in data:
             engine._rs_children = data["rs_children"].copy()
             engine._rs_observed = data["rs_observed"].copy()

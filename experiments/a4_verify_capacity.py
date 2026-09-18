@@ -42,7 +42,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from simulation.config import CALIBRATION_M_RANGE, InfoStructureConfig, SimConfig  # noqa: E402
+from simulation.config import (  # noqa: E402
+    CALIBRATION_M_RANGE,
+    SIGNAL_ALPHABET_IMPLEMENTED,
+    SIGNAL_ALPHABET_STATES,
+    InfoStructureConfig,
+    SimConfig,
+)
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
 
@@ -61,7 +67,8 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           oracle_persistence: int | None = None,
           gain_multiplier: float | None = None,
           calibration_arm: bool = False,
-          signal_mode: str | None = None) -> SphereEngine:
+          signal_mode: str | None = None,
+          signal_alphabet: str | None = None) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -111,6 +118,15 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     # ⇒ 若 ratio/ρ 同样上升，即实证「增益不依赖信号内容」（V-1 C-4 的可执行检验）。
     if signal_mode is not None:
         c.signal_mode = str(signal_mode)
+    # R113/R121 信号字母表（默认 "16" = 现状；"4" = 仅能量 2 位）
+    if signal_alphabet is not None:
+        _sa = str(signal_alphabet)
+        if _sa not in SIGNAL_ALPHABET_IMPLEMENTED:
+            raise SystemExit(
+                f"signal_alphabet={_sa!r} 尚未实施（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+                "—— 不静默降级（教训 2）"
+            )
+        c.signal_alphabet = _sa
     return SphereEngine(c)
 
 
@@ -164,6 +180,11 @@ def main() -> None:
                     choices=["state", "random", "evolved"],
                     help="覆盖 signal_mode；`random` = 信号与个体状态无关（**无信息**）"
                          "⇒ 供 R100 条件 7「随机信号自检」用")
+    ap.add_argument("--signal-alphabet", dest="signal_alphabet", default=None,
+                    choices=list(SIGNAL_ALPHABET_IMPLEMENTED),
+                    help='信号字母表档位（R113/R121）："16"=现状 4 位（默认）；'
+                         '"4"=仅能量 2 位（code=e_bin+1∈{1..4}，删 f_bit/n_bit）。'
+                         '⚠️ 与 "16" 批次（C1a/C1b/C2）的 ratio/codebook_conv 不可直接比较')
     ap.add_argument("--calibration-arm", action="store_true",
                     help="登记本臂为**校准臂**（`is_calibration_arm=True`）；"
                          "R100 条件 5：未登记而 m≠1 ⇒ 硬失败")
@@ -223,10 +244,23 @@ def main() -> None:
                   oracle_persistence=args.oracle_persistence,
                   gain_multiplier=args.gain_multiplier,
                   calibration_arm=bool(args.calibration_arm),
-                  signal_mode=args.signal_mode)
+                  signal_mode=args.signal_mode,
+                  signal_alphabet=args.signal_alphabet)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
+        # R121 §3.1 + C4 读回：续跑时配置**由快照自带** ⇒ 命令行若另给档位而快照不同，
+        # 必须**硬失败**而非静默忽略（F-R21/C5 同族：传了开关却没生效）
+        if args.signal_alphabet is not None and (
+            str(args.signal_alphabet) != str(e.config.signal_alphabet)
+        ):
+            raise SystemExit(
+                f"signal_alphabet 冲突：命令行 {args.signal_alphabet!r} vs "
+                f"快照 {e.config.signal_alphabet!r} —— 跨档不得续跑（R121 §3.1，特性非缺陷）"
+            )
+    # R121 §3.4：**指标口径必须随档位走**（"16"⇒16、"4"⇒4）。
+    # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
+    _n_alpha = SIGNAL_ALPHABET_STATES[str(e.config.signal_alphabet)]
 
     fields = ["tick", "N", "g14", "g15", "trust",
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
@@ -269,7 +303,11 @@ def main() -> None:
                 "mean_row": round(float(r.mean()), 3) if P else "",
                 "polar_frac": round(float(((r <= 5) | (r >= 54)).mean()), 4) if P else "",
                 # D-16：
-                "codebook_conv": round(codebook_convergence(e._codebook[:P]), 4) if P else "",
+                # R121 §3.4：n_states 随 signal_alphabet（CSV 列口径）
+                "codebook_conv": (
+                    round(codebook_convergence(e._codebook[:P], n_states=_n_alpha), 4)
+                    if P else ""
+                ),
                 "pred_frac": round(predation_fraction(e.death_cause_totals()), 4),
                 # D-18⑥/D-8（累计口径；未开探针时恒 0）
                 "resp_a": e.signal_response_stats()["resp_a_exposure"],
@@ -329,6 +367,8 @@ def main() -> None:
             "oracle_gain_multiplier": float(e.config.oracle.gain_multiplier),
             "is_calibration_arm": bool(e.config.oracle.is_calibration_arm),
             "signal_mode": str(e.config.signal_mode),
+            # R113/R121 C4 读回：字母表档位（必须与命令行/预注册一致；跨档不可比）
+            "signal_alphabet": str(e.config.signal_alphabet),
         },
         "result": {
             # ⚠️ 必须用引擎真实 tick，不能用 last（=最后一次【采样】的 tick）：
@@ -346,7 +386,12 @@ def main() -> None:
             "deaths_by_cause": dc,
             # D-16：终局判据值（区制分层用：饱和封顶 vs 捕食主导）
             "final_codebook_conv": (
-                round(codebook_convergence(e._codebook[: len(e._id)]), 4)
+                round(
+                    codebook_convergence(
+                        e._codebook[: len(e._id)], n_states=_n_alpha
+                    ),
+                    4,
+                )
                 if len(e._id) else 0.0
             ),
             "final_pred_frac": round(predation_fraction(dc), 4),
@@ -359,7 +404,12 @@ def main() -> None:
             # D-18 ⑥（R43）：三联报
             "signal_response": e.signal_response_stats(),
             # D-8 oracle（O-4/O-7）：manifest 必录 return_ratio
+            # （内含 R121 §4.1 的 food_band_true_sig 零机时 counter）
             "oracle": e.oracle_stats(),
+            # R121 §3：字母表档位 + §3.5 码值域守卫（bad_code_n 在 "4" 下必须恒 0）
+            "alphabet": e.alphabet_stats(),
+            # R121 §4.2：记忆继承卫生（"生而知之"量化；纯观测）
+            "inheritance": e.inheritance_stats(),
         },
     }
     out.with_suffix(".summary.json").write_text(

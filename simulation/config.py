@@ -215,6 +215,22 @@ class PredationConfig:
         assert 0.0 <= self.attack_gene_gate <= 1.0
 
 
+# ---------------------------------------------------------------- "丰盛"阈值（R121 §4.1：**命名 + 度量**）
+# 🔴 2026-09-18 立（R121 核阅 §4.1 批准；内评 09-17 §七.2 派工）：
+#    此前"食物 >= 0.5x容量"这个判定在**多处各自硬编码**（信号 `f_bit`、工作记忆写入），
+#    而付款/信任/学习另用 `CultureConfig.food_threshold = 0.3` ⇒ 同源概念多值声明，
+#    且两处**语义并不相同**。本次**只命名、不改数值**——改数值属**行为变更**，
+#    与在产批次（C1a/C1b/C2）不可比，且须预注册（R121 明文）。
+#    两者务必分清：
+#      · `FOOD_RICH_LEVEL`            = "此地食物多到**值得记住**"（工作记忆写入 `:730`；
+#                                        信号 `f_bit` 已随 R113 的 "4" 档删除）
+#      · `CultureConfig.food_threshold` = "此地有**足够食物可食 / 值得付款**"（付款/信任/学习）
+#    边界带 `(food_threshold, FOOD_RICH_LEVEL] = (0.3, 0.5]` 上的错位（系统判该付款、
+#    信号却宣告"无食物"）由 `oracle_stats()["food_band_true_sig"]` 的**零机时 counter** 量化。
+#    ⇒ **裁定点**：该占比 >5% 时再决定"对齐到 0.3"还是"对齐到 0.5"（R121 §4.1）。
+FOOD_RICH_LEVEL: float = 0.5
+
+
 @dataclass
 class CultureConfig:
     """文化学习参数（L5，信任系统）。
@@ -223,7 +239,7 @@ class CultureConfig:
     → A2 收编。默认值保持旧行为（真 +0.05 / 假 −0.1）。
     """
 
-    food_threshold: float = 0.3        # "邻格有粮"判定阈值（信号验证用）
+    food_threshold: float = 0.3        # "邻格有粮"判定阈值（**可食/值得付款**；与模块级 `FOOD_RICH_LEVEL`=0.5"值得记住"**语义不同**，见其注释）
     trust_true: float = 0.05           # 信号验证为真 → 信任上升幅度
     trust_false: float = 0.1           # 信号验证为假 → 信任下降幅度（注意取负前传）
 
@@ -421,6 +437,26 @@ class FruitConfig:
         assert self.max_seed_carried >= 0
 
 
+# ---------------------------------------------------------------- 信号字母表（R113 / R121）
+# 🔴 2026-09-18 立（R113 所有者 09-17 22:30 裁定；R121 09-18 核阅批准实现形态）：
+#    档位（**共用同一可逆开关**）：
+#      · `"16"` = 现状 4 位（能量2 + 食物1 + 邻居1），state 0–15、码域 **1–15**（0 保留=无信号）
+#      · `"4"`  = R113 基线 2 位（**仅能量**）：`state = e_bin`、`code = e_bin + 1` ⇒ 码域 **1–4**
+#                顺手消灭 `state=0` 的"隐形发射 + 清除他人标记"后果（设计稿 §2.4）
+#      · `"8"`  = B③ 载体 3 位（能量2 + 记忆1）：`code = e_bin*2 + mem_bit + 1` ⇒ 码域 **1–8**
+#                **R121 §五.2 已批准，但按设计稿 §六 排在下一步：本版**未实施**（fail-loud）
+#    ⚠️ `signal_alphabet` 进 `to_dict()`/`config_fingerprint()` ⇒ **跨档续跑硬报错**。
+#       这是**特性不是缺陷**：防"16 码快照被 4 码批静默续跑"这类混口径事故（设计稿 §3.1）。
+#    ⚠️ **纪元纪律**（内评 09-17 §三.3）：`"4"` 批次与 `"16"` 批次（C1a/C1b/C2）的
+#       `ratio` / `codebook_conv` **不可直接比较**；报告必须标注 `signal_alphabet`。
+#    ⚠️ RNG 契约（设计稿 §3.3）：切档**不改变任何 RNG 抽取值与形状** ⇒ 同 seed 下轨迹差异
+#       只能来自码语义，不来自随机流错位（便于 C7 逐位对拍）。
+SIGNAL_ALPHABET_STATES: dict[str, int] = {"16": 16, "4": 4, "8": 8}
+SIGNAL_ALPHABET_CODE_MAX: dict[str, int] = {"16": 15, "4": 4, "8": 8}
+# 已落地实现的档位；其余在 config 构造/引擎初始化时**硬失败**（不静默降级，教训 2）
+SIGNAL_ALPHABET_IMPLEMENTED: tuple[str, ...] = ("16", "4")
+
+
 @dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
@@ -443,6 +479,7 @@ class SimConfig:
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
     signal_disabled: bool = False        # 不发信号：发射概率恒0，接收/解读照常
     signal_mode: str = "state"           # 信号编码：state(现状)/random(独立rng随机)/evolved(D2码本暂未接线)
+    signal_alphabet: str = "16"          # 信号字母表（R113/R121）："16"(现状,4位)/"4"(2位,仅能量)/"8"(B③,未实施)——见模块顶部常量族
 
     # ---- V-1 oracle 正向对照（R39 / D-8）；旧存档缺失回退默认关闭 ----
     oracle: OracleConfig = field(default_factory=OracleConfig)
@@ -512,6 +549,8 @@ class SimConfig:
             neutral_genes=data.get("neutral_genes", False),
             signal_disabled=data.get("signal_disabled", False),
             signal_mode=data.get("signal_mode", "state"),
+            # R113/R121 信号字母表；旧存档回退 "16"（= 旧行为，逐位兼容）
+            signal_alphabet=data.get("signal_alphabet", "16"),
         )
 
     def fingerprint(self) -> str:

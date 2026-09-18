@@ -23,6 +23,8 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
+from simulation.config import SIGNAL_ALPHABET_STATES
+
 from observatory.traits import TRAIT_ORDER, decode_trait_matrix
 
 # 基因组多样性：基因值离散化箱数（[gene_min, gene_max) 均分）
@@ -127,22 +129,35 @@ def generation_statistics(engine) -> GenerationStats:
 # （D-15 合并说明：分支 D-4 也实现过 codebook_convergence；保留 main 版——
 #   含 `arbitrary_codebook=False` 恒 1.0 无判别力语义（内评 N3），为准。）
 
-def codebook_convergence(codebook) -> float:
+def codebook_convergence(codebook, n_states: int = 16) -> float:
     """群体码本趋同度（0~1，1=完全一致）。
 
-    对每个 state(0..15)，取群体中最常见映射的占比，再对 16 个 state 求均值。
+    对每个 state(0..n_states-1)，取群体中最常见映射的占比，再对 n_states 个 state 求均值。
     含义：**码本是否已收敛成"公共词典"**——这是"任意性码本"这一条件的可观测量。
     ⚠️ `arbitrary_codebook=False` 时码本是恒等映射，本指标**恒为 1.0（常数）**，
        不具判别力（内评 N3），故必须开码本才有意义。
+
+    🔴 `n_states` 必须与 `SimConfig.signal_alphabet` 一致（R121 §3.4，**列为必测项**）：
+        `"16"` ⇒ 16；`"4"` ⇒ 4；`"8"` ⇒ 8。
+        **漏传的后果**：`signal_alphabet="4"` 时数组仍是 (N,16)，未用槽 5–15 恒为初值
+        ⇒ 那 12 个槽**恒"一致"** ⇒ 收敛度被**系统性抬高**（虚高，属静默错误的`[实测]`同族）。
+    **默认 16 ⇒ 旧批口径逐位不变**（已判结果不回改）。
     """
     import numpy as np
 
     if codebook is None or len(codebook) == 0:
         return 0.0
+    n_states = int(n_states)
+    assert n_states >= 1, f"n_states 必须 >=1，收到 {n_states}"
+    if codebook is not None and len(codebook) > 0:
+        assert np.asarray(codebook).shape[1] >= n_states, (
+            f"码本宽度 {np.asarray(codebook).shape[1]} < n_states={n_states}"
+        )
     conv = []
-    for state in range(16):
+    for state in range(n_states):
         mappings = np.asarray(codebook)[:, state].astype(int)
-        most_common = int(np.bincount(mappings, minlength=16).max())
+        # minlength 只需 >= max(码值)+1；多给一格不影响 `max()`（计数本身不变）
+        most_common = int(np.bincount(mappings, minlength=n_states + 1).max())
         conv.append(most_common / len(mappings))
     return float(np.mean(conv))
 
@@ -304,7 +319,14 @@ def d2_metrics(engine, tick: int) -> D2Metrics:
         trust=trust_mean(engine),
         max_gen=max_generation_current(engine),
         lc_max=learning_count_max(engine),
-        codebook_conv=codebook_convergence(np.asarray(engine._codebook)) if n > 0 else 0.0,
+        # R121 §3.4：n_states 必须随 signal_alphabet 走（漏传 ⇒ 收敛度虚高）
+        codebook_conv=(
+            codebook_convergence(
+                np.asarray(engine._codebook),
+                n_states=SIGNAL_ALPHABET_STATES[engine.config.signal_alphabet],
+            )
+            if n > 0 else 0.0
+        ),
     )
 
 
