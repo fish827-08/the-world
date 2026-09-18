@@ -313,7 +313,8 @@ def main() -> None:
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
-              "resp_a", "resp_b", "oracle_ratio"]   # D-18⑥/D-8（累计口径）
+              "resp_a", "resp_b", "oracle_ratio",   # D-18⑥/D-8（累计口径）
+              "mem_bit_frac"]   # R128 §五 步骤 0：mem_bit 取值分布的**时间序列**（累计口径）
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -360,6 +361,12 @@ def main() -> None:
                 "resp_a": e.signal_response_stats()["resp_a_exposure"],
                 "resp_b": e.signal_response_stats()["resp_b_delta"],
                 "oracle_ratio": e.oracle_stats()["oracle_return_ratio"],
+                # R128 §五 步骤 0：`mem_bit` 取值分布（累计占比 = mem_bit=1 的发射 / 状态编码发射）
+                # 非 "8" 档 ⇒ 空串（**未适用**，不是 0；同 R120 的 ratio n/a 口径）
+                "mem_bit_frac": (
+                    e.alphabet_stats()["mem_bit_frac"]
+                    if e.alphabet_stats()["mem_bit_frac"] is not None else ""
+                ),
             })
             fh.flush()
             last = t

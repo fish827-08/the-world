@@ -102,6 +102,9 @@ def load(dirs: list[Path], arm_a: str, arm_b: str) -> dict[str, dict]:
                 "n_states": alp.get("n_states"),
                 "code_max": alp.get("code_max"),
                 "bad_code_n": alp.get("bad_code_n"),
+                # R128：mem_bit 取值分布（非 "8" 档为 None ⇒ **未适用**，须按 n/a 报）
+                "mem_bit_frac": alp.get("mem_bit_frac"),
+                "mem_bit_n": alp.get("mem_bit_n"),
                 # —— 门控读数（仅 gated 类臂有）——
                 "gate_mode": sw.get("oracle_gate_mode"),
                 "gate_delta": sw.get("oracle_gate_delta"),
@@ -173,6 +176,7 @@ FIELDS = (
     ("final_N", "N", "终态 N"),
     ("pred_frac", "pred", "pred_frac"),
     ("codebook_conv", "cbconv", "codebook_conv"),
+    ("mem_bit_frac", "mem_bit_frac", "**`mem_bit_frac`**（「8」档；其余档 n/a）"),
     ("max_gen_hw", "maxgen_hw", "max_gen（高水位）"),
     ("mem_inherit_far_frac", "memfar", "记忆继承远格占比"),
     ("mem_inherit_n", "meminh", "记忆继承事件数"),

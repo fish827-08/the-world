@@ -106,6 +106,9 @@ def encode_signal_states(
     · `"4"` ：**仅**能量档 2 位 ⇒ `state = e_bin`（0–3）；`code_offset = 1`
               ⇒ 无码本时 `code = e_bin + 1 ∈ {1,2,3,4}`，**码 0 永不出现**
               （删 `f_bit`：阈值错位，拟 F-M2；删 `n_bit`：严格冗余，内评 §二.1）
+    · `"8"` ：能量档 2 位 + **记忆位** 1 位 ⇒ `state = e_bin*2 + mem_bit`（0–7）；
+              `code_offset = 1` ⇒ 无码本时 `code = state + 1 ∈ {1..8}`
+              （`mem_bit` 语义见下方分支注释；**2026-09-19 已按内评抽核修正为"非当前格命中"**）
     · 其余档位：`NotImplementedError`（不静默降级，教训 2）
 
     ⚠️ `code_offset` 只在**无码本（恒等映射）**时使用；开码本时 `pattern = codebook[:, state]`，
@@ -121,16 +124,23 @@ def encode_signal_states(
     if alphabet == "4":
         return e_bin.astype(np.int64), 1
     if alphabet == "8":
-        # B③（R123 2026-09-18 实施）：能量档 2 位 + **记忆位** 1 位
-        #   `mem_bit = 1` ⟺ 发射者**当前格**在其 `_work_memory` 中（"此地是我记忆中的食物点"）。
-        #   为什么这是"真信息增量"：内评已证**唯一私有位是 e_bin**（其余位接收者能直读或零增量），
-        #   而**记忆是接收者完全无法直读的个体历史**（可含感知半径 4 之外的格位）⇒ 该位首次让
-        #   信号内容带上"新信息"（设计稿 §5.1，本板 23:37 帖 §四 的构造版论证）。
+        # B③（R123 2026-09-18 实施 / **2026-09-19 构念修正**）：能量档 2 位 + **记忆位** 1 位
+        #   `mem_bit = 1` ⟺ 发射者记忆中**存在一个 ≠ 当前格**的富食点（"我知道**别处**哪儿有食物"）。
+        #   🔴 为何修正（内评 2026-09-19 01:4x 抽核）：原实现 = 「**当前格**在我记忆里」，而
+        #   `_work_memory` 是**站在富食格上时**写入的 ⇒ 该判据 ≈「这一格曾经富过」= `f_bit` 的
+        #   **时间延迟版**，而当前格的瞬时食物**接收者本来就能直读** ⇒ 该位**仍冗余**（预期 null；
+        #   且其 null **不可**读作「私有内容无用」——那是仪器/构念问题，不是信号问题）。
+        #   改为「非当前格命中」后，该位指向**接收者无法直读的个体历史（另一些格位）**⇒ 才符合
+        #   B③ 的原始意图（设计稿 §5.1）。
+        #   ⚠️ **残留口径**（内评 §三，列为**下一档选项**）：记忆中的格若落在感知半径 4 内，接收者
+        #   仍可直读 ⇒ 严格的「非直读」版本需加**距离/方位**判据（本档不做，避免一次改两件事）。
         if work_memory is None:
             raise ValueError(
                 'signal_alphabet="8" 需要 work_memory（记忆位 mem_bit 的输入）——收到 None'
             )
-        mem_hit = (work_memory[emitters] == e_flat[:, None]).any(axis=1).astype(np.int64)
+        _mem = work_memory[emitters]
+        # `-1` = 空槽哨兵（`e_flat ≥ 0` ⇒ 不会误命中）；同时排除"当前格"本身
+        mem_hit = ((_mem != -1) & (_mem != e_flat[:, None])).any(axis=1).astype(np.int64)
         return (e_bin * 2 + mem_hit).astype(np.int64), 1
     raise NotImplementedError(
         f"signal_alphabet={alphabet!r} 的编码尚未实施"
@@ -230,6 +240,7 @@ class SphereEngine:
         "_alpha", "_alpha_states", "_alpha_code_max",
         "_diag_food_band_true_sig", "_mem_inherit_n", "_mem_inherit_far_n",
         "_alpha_bad_code_n",
+        "_mem_bit_on", "_mem_bit_n",   # 2026-09-19：mem_bit 取值分布（闭合可观测性缺口）
         # ---- R102/条件 1（修正版）：守恒三账审计（★在引擎侧**独立**核算，非"同一个数抄三遍"）----
         # 撤销 R100 条件 1 原定的 "system_energy_injected"：机制复核（R102 §三）已证
         # apply_oracle 是**双向转移** ⇒ 纯再分配、**C-2 守恒成立**、无注入。
@@ -505,6 +516,12 @@ class SphereEngine:
         self._mem_inherit_n = 0             # §4.2：出生继承记忆的槽位总数
         self._mem_inherit_far_n = 0         # §4.2：其中"距出生格 > 感知半径"的槽位数
         self._alpha_bad_code_n = 0          # §3.5：码 ==0 或 > 档位上限 的发射次数（须恒 0）
+        # 2026-09-19（内评 01:4x + 所有者 03:02 §五 建议）：`mem_bit` 实际取值分布
+        # E-022/E-023 两份记录均把"该位运行分布无读数"列为**可观测性缺口** ⇒ 加纯观测计数器。
+        # `mem_bit_frac = _mem_bit_on / _mem_bit_n`（只在走"状态编码"的发射上累计；
+        # random 模式无 state ⇒ 不计入 ⇒ 分母 = 状态编码发射数，报告须标此口径）
+        self._mem_bit_on = 0
+        self._mem_bit_n = 0
         # 守恒三账审计（R102 条件 1 修正版）
         self._audit_calls = 0
         self._audit_sum_delta = 0.0
@@ -934,6 +951,11 @@ class SphereEngine:
                             occ, e_flat, emitters, ocfg.max_energy, self._alpha,
                             work_memory=self._work_memory,   # B③："8" 档的记忆位输入
                         )
+                        # 2026-09-19：`"8"` 档 `state = e_bin*2 + mem_bit` ⇒ `mem_bit = state & 1`
+                        # （纯观测；只在状态编码路径累计，random 模式不计入）
+                        if self._alpha == "8":
+                            self._mem_bit_on += int((state & 1).sum())
+                            self._mem_bit_n += int(state.size)
                         # ⚠️ 本行曾被我 2026-09-18 的重写误删（UnboundLocalError 当场暴露）
                         ifcfg = self.config.info_structure
                         if ifcfg.enabled and ifcfg.arbitrary_codebook:
@@ -1809,6 +1831,12 @@ class SphereEngine:
             "code_max": int(self._alpha_code_max),
             "bad_code_n": int(self._alpha_bad_code_n),
             "guard_expected_zero": bool(self._alpha != "16"),
+            # 2026-09-19：`mem_bit` 取值分布（闭合 E-022/E-023 记的可观测性缺口）
+            # 非 "8" 档 ⇒ frac = None（**未适用**，不是 0 —— 同 R120 的 ratio n/a 口径）
+            "mem_bit_on": int(self._mem_bit_on),
+            "mem_bit_n": int(self._mem_bit_n),
+            "mem_bit_frac": (round(self._mem_bit_on / self._mem_bit_n, 6)
+                             if self._mem_bit_n else None),
         }
 
     def oracle_stats(self) -> dict:
@@ -2286,6 +2314,7 @@ class SphereEngine:
             [
                 self._diag_food_band_true_sig, self._mem_inherit_n,
                 self._mem_inherit_far_n, self._alpha_bad_code_n,
+                self._mem_bit_on, self._mem_bit_n,
             ],
             dtype=np.int64,
         )
@@ -2435,7 +2464,8 @@ class SphereEngine:
         if "r121_counters" in data:   # R121 §3/§4：旧快照回退零值（不报错，语义=未观测）
             _rc = data["r121_counters"]
             (engine._diag_food_band_true_sig, engine._mem_inherit_n,
-             engine._mem_inherit_far_n, engine._alpha_bad_code_n) = (int(x) for x in _rc)
+             engine._mem_inherit_far_n, engine._alpha_bad_code_n,
+             engine._mem_bit_on, engine._mem_bit_n) = (int(x) for x in _rc)
         if "rs_children" in data:
             engine._rs_children = data["rs_children"].copy()
             engine._rs_observed = data["rs_observed"].copy()

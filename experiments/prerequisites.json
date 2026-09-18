@@ -50,5 +50,23 @@
         "why": "门控臂必须真开门；否则该臂 = 对照臂（构念未改动）"
       }
     ]
+  },
+  "cstep3membit8": {
+    "science_question": "**`mem_bit` 语义修正版**（记忆含**非当前格** ⇒ 接收者不可直读）在 patchy 世界是否有方向性效应 —— 即『非冗余的 1 bit 是否可行动』（R128：修正只消冗余、不创造位置信息）",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "本批问的是『信息有价值』的世界；若实际跑 uniform ⇒ 前提不成立（= C1a/C1b/C2/α/gate/α8 的原事故）"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "容量若几乎全由纬度解释 ⇒ 食物位置可预测 ⇒『知道』不比『看到』多 ⇒ 信息价值≈0 ⇒ 判读前提不成立"
+      }
+    ]
   }
 }

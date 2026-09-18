@@ -450,6 +450,22 @@ PRESETS = {
                  template="_rerun_logs/cstep3patchy/p8_s{seed}.csv"),
         ],
     ),
+    # R128（2026-09-19）：`mem_bit` 语义修正版验证批 —— **"非冗余通道首次上桌"**
+    #   臂：仅需 `p8f`（修正版 "8" 档）× 6 seed × 12k；**对照复用 E-023 的 `p4`**
+    #   （前提已由 C7 逐位对拍证明"修正只影响 8 档、4 档逐位不变"）
+    #   口径预注册见板上 R128 §三（诚实预告：修正只消冗余、不创造位置信息 ⇒ 主指标仍可能 null）
+    "cstep3membit8": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap10",
+               "distribution=patchy"],
+        variants=[
+            dict(name="p8f", args=["signal-alphabet=8"],
+                 template="_rerun_logs/cstep3membit8/p8f_s{seed}.csv"),
+        ],
+    ),
 }
 
 

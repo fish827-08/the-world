@@ -56,10 +56,11 @@ def test_alphabet8_code_domain_and_zero_code_free():
 
 
 def test_alphabet8_memory_bit_polarity_end_to_end():
-    """🔴 极性（端到端）：站在**自己记忆命中**格上发射 ⇒ 码最低位为 1；否则为 0。
+    """🔴 极性（端到端）：记忆中**另有一个（≠当前格）**富食点 ⇒ 位为 1；否则为 0。
 
-    `code = e_bin*2 + mem_bit + 1` ⇒ 记忆命中 ⇒ 码为偶数（e_bin*2+2）；
-    未命中 ⇒ 码为奇数（e_bin*2+1）。用纯函数直测（免插桩，设计稿 §3.6 手法）。
+    `code = e_bin*2 + mem_bit + 1`。用纯函数直测（免插桩，设计稿 §3.6 手法）。
+    🔴 **2026-09-19 语义修正**（内评 01:4x 抽核）：判据由「当前格 ∈ 记忆」改为
+    「∃ 记忆格 ≠ 当前格」—— 旧判据 = `f_bit` 的时间延迟版（当前格食物接收者能直读）⇒ 冗余。
     """
     energy = np.array([0.5, 0.5])
     grid = np.zeros(4)
@@ -68,14 +69,14 @@ def test_alphabet8_memory_bit_polarity_end_to_end():
     e_flat = np.array([10, 11], dtype=np.int64)
     emitters = np.array([0, 1], dtype=np.int64)
     wm = np.full((2, 4), -1, dtype=np.int64)
-    wm[0, 0] = 10          # 个体 0 记忆中**有**当前格 10
-    wm[1, 0] = 77          # 个体 1 记忆中无当前格 11
+    wm[0, 0] = 77          # 个体 0：记忆里有一个**≠ 当前格(10)** 的富食点 ⇒ mem_bit=1
+    # 个体 1：记忆全空 ⇒ mem_bit=0
     state, off = encode_signal_states(energy, grid, cap, occ, e_flat, emitters,
                                       max_energy=10.0, alphabet="8", work_memory=wm)
     assert off == 1
     # ⚠️ 极性判法：`state = e_bin*2 + mem_bit` ⇒ **同一 e_bin 下** mem_bit=1 使 state 恰 +1
     # （不能用奇偶判：e_bin=0 时 mem=1 ⇒ state=1 是奇数）
-    assert state[0] == state[1] + 1, "记忆命中 ⇒ mem_bit=1 ⇒ state 比未命中恰大 1"
+    assert state[0] == state[1] + 1, "记忆含非当前格 ⇒ mem_bit=1 ⇒ state 比未命中恰大 1"
     assert 0 <= state.min() and (state + off).max() <= 8, "码域必须 ⊆ 1..8"
 
 
@@ -96,8 +97,8 @@ def test_alphabet8_is_not_redundant_given_memory_differs():
         occ=np.ones(4, dtype=np.int64), e_flat=np.array([10, 11], dtype=np.int64),
         emitters=np.array([0, 1], dtype=np.int64), max_energy=10.0,
     )
-    wm_a = np.full((2, 4), -1, dtype=np.int64); wm_a[0, 0] = 10
-    wm_b = np.full((2, 4), -1, dtype=np.int64)
+    wm_a = np.full((2, 4), -1, dtype=np.int64); wm_a[0, 0] = 77   # ≠ 当前格(10) ⇒ mem_bit=1
+    wm_b = np.full((2, 4), -1, dtype=np.int64)                    # 空记忆 ⇒ mem_bit=0
     s_a, _ = encode_signal_states(alphabet="8", work_memory=wm_a, **common)
     s_b, _ = encode_signal_states(alphabet="8", work_memory=wm_b, **common)
     assert s_a[0] != s_b[0], "记忆不同 ⇒ 码必须不同（该位携带接收者不可直读的信息）"
@@ -279,3 +280,80 @@ def test_probe_reports_both_delta_flavors():
         e.step()
     s = e.signal_response_stats()
     assert "resp_b_delta" in s and "resp_b_content_delta" in s
+
+
+# -------------------------------------------- 2026-09-19：构念修正 + 可观测性计数器
+
+def test_alphabet8_current_cell_in_memory_now_yields_zero_bit():
+    """🔴 **构念修正回归**（内评 2026-09-19 01:4x）：记忆里**只有当前格** ⇒ `mem_bit` 必须为 **0**。
+
+    旧实现（「当前格 ∈ 记忆」）会给出 1 —— 而那只说明"这一格曾经富过"，等于 `f_bit` 的
+    时间延迟版，接收者可从当前格直读 ⇒ 冗余。本测试**钉死修正**：改回旧判据即失败。
+    """
+    common = dict(
+        energy=np.array([0.5]), grid=np.zeros(4), capacity=np.ones(4),
+        occ=np.ones(4, dtype=np.int64), e_flat=np.array([10], dtype=np.int64),
+        emitters=np.array([0], dtype=np.int64), max_energy=10.0,
+    )
+    only_current = np.full((1, 4), -1, dtype=np.int64); only_current[0, 0] = 10
+    else_where = np.full((1, 4), -1, dtype=np.int64); else_where[0, 0] = 77
+    empty = np.full((1, 4), -1, dtype=np.int64)
+
+    s_cur, _ = encode_signal_states(alphabet="8", work_memory=only_current, **common)
+    s_else, _ = encode_signal_states(alphabet="8", work_memory=else_where, **common)
+    s_empty, _ = encode_signal_states(alphabet="8", work_memory=empty, **common)
+
+    assert int(s_cur[0] & 1) == 0, "记忆里只有当前格 ⇒ mem_bit 必须为 0（构念修正）"
+    assert int(s_else[0] & 1) == 1, "记忆里有别的格 ⇒ mem_bit=1"
+    assert int(s_empty[0] & 1) == 0, "空记忆 ⇒ mem_bit=0"
+    assert int(s_cur[0]) == int(s_empty[0]), "「只有当前格」与「空记忆」在修正后**等价**"
+
+
+def test_alphabet8_mem_bit_frac_counter_end_to_end():
+    """`mem_bit_frac` 计数器（闭合 E-022/E-023 记的可观测性缺口）：真跑后必须出数。
+
+    ⚠️ 教训 19（检查工具必须用真实产物验收）：不能只断言"字段存在"，要断言
+    `mem_bit_n > 0`（**仪器真的测到了发射**）且 `0 <= frac <= 1`。
+    """
+    e = _engine(alphabet="8", gate=False, calibration=False, seed=42, oracle=False)
+    for _ in range(200):
+        if e.extinct:
+            break
+        e.step()
+    a = e.alphabet_stats()
+    assert a["mem_bit_n"] > 0, "🔴 仪器没累计到任何状态编码发射 ⇒ 静默失效（教训 19 同型）"
+    assert 0.0 <= a["mem_bit_frac"] <= 1.0
+    assert a["mem_bit_on"] <= a["mem_bit_n"]
+    assert a["mem_bit_frac"] == pytest.approx(a["mem_bit_on"] / a["mem_bit_n"], abs=1e-6)
+
+
+def test_mem_bit_frac_is_none_not_zero_for_other_alphabets():
+    """非 `"8"` 档 ⇒ `mem_bit_frac = None`（**未适用**，不是 0 —— 同 R120 的 ratio n/a 口径）。"""
+    for alpha in ("4", "16"):
+        e = _engine(alphabet=alpha, gate=False, calibration=False, seed=42, oracle=False)
+        for _ in range(30):
+            if e.extinct:
+                break
+            e.step()
+        a = e.alphabet_stats()
+        assert a["mem_bit_n"] == 0 and a["mem_bit_frac"] is None, (
+            f'{alpha} 档不该有 mem_bit 读数（得 {a["mem_bit_frac"]!r}）'
+        )
+
+
+def test_mem_bit_counters_survive_snapshot(tmp_path):
+    """计数器须随快照走（续跑后累计不失真）—— 否则长批读数会被静默截断。"""
+    e = _engine(alphabet="8", gate=False, calibration=False, seed=7, oracle=False)
+    for _ in range(80):
+        if e.extinct:
+            break
+        e.step()
+    before = e.alphabet_stats()
+    if before["mem_bit_n"] == 0:
+        pytest.skip("本 seed 前 80 tick 无状态编码发射 ⇒ 该断言不适用")
+    path = tmp_path / "a8_snap.npz"
+    e.save_snapshot(str(path))
+    b = SphereEngine.load_snapshot(str(path))
+    after = b.alphabet_stats()
+    assert after["mem_bit_n"] == before["mem_bit_n"]
+    assert after["mem_bit_on"] == before["mem_bit_on"]
