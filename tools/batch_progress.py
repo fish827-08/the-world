@@ -159,6 +159,8 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=60.0, help="刷新间隔秒（--watch）")
     ap.add_argument("--max-minutes", type=float, default=240.0,
                     help="--watch 的兜底上限（分钟，默认 240；0=不限）—— 防「永不满足」型死循环")
+    ap.add_argument("--plain", action="store_true",
+                    help="不清屏（滚动输出；默认在真终端下**原地刷新**成进度条）")
     args = ap.parse_args()
     _t0 = time.time()
 
@@ -170,9 +172,18 @@ def main() -> int:
                   f"（批跑未开始或目录不对）", flush=True)
             return 0
         # 全部带 flush=True：管道/重定向下 stdout 有缓冲，不 flush 会"看起来没有任何输出"
-        print(f"[{time.strftime('%H:%M:%S')}]  目标 {ticks} tick/run"
-              f" · 分辨率 {logi} tick/行", flush=True)
-        print(render(args.preset, runs, meta, ticks, args.width), flush=True)
+        body = (f"[{time.strftime('%H:%M:%S')}]  目标 {ticks} tick/run"
+                f" · 分辨率 {logi} tick/行\n"
+                + render(args.preset, runs, meta, ticks, args.width))
+        # 2026-09-19（fish：「进度条应显示在跑批的终端里」）：
+        # 真终端（tty）下**原地刷新**（清屏重绘 ⇒ 真进度条）；管道/重定向下保持滚动输出（便于留痕）。
+        # `--plain` 可强制滚动。⚠️ 注意：本工具是**只读旁观**；"跑批终端里的进度条"由
+        # `tools/run_batch.py`（外挂启动器）提供 —— 见该文件 docstring。
+        if args.watch and (not args.plain) and sys.stdout.isatty():
+            sys.stdout.write("\033[2J\033[H" + body + "\n")
+        else:
+            print(body, flush=True)
+        sys.stdout.flush()
         if not args.watch:
             return 0
         if all(r["done"] for r in runs):
