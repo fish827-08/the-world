@@ -80,7 +80,8 @@ def target_ticks(preset: str, fallback: int) -> tuple[int, int]:
                     logi = int(cmd[i + 1])
             break
     except Exception as exc:  # 显式回退（教训 2：不静默）
-        print(f"  [note] 无法从 preset 解析 ticks，回退 {fallback}（{type(exc).__name__}）")
+        print(f"  [note] 无法从 preset 解析 ticks，回退 {fallback}"
+              f"（{type(exc).__name__}）", flush=True)
     return ticks, logi
 
 
@@ -104,6 +105,11 @@ def snapshot(preset: str, ticks: int, logi: int) -> tuple[list[dict], dict]:
 
     runs = []
     for csv_p in sorted(d.glob("*.csv")):
+        # 🔴 2026-09-19 修复（死循环根因）：批跑器结束时会在**同一目录**写 `_summary.csv`
+        # （它自己的汇总表），而它**永远没有配套 `.summary.json`** ⇒ 若不过滤，`all(done)`
+        # 永不成立 ⇒ `--watch` 死循环。批跑器的自有文件一律以 `_` 开头 ⇒ 过滤掉。
+        if csv_p.name.startswith("_"):
+            continue
         name = csv_p.stem
         try:
             tick = _csv_rows(csv_p) * logi
@@ -151,20 +157,30 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=20, help="进度条宽度（默认 20 格）")
     ap.add_argument("--watch", action="store_true", help="循环刷新")
     ap.add_argument("--interval", type=float, default=60.0, help="刷新间隔秒（--watch）")
+    ap.add_argument("--max-minutes", type=float, default=240.0,
+                    help="--watch 的兜底上限（分钟，默认 240；0=不限）—— 防「永不满足」型死循环")
     args = ap.parse_args()
+    _t0 = time.time()
 
     ticks, logi = target_ticks(args.preset, args.ticks)
     while True:
         runs, meta = snapshot(args.preset, ticks, logi)
         if not runs:
-            print(f"[{time.strftime('%H:%M:%S')}] {args.preset}: 尚无 CSV（批跑未开始或目录不对）")
+            print(f"[{time.strftime('%H:%M:%S')}] {args.preset}: 尚无 CSV"
+                  f"（批跑未开始或目录不对）", flush=True)
             return 0
-        print(f"[{time.strftime('%H:%M:%S')}]  目标 {ticks} tick/run · 分辨率 {logi} tick/行")
-        print(render(args.preset, runs, meta, ticks, args.width))
+        # 全部带 flush=True：管道/重定向下 stdout 有缓冲，不 flush 会"看起来没有任何输出"
+        print(f"[{time.strftime('%H:%M:%S')}]  目标 {ticks} tick/run"
+              f" · 分辨率 {logi} tick/行", flush=True)
+        print(render(args.preset, runs, meta, ticks, args.width), flush=True)
         if not args.watch:
             return 0
         if all(r["done"] for r in runs):
-            print("ALL_DONE")
+            print("ALL_DONE", flush=True)
+            return 0
+        if args.max_minutes and (time.time() - _t0) > args.max_minutes * 60:
+            print(f"TIMEOUT({args.max_minutes}min) —— 未全部完成，退出（可用 --max-minutes 调整）",
+                  flush=True)
             return 0
         time.sleep(args.interval)
 
