@@ -515,6 +515,28 @@ PRESETS = {
                  template="_rerun_logs/cstep3delta/d5400_s{seed}.csv"),
         ],
     ),
+    # A′ 复测批（R132 fish 批准）：**20 seed 双臂**验证 E-025 的成簇信号（pred 6/6 同向 + 区制单向翻转）
+    # ------------------------------------------------------------------
+    # 🔴 δ（E-026）结论：max_count **非杠杆**（6 点全部 4:2 或同构；崩塌 seed 与承载力无关，
+    #    s42/s44 在所有点崩塌到完全相同的 N=489/194）⇒ **无健康窗** ⇒ 按 R132 预注册规则：
+    #    复测批走**原配置 max_count=3240**，主读数 = pred_frac 同向性与区制翻转方向（rho 如实报、不可判）
+    # 🔴 20 seed 连续（42–61）：n=20 双侧符号检验全同向 p≈1.9e-6，可判读；功效口径收尾时算
+    # ⚠️ 独立快照目录 cstep_snap_mg20；判读预注册：pred_frac 同向性（双侧符号检验）+ 区制翻转方向
+    #    （单向比 = 翻转中朝 SAT 的比例，二项检验 vs 0.5）
+    "cstep3memgrad20": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap_mg20",
+               "distribution=patchy"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad20/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad20/mn_s{seed}.csv"),
+        ],
+    ),
 }
 
 
