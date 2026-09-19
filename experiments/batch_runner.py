@@ -466,6 +466,35 @@ PRESETS = {
                  template="_rerun_logs/cstep3membit8/p8f_s{seed}.csv"),
         ],
     ),
+    # δ（R129 批准）：**区制图** —— 测绘「SAT:PRED 比例」随 max_count 的曲线（找可观测选择窗）
+    # ------------------------------------------------------------------
+    # 🔴 一维杠杆选 max_count：SAT 判据（N >= 0.9*max_count）由它**定义** ⇒ 唯一确定的杠杆
+    # 🔴 5 点（1200/1800/2400/4200/5400）+ **复用 E-023 p4 作 3240 点**（30 run 而非 36，R129 §二）
+    # 🔴 variants 的 max-count 在 fixed 之后 ⇒ argparse 后者覆盖（dry-run 已逐 run 核）
+    # ⚠️ 预注册（设计稿 §四，跑前锁定）：SAT = N>=0.9*max_count；主读数 = 每点 SAT 比例 k/6；
+    #    判定 = **极值两点**（1200 vs 5400）Fisher 精确 p<0.05 ⇒ 杠杆；全点 ∈[1/6,5/6] ⇒ 非杠杆；
+    #    ⚠️ Fisher 6v6 最小可分辨 = **5:1 vs 1:5**（4:2 vs 2:4 检不出）⇒ "非杠杆"≠设计失败，是功效天花板
+    # ⚠️ 快照独立目录 cstep_snap_delta（防与历史批同名静默续跑）
+    "cstep3delta": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap_delta",
+               "distribution=patchy"],
+        variants=[
+            dict(name="d1200", args=["max-count=1200"],
+                 template="_rerun_logs/cstep3delta/d1200_s{seed}.csv"),
+            dict(name="d1800", args=["max-count=1800"],
+                 template="_rerun_logs/cstep3delta/d1800_s{seed}.csv"),
+            dict(name="d2400", args=["max-count=2400"],
+                 template="_rerun_logs/cstep3delta/d2400_s{seed}.csv"),
+            dict(name="d4200", args=["max-count=4200"],
+                 template="_rerun_logs/cstep3delta/d4200_s{seed}.csv"),
+            dict(name="d5400", args=["max-count=5400"],
+                 template="_rerun_logs/cstep3delta/d5400_s{seed}.csv"),
+        ],
+    ),
 }
 
 
