@@ -486,6 +486,52 @@ PRESETS = {
                  template="_rerun_logs/cstep3memgrad/mn_s{seed}.csv"),
         ],
     ),
+    # R132（2026-09-19 所有者批准）：**A′ 复测批（确证性）** —— 把 E-025 的探索性成簇信号
+    #   （pred_frac 0/6 正 + 区制 4/6 单向翻转）转成可判读结论。
+    #   🔴 预注册（所有者 18:45 复核 ①–④，跑前锁定）：
+    #     主读数 = `pred_frac` 同向性（n=20 双侧符号检验，**判显著 ≥15/20**（p=0.0414）；
+    #       功效前提 = 真实同向率 ≥0.80（0.80⇒0.804）；"20/20 p≈1.9e-6" 是事实**不是判据**）
+    #     落点三档：**≥15/20 = 复现**｜**13–14/20 = 未复现**｜**≤12/20 = 方向反**
+    #     副读数 = 区制方向比（二项 vs 0.5，**≥80% 单向**才算；**n_flips < 6 ⇒ undecidable**）
+    #     其余指标（N/ρ/codebook_conv/resp_* 等）**只报不判**（确证性批的多重比较纪律）
+    #   🔴 seed 用 **48–67（全 fresh）**：R132 原建议 42–61，但 42–47 已在 E-025 跑过
+    #      （引擎确定性 ⇒ 重跑 = 逐位重复），且把它们计入"≥15/20"会**重复使用**
+    #      产生假设的那 6 个数据点（正是所有者 ② 说的"被选中的极端值"问题）⇒ 偏离已上板说明
+    #   配置：δ（E-026）无健康窗 ⇒ 按 R132 §二 跑**原配置 max_count=3240**（所有者 18:45 §四.3 ✓）
+    "cstep3memgrad20": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap12",
+               "distribution=patchy", "signal-alphabet=4"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad20/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad20/mn_s{seed}.csv"),
+        ],
+    ),
+    # R132 ⑤（所有者 18:45 建议，可选 +1h）：**uniform 判别臂** —— 排掉最大解释风险
+    #   （"pred_frac 差异来自移动统计被改，而非记忆有用"）。
+    #   机制预测：uniform 世界容量由纬度决定（lat_r2≈1.0）⇒ 位置可预测 ⇒ 记忆**不增值**
+    #   ⇒ 预注册读法：uniform 下 `pred_frac` Δ 应**无成簇同向**（若 patchy 的 6/6 式下降
+    #     在 uniform 复现 ⇒ "记忆有用"解释死，效应归"移动统计"）。
+    #   ⚠️ n=10 对 ⇒ 判别力有限，只作方向性判别（不作显著性确证）
+    "cstep3memgrad20u": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=48,49,50,51,52,53,54,55,56,57"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap13",
+               "distribution=uniform", "signal-alphabet=4"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad20u/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad20u/mn_s{seed}.csv"),
+        ],
+    ),
     # δ（R129 批准）：**区制图** —— 测绘「SAT:PRED 比例」随 max_count 的曲线（找可观测选择窗）
     # ------------------------------------------------------------------
     # 🔴 一维杠杆选 max_count：SAT 判据（N >= 0.9*max_count）由它**定义** ⇒ 唯一确定的杠杆
