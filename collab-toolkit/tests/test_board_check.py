@@ -227,3 +227,31 @@ def test_cli_metrics_json(fake_share, capsys):
     data = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert data["board_posts"] == 2
+
+
+# ---------------- 编码污染（F-R31 家族） ----------------
+def test_utf8_problems_clean():
+    assert bc.utf8_problems("中文与 emoji 🔴 正常文本\n") == []
+
+
+def test_utf8_problems_detects_cesu8():
+    """emoji 被按 UTF-16 代理对逐个编码 ⇒ CESU-8（F-R31 事故原型）。"""
+    bad = "中文 ".encode("utf-8") + b"\xed\xa0\xbd\xed\xb4\xb4" + " 尾部\n".encode("utf-8")
+    problems = bc.utf8_problems(bad)
+    assert problems and any("CESU-8" in p for p in problems)
+
+
+def test_check_encoding_reports_file(tmp_path):
+    good = tmp_path / "a.md"
+    good.write_text("干净文件 🔴\n", encoding="utf-8")
+    bad = tmp_path / "b.md"
+    bad.write_bytes("污染 ".encode("utf-8") + b"\xed\xa0\xbd\xed\xb4\xb4" + b"\n")
+    findings = bc.check_encoding([str(good), str(bad)])
+    assert findings[0]["level"] == "error"
+    assert "b.md" in findings[0]["msg"]
+
+
+def test_check_encoding_all_clean(tmp_path):
+    p = tmp_path / "a.md"
+    p.write_text("干净 🔴\n", encoding="utf-8")
+    assert bc.check_encoding([str(p)])[0]["level"] == "ok"

@@ -249,6 +249,28 @@ def release_lock(args) -> None:
               f"或人工 `share_lock.py release --slot {args.slot}`")
 
 
+# ---------------- 写侧编码自检（F-R31：emoji 被写成 CESU-8 代理对） ----------------
+try:
+    from board_check import utf8_problems  # type: ignore
+except Exception:
+    def utf8_problems(data):                # 退化：仅校验可解码
+        raw = data.encode("utf-8") if isinstance(data, str) else data
+        try:
+            raw.decode("utf-8")
+            return []
+        except UnicodeDecodeError as e:
+            return [f"utf-8 解码失败: {e}"]
+
+
+def guard_utf8(text: str, what: str) -> None:
+    """写入前自检：发现 CESU-8/解码问题即中止（不把污染写进文件）。"""
+    problems = utf8_problems(text)
+    if problems:
+        raise PostError(f"{what} 编码自检未过（F-R31 家族）: {'; '.join(problems)}"
+                        f"\n        修法：用文本/工具写入真实 UTF-8 字符，"
+                        f"勿用 `\\uD83D\\uDD34` 这类代理对转义写文件")
+
+
 # ---------------- 置顶块兼容（T-6） ----------------
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -279,6 +301,7 @@ def cmd_post(args) -> int:
         if not os.path.isfile(args.lock_tool):
             raise PostError(f"锁工具不存在: {args.lock_tool}")
         message = ensure_signature(load_message(args.message_file), args.role)
+        guard_utf8(message, "发言内容")   # F-R31：写前自检
         prev = journal_read(root, args.slot)   # 先读上次记录，再写本次
         journal_write("start", {"message_sha16": sha256_text(message),
                                 "message_chars": len(message)})
@@ -328,6 +351,12 @@ def cmd_post(args) -> int:
                 new = pin + new
             with open(board, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new)
+            with open(board, "rb") as f:           # 写后回读自检（F-R31）
+                after = utf8_problems(f.read())
+            if after:
+                with open(board, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(old)                   # 回滚到写前内容（不删除）
+                raise PostError(f"写入后编码自检未过，已回滚: {'; '.join(after)}")
             print(f"[4/7] 已追加 {len(new) - len(old)} 字节"
                   f"（板面 {len(old)} -> {len(new)}）")
             journal_write("appended", {"board_bytes": len(new)})

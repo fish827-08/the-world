@@ -318,6 +318,47 @@ def check_todo_sync(share_dir: str, board_path: str) -> list:
              "msg": f"待办最后条目 {last_todo}（板尾最新帖 {last_post or '?'}）"}]
 
 
+# ---------------- 编码污染（F-R31 家族） ----------------
+# CESU-8：UTF-16 代理对（D800–DFFF）被逐**个**按 3 字节 UTF-8 编码
+# （正确应为 4 字节），典型来源 = 用 `\uD83D\uDD34` 这类代理对转义写文件。
+CESU8_RE = re.compile(rb"\xed[\xa0-\xbf][\x80-\xbf]")
+
+
+def utf8_problems(data) -> list:
+    """输入 bytes 或 str；返回编码问题列表（空 = 干净）。"""
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    problems = []
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        problems.append(f"utf-8 解码失败: {e}")
+    m = CESU8_RE.search(raw)
+    if m:
+        problems.append(
+            f"CESU-8 代理对字节 @ offset {m.start()}（{raw[m.start():m.start() + 6]!r}）"
+            f" —— emoji 被按 UTF-16 代理对逐个编码（应为一个 4 字节序列）")
+    return problems
+
+
+def check_encoding(paths: list) -> list:
+    """扫描给定文件的编码污染。"""
+    bad = []
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        with open(p, "rb") as f:
+            problems = utf8_problems(f.read())
+        for why in problems:
+            bad.append((os.path.basename(p), why))
+    if not bad:
+        return [{"level": "ok", "item": "encoding",
+                 "msg": f"编码检查通过：{len(paths)} 个文件无 CESU-8/解码问题"}]
+    return [{"level": "error", "item": "encoding",
+             "msg": f"{len(bad)} 处编码污染（F-R31 家族）: "
+                    + "; ".join(f"{n} — {w}" for n, w in bad[:5]),
+             "bad": bad}]
+
+
 def check_pin(board_path: str, max_age_days: int | None = None) -> list:
     """T-6 置顶区体检（委托 board_pin.validate_pin；不可用时降级为标记检查）。"""
     try:
@@ -470,6 +511,12 @@ def cmd_check(args) -> int:
     findings = []
     findings += check_sizes(share_dir)
     findings += check_signatures(board)
+    if not args.no_encoding:
+        files = [os.path.join(share_dir, n) for n in SHARE_FILES]
+    if args.deep:  # 含 docs/ 全量（较慢）
+        for dirpath, _, names in os.walk(os.path.join(root, "docs")):
+            files += [os.path.join(dirpath, n) for n in names if n.endswith(".md")]
+    findings += check_encoding(files)
     findings += check_clock(board)
     findings += check_signature_levels(board)
     findings += check_summary_freshness(board)
@@ -587,6 +634,9 @@ def main(argv=None) -> int:
     p_ck = sub.add_parser("check", parents=[common], help="板面体检（默认）")
     p_ck.add_argument("--json", action="store_true")
     p_ck.add_argument("--no-refs", action="store_true", help="跳过引用断链检查")
+    p_ck.add_argument("--no-encoding", action="store_true",
+                      help="跳过编码污染检查（F-R31 家族）")
+    p_ck.add_argument("--deep", action="store_true", help="编码检查含 docs/ 全量")
     p_ck.add_argument("--net", action="store_true",
                       help="联网对账（git ls-remote；F-R24 下推荐）")
     p_ck.add_argument("--remote", default="gitee")
