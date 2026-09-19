@@ -538,6 +538,35 @@ PRESETS = {
                  template="_rerun_logs/cstep3memgrad20u/mn_s{seed}.csv"),
         ],
     ),
+    # R134（2026-09-20 所有者批准立项）：**PC-1 极简正对照生态** —— 仪器校准，非科学实验
+    #   设计稿：`docs/设计文档/设计-PC1极简正对照-实现侧-20260919.md`（实现侧=老工；
+    #   文献侧=[外鉴] 题1 `0bb4a7d`）。定位/红线（照稿）：
+    #   阳性只可写「**该构造下仪器链可检出**」；禁写「涌现/语言/记忆有用」。
+    #   构造：S2 关捕食（单营养级）+ S1 软顶（线性补偿 ×(1−N/K)）+ patchy +
+    #         C3 拉满（reputation_weight=1.0）+ A′ 朝向梯度 + 字母表 "16"（构念级裁定，R134 §二）
+    #   三臂：主臂（全开）/ 零模型臂（码本+瓶颈关）/ 禁用臂（信号常关）
+    #   预注册判据（设计稿 §四）：主阳性 = ① codebook_conv 配对超额 CI 不含 0 或
+    #         ② ⑥b_content 同向 ≥5/6 且超可检出阈；阴性结案 = 三臂不可区分 ⇒ 构念层复审；
+    #         其余指标只报不判
+    #   冒烟门（R127 + 稳态窗）：1 run × 12k 主臂，N_eq（末 2k 均值）∈ [0.2K, 0.95K] = [648, 3078]
+    "pc1": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap_pc1",
+               "distribution=patchy", "signal-alphabet=16",
+               "predation-enabled=false", "soft-cap-target=0.6",
+               "reputation-weight=1.0"],
+        variants=[
+            dict(name="pcmain", args=["codebook=1", "learning-bottleneck=true"],
+                 template="_rerun_logs/pc1/pcmain_s{seed}.csv"),
+            dict(name="pczero", args=["codebook=0", "learning-bottleneck=false"],
+                 template="_rerun_logs/pc1/pczero_s{seed}.csv"),
+            dict(name="pcsigoff", args=["signal-disabled=true"],
+                 template="_rerun_logs/pc1/pcsigoff_s{seed}.csv"),
+        ],
+    ),
     # δ（R129 批准）：**区制图** —— 测绘「SAT:PRED 比例」随 max_count 的曲线（找可观测选择窗）
     # ------------------------------------------------------------------
     # 🔴 一维杠杆选 max_count：SAT 判据（N >= 0.9*max_count）由它**定义** ⇒ 唯一确定的杠杆

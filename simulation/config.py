@@ -138,9 +138,19 @@ class PopulationConfig:
     initial_count: int = 200        # 初始个体数量
     max_count: int = 5000           # 种群硬上限（防失控）
 
+    # PC-1（R134，2026-09-20）：**S1 软顶**（δ/E-026 诊断"硬顶⇒无亚顶平衡态⇒ρ 无窗"的最小修改）。
+    # 形态（冒烟后修订，见板帖）：**目标窗形式**——繁殖候选通过率
+    #     p_soft = clamp((N* − N)/N*, 0, 1)，N* = soft_cap_target × max_count。
+    # N*>0 ⇒ N 稳态钉在 N* 附近（出生≈死亡的选择窗）；N* = 0（默认）⇒ 与旧版**逐位一致**。
+    # 硬顶保留为兜底。⚠️ True 消费额外 RNG（每 tick P 个 uniform）⇒ 新配置。
+    # 🔴 修订原因（首版线性 (1−N/K) 实测失败）：无捕食世界死亡≈0 ⇒ 任何 p_soft>0 的尾部
+    #    都把 N 推到硬顶（12k 冒烟 N_eq=3240=K，稳态窗门不过）⇒ 补偿必须**在 N* 处归零**。
+    soft_cap_target: float = 0.0
+
     def __post_init__(self) -> None:
         assert self.initial_count >= 1, "至少一个个体"
         assert self.max_count >= self.initial_count, "上限不小于初始"
+        assert 0.0 <= self.soft_cap_target < 1.0, "软顶目标须 ∈ [0,1)（0=关闭；1 等于没顶）"
 
 
 @dataclass
@@ -197,6 +207,11 @@ class PredationConfig:
     审计标注：能量转移率 0.4 是[隐含]最强"战斗红利"、成功率乘 g16 是[刻意]强选择、
     攻击概率系数/门槛为[隐含]（→ A2 收编，默认值保持旧行为逐位一致）。
     """
+
+    # PC-1（R134，2026-09-20）：**总开关**。True（默认）⇒ 与旧版**逐位一致**（C7 digest 钉死）；
+    # False ⇒ **跳过整个捕食相**（同类相食 G16 不发动；pred_frac 恒 0）——PC-1 单营养级构造件。
+    # ⚠️ False 是**新配置**（RNG 消费随之改变），不是"旧行为的变体"；两开关都经 to_dict 进指纹。
+    enabled: bool = True
 
     attack_cost: float = 0.1           # 每次攻击的能耗（无论成败）
     attack_prob_coef: float = 0.2      # 攻击概率 ≈ g16 × 系数 × 饥饿度

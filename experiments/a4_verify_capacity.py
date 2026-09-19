@@ -47,6 +47,7 @@ from simulation.config import (  # noqa: E402
     SIGNAL_ALPHABET_IMPLEMENTED,
     SIGNAL_ALPHABET_STATES,
     InfoStructureConfig,
+    PredationConfig,
     SimConfig,
 )
 from simulation.sphere_engine import SphereEngine  # noqa: E402
@@ -73,13 +74,21 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           distribution: str | None = None,
           # A′ 记忆朝向梯度（2026-09-19）：`orientation` 才启用；默认 `none` = 原式（逐位等价）
           memory_gradient: str = "none",
-          memory_gradient_gain: float = 0.3) -> SphereEngine:
+          memory_gradient_gain: float = 0.3,
+          # PC-1（R134，2026-09-20）：S2 关捕食 / S1 软顶 / 零模型臂的瓶颈开关
+          predation_enabled: bool = True,
+          soft_cap_target: float = 0.0,
+          learning_bottleneck: bool = True,
+          reputation_weight: float = 0.0) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
     c.simulation.history_limit = 100           # 环形缓冲，限内存（不改变语义）
     c.population.initial_count = 200           # R4 manifest 真实口径
     c.population.max_count = max_count         # R41：标杆批口径 3240（⑤ 不饱和前提）
+    # PC-1（R134）：S1 软顶（目标窗形式，冒烟后修订）/ S2 关捕食（默认 = 旧行为）
+    c.population.soft_cap_target = float(soft_cap_target)
+    c.predation = PredationConfig(enabled=bool(predation_enabled))
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
     # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
@@ -89,10 +98,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     # A′ 走向构造参数（而非构造后赋值）：`__post_init__` 只在构造时跑 ⇒ 赋值不会校验（F1 同型教训）
     d2 = InfoStructureConfig(
         enabled=True,
+        learning_bottleneck=bool(learning_bottleneck),
         memory_gradient=str(memory_gradient),
         memory_gradient_gain=float(memory_gradient_gain),
+        reputation_weight=float(reputation_weight),   # PC-1：C3 人为拉满（R134 裁定 1.0）
     )
-    d2.learning_bottleneck = True
     d2.learning_rate = 0.05
     d2.arbitrary_codebook = codebook           # R19/V12：4 机制=True，3 机制对照=False
     d2.steels_alignment = True
@@ -232,6 +242,24 @@ def main() -> None:
     ap.add_argument("--memory-gradient-gain", dest="memory_gradient_gain",
                     type=float, default=0.3,
                     help="A′：朝向梯度增益（默认 0.3，与原式同量级）")
+    # PC-1（R134）：S2 关捕食 / S1 软顶 / 零模型臂瓶颈开关（值式 flag ⇒ preset 可用 key=value）
+    ap.add_argument("--predation-enabled", dest="predation_enabled", default="true",
+                    choices=("true", "false"),
+                    help="PC-1 S2：false=关捕食（单营养级）；默认 true=原式")
+    ap.add_argument("--soft-cap-target", dest="soft_cap_target", type=float, default=0.0,
+                    help="PC-1 S1（目标窗形式）：N* = target×max_count，出生率在 N* 处线性归零；"
+                         "0=关（默认=原式）。R134 PC-1 拟 0.6（窗 [0.2K,0.95K] 的中位）")
+    ap.add_argument("--learning-bottleneck", dest="learning_bottleneck", default="true",
+                    choices=("true", "false"),
+                    help="PC-1 零模型臂：false=关学习瓶颈（配码本关=零模型）；默认 true")
+    # PC-1：C3 人为拉满（R134 裁定 reputation_weight=1.0）；signal-disabled 值式 flag
+    # （--arm sigoff 的语义照旧，两者取或——禁用臂用哪个都行，preset 统一走值式）
+    ap.add_argument("--reputation-weight", dest="reputation_weight",
+                    type=float, default=0.0,
+                    help="R2 声誉权重（C3 人为拉满用；R134 PC-1 裁定 1.0）")
+    ap.add_argument("--signal-disabled", dest="signal_disabled_flag", default="false",
+                    choices=("true", "false"),
+                    help="true=信号常关（PC-1 禁用臂）；与 --arm sigoff 取或")
     ap.add_argument("--signal-alphabet", dest="signal_alphabet", default=None,
                     choices=list(SIGNAL_ALPHABET_IMPLEMENTED),
                     help='信号字母表档位（R113/R121）："16"=现状 4 位（默认）；'
@@ -248,7 +276,7 @@ def main() -> None:
 
     arm = args.arm
     neutral = arm == "zero"
-    sig_disabled = arm == "sigoff"
+    sig_disabled = arm == "sigoff" or (args.signal_disabled_flag == "true")
     oracle_on = arm == "oracle"
     # R59/F-R9：control = 3 机制对照 ⇒ 关码本（arm 语义优先于 --codebook 默认值 1）。
     # 若无此行，batch grid 只传 arm 时 control 会与 main 同配置同轨迹（2026-09-13 D-24 实测复现）。
@@ -305,7 +333,11 @@ def main() -> None:
                   gate_mode=args.gate_mode, gate_delta=args.gate_delta,
                   distribution=args.distribution,
                   memory_gradient=args.memory_gradient,
-                  memory_gradient_gain=args.memory_gradient_gain)
+                  memory_gradient_gain=args.memory_gradient_gain,
+                  predation_enabled=(args.predation_enabled == "true"),
+                  soft_cap_target=args.soft_cap_target,
+                  learning_bottleneck=(args.learning_bottleneck == "true"),
+                  reputation_weight=args.reputation_weight)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
@@ -335,7 +367,7 @@ def main() -> None:
     # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
     _n_alpha = SIGNAL_ALPHABET_STATES[str(e.config.signal_alphabet)]
 
-    fields = ["tick", "N", "g14", "g15", "trust",
+    fields = ["tick", "N", "g14", "g15", "g16", "trust",
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
@@ -373,6 +405,9 @@ def main() -> None:
                 "tick": t, "N": P,
                 "g14": round(float(e._genes[:P, 14].mean()), 4) if P else "",
                 "g15": round(float(e._genes[:P, 15].mean()), 4) if P else "",
+                # g16 AGGRESSION 均值（所有者 09-20 01:02 派工：测"攻击基因固化"假说，
+                # 捕食态内战振荡的基因层证据——此前 g16 从未入 CSV）
+                "g16": round(float(e._genes[:P, 16].mean()), 4) if P else "",
                 "trust": round(float(e._trust[:P].mean()), 4) if P else "",
                 "max_gen": int(e._max_generation),          # R77：历史高水位（不回落）
                 "max_gen_cur": max_generation_current(e),   # R77：当刻最深（只看存活）
@@ -446,6 +481,9 @@ def main() -> None:
             # 无法回答"跑的到底是哪个档"，与 R127 的 C8 前提对账同型缺陷。
             "memory_gradient": str(e.config.info_structure.memory_gradient),
             "memory_gradient_gain": float(e.config.info_structure.memory_gradient_gain),
+            # PC-1（R134）：S1/S2 开关必须可读回（C4——E-027 的 16 码事故同型预防）
+            "predation_enabled": bool(e.config.predation.enabled),
+            "soft_cap_target": float(e.config.population.soft_cap_target),
             "use_sim_core": bool(e.config.simulation.use_sim_core),
             "distribution": e.config.resources.distribution,
             "initial_count": int(e.config.population.initial_count),

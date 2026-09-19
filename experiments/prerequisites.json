@@ -134,5 +134,45 @@
         "why": "同 E-025：信息价值前提（δ 判无健康窗 ⇒ max_count 维持 3240）"
       }
     ]
+  },
+  "pc1": {
+    "science_question": "PC-1 仪器校准（正对照，非科学实验）：在「文献先验上必然出阳性」的极简构造（关捕食+软顶+C3 拉满+patchy+16 码）下，仪器链（codebook_conv/⑥b/ρ）能否检出信号效应",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "C4 最小在场：patchy 是正对照构造的一部分；误跑 uniform ⇒ 构造错误"
+      },
+      {
+        "id": "predation_disabled",
+        "kind": "preset_arg_equals",
+        "key": "predation-enabled",
+        "value": "false",
+        "why": "S2 单营养级：捕食不关 ⇒ 50k 内战振荡与区制抽签全部回来（所有者 00:53/01:02 帖）"
+      },
+      {
+        "id": "soft_cap_on",
+        "kind": "preset_arg_equals",
+        "key": "soft-cap-target",
+        "value": "0.6",
+        "why": "S1 软顶（目标窗形式，冒烟后修订）：N*=0.6K ⇒ 稳态窗 [0.2K,0.95K] 可达；误关 ⇒ 退回硬顶无窗构造"
+      },
+      {
+        "id": "alphabet_16",
+        "kind": "preset_arg_equals",
+        "key": "signal-alphabet",
+        "value": "16",
+        "why": "构念级裁定（R134）：\"4\" 档无食物维 ⇒ 参照任务不成立"
+      },
+      {
+        "id": "reputation_weight_1",
+        "kind": "preset_arg_equals",
+        "key": "reputation-weight",
+        "value": "1.0",
+        "why": "C3 人为拉满 = 本构造的被测件（R134 裁定 1.0）"
+      }
+    ]
   }
 }

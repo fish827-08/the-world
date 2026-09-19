@@ -1274,11 +1274,19 @@ class SphereEngine:
         predation_mask = np.zeros(P, dtype=bool)
         pcfg = self.config.predation           # 隐式选择压参数化（A2）：捕食段参数
         attack_gene = genes[:, Gene.AGGRESSION]
-        hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
-        attack_prob = attack_gene * pcfg.attack_prob_coef * hunger
-        attackers = np.flatnonzero(
-            (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
-        )
+        if pcfg.enabled:
+            # PC-1 S2（R134）：`enabled=True`（默认）⇒ 原式逐位不动（RNG 消费 P 个 uniform）
+            hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
+            attack_prob = attack_gene * pcfg.attack_prob_coef * hunger
+            attackers = np.flatnonzero(
+                (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
+            )
+        else:
+            # S2 off（PC-1 单营养级构造）：**跳过攻击者选择**（连 RNG 抽取一起跳过 ⇒
+            # 新配置的 RNG 轨迹，与 enabled=True 的 run 不逐位可比——预期，非缺陷）。
+            # `predation_and_culture` 照常调用（文化学习/年龄推进共用该调用），
+            # 空 attackers ⇒ 捕食贡献恒 0（predation_mask 全 False）。
+            attackers = np.zeros(0, dtype=np.int64)
         # 文化学习需要的成熟年龄（年龄已在 stage2 推进，use_sim_core=True 时）
         age_f = self._age[:P].astype(np.float64)
         life_span = self._lifespan(genes[:, Gene.LIFE_GENE])
@@ -1432,6 +1440,18 @@ class SphereEngine:
             & (self._repro_cooldown[:P] <= 0.0)
             & (age_f >= maturity_age)   # 未到成熟年龄不生（长大后才能繁衍）
         )
+        # PC-1 S1 软顶（R134；冒烟后修订为**目标窗形式**，2026-09-20）：
+        #   p_soft = clamp((N* − N)/N*, 0, 1)，N* = soft_cap_target × max_count。
+        #   N*>0 ⇒ 出生率随 N 逼近 N* 线性归零 ⇒ N 稳态钉在 N* 附近（死亡≈出生的选择窗）。
+        #   🔴 首版线性 (1−N/K) 实测失败：无捕食世界死亡≈0 ⇒ N 顶满硬顶（12k 冒烟
+        #      N_eq=3240=K，稳态窗门不过）⇒ 补偿必须在 N* 处归零（修订已上板）。
+        # 仅 soft_cap_target>0 时消费额外 RNG（每 tick P 个 uniform）⇒ 变化限于新配置；
+        #   0（默认）⇒ 与旧版逐位一致。硬顶（下方的 K 截断）保留兜底。
+        _sct = float(self.config.population.soft_cap_target)
+        if _sct > 0.0:
+            _n_star = _sct * float(self.config.population.max_count)
+            p_soft = min(1.0, max(0.0, (_n_star - P) / max(_n_star, 1e-9)))
+            repro = repro & (self.rng.random(P) < p_soft)
         K = min(int(repro.sum()), self.config.population.max_count - P)
         born = 0
         if K > 0:
