@@ -69,13 +69,23 @@ def test_check_sizes_thresholds(fake_share):
     assert by_file["README.md"]["level"] == "ok"
 
 
-def test_check_sizes_error_over_150k(fake_share):
+def test_check_sizes_error_over_200k(fake_share):
+    """§3.3 阈值 2026-09-19 由 150 → 200KB；本测试钉死**工具与章程一致**。
+
+    ⚠️ 若改 `bc.SIZE_ERR_KB` 而不同步 `AGENT.md` §3.3 ⇒ 两处漂移（F-R23 家族）。
+    """
     _, share, _ = fake_share
     with open(os.path.join(share, "讨论板.md"), "w", encoding="utf-8") as f:
-        f.write("x" * (151 * 1024))
+        f.write("x" * (201 * 1024))
     findings = bc.check_sizes(share)
     assert any(f["level"] == "error" and f.get("file") == "讨论板.md"
                for f in findings)
+    # 150KB 已**不再**报警（阈值已放宽）
+    with open(os.path.join(share, "讨论板.md"), "w", encoding="utf-8") as f:
+        f.write("x" * (151 * 1024))
+    findings = bc.check_sizes(share)
+    assert not any(f["level"] == "error" and f.get("file") == "讨论板.md"
+                   for f in findings)
 
 
 # ---------------- 锁检查 ----------------

@@ -65,6 +65,36 @@ def sign_test_two_sided(n_pos: int, n_neg: int) -> float:
     return float(min(1.0, 2.0 * tail))
 
 
+# 双侧 0.05 / 80% 功效的合并系数 K(df) = t_{0.975,df} + t_{0.80,df}（df = n−1）。
+# 显式表 ⇒ **不引入 scipy 依赖**（与 sign_test 用 math.comb 同一取舍）；>120 用正态近似 2.802。
+_POWER_K = {1: 14.082, 2: 5.364, 3: 4.160, 4: 3.717, 5: 3.491, 6: 3.353, 7: 3.261,
+            8: 3.195, 9: 3.145, 10: 3.107, 12: 3.052, 15: 2.997, 20: 2.946,
+            24: 2.921, 30: 2.896, 40: 2.872, 60: 2.848, 120: 2.825}
+
+
+def power_k(n: int) -> float:
+    """n 个配对对应的功效系数 `K = t₀.₉₇₅,df + t₀.₈₀,df`（df=n−1；>120 ⇒ 2.802）。"""
+    df = max(1, n - 1)
+    if df in _POWER_K:
+        return _POWER_K[df]
+    if df > 120:
+        return 2.802
+    return _POWER_K[min(_POWER_K, key=lambda k: abs(k - df))]
+
+
+def detectable_delta(deltas) -> float:
+    """**可检出 |Δ|**（双侧 0.05 / 80%）= `K(df) · σ_d / √n`（σ_d = 实测配对差样本标准差）。
+
+    ⚠️ 口径（内评 09-19 §三 请求）：这是「**能检出的最小效应**」，**不是**「观测到的效应」
+    ⇒ 只能用来把「不显著」翻译成「**排除了 |Δ| ≳ 该值的效应**」；阈值**由功效推**，
+    禁"先看效应量再倒推门槛"（教训 2/9）。n<2 ⇒ `nan`（无法估计）。
+    """
+    n = len(deltas)
+    if n < 2:
+        return float("nan")
+    return float(power_k(n) * np.std(deltas, ddof=1) / (n ** 0.5))
+
+
 def regime(pred_frac, final_n) -> str:
     """区制标签（R38③ + 内评 §四.2 分层）。两套划法都记，避免单划法歧义。"""
     if pred_frac is None or final_n is None:
@@ -73,6 +103,30 @@ def regime(pred_frac, final_n) -> str:
     a = "PRED" if pf >= PRED_DOMAIN_MAX else "SAT"
     b = "SAT" if n >= N_SAT else ("PRED" if n < TRANSITION_LO else "过渡")
     return f"{a}/{b}"
+
+
+def matched_seeds(map_a: dict, map_b: dict, seeds: list[int]) -> list[int]:
+    """**区制匹配**筛选（内评 2026-09-19 §二 建议）：只保留**两臂同态**的 seed（划法 A）。
+
+    **为什么需要**：12k 批里"同 seed 仅换一个开关"就可能跨区制（E-021 起已独立复现 6 次）
+    ⇒ 未匹配的配对是「**两态相比**」，把区制差混进任何指标差 —— 这是 E-023 `p8` 那个
+    "CI 下界 +0.0023 勉强过线"最可能的成因（该臂 4/6 seed 翻转）。
+
+    ⚠️ **口径边界（必须与 §③/§④ 并列报，不得单独用）**：
+      ① 本筛选是**后处理**（conditional-on-post-treatment）⇒ 只能作**稳健性检查**，
+         **不替代**预注册的全配对口径；
+      ② 子集 `n` 会大幅下降（翻转越多、剩得越少）⇒ **功效受限**，
+         "子集里不显著"**不可**读作"无效应"（教训 2/9）；
+      ③ 子集与全配对结论冲突 ⇒ 判 **不可判**，**不得**挑对自己有利的那一组。
+    """
+    out: list[int] = []
+    for s in seeds:
+        x, y = map_a.get(s), map_b.get(s)
+        if not x or not y:
+            continue
+        if regime(x["pred"], x["N"]).split("/")[0] == regime(y["pred"], y["N"]).split("/")[0]:
+            out.append(s)
+    return out
 
 
 # ------------------------------------------------------------------ 载入
@@ -334,6 +388,71 @@ def main() -> int:
              "不可读作「无效应」** ⇒ 判读须看 §③ 的**逐 seed 值 + 区制分类**，不得只看 p。")
     L.append("")
 
+    # ---------------- ④b 区制匹配子集（内评 09-19 §二 建议） ----------------
+    matched = matched_seeds(b_arm, a_arm, seeds)
+    stat_m: dict[str, dict] = {}
+    L.append("## ④b 区制匹配子集（**同 seed 两臂同态**才配；稳健性检查，**非主口径**）")
+    L.append("")
+    L.append(f"- 匹配 seed = **{len(matched)}/{len(seeds)}**")
+    if matched:
+        L.append(f"- 匹配 seed 列表：{'、'.join(f's{s}' for s in matched)}")
+    L.append("")
+    if not matched:
+        L.append("⚠️ **无任何同态 seed** ⇒ 本批**无法做区制匹配**；§③/§④ 的全配对只能按"
+                 "「**两态相比**」解释（区制差已混入）。")
+    else:
+        L.append("| 指标 | 匹配 seed 数 | 中位 Δ | n_eff | p（双侧） | 判定 |")
+        L.append("|---|---|---|---|---|---|")
+        for label, field, disp in FIELDS:
+            if label in ORACLE_ONLY_LABELS and not any_oracle:
+                continue
+            pr = [p for p in pairs_of(rows, A, B, field) if p[0] in set(matched)]
+            if not pr:
+                continue
+            d = [p[3] for p in pr]
+            pos = sum(1 for x in d if x > 0)
+            neg = sum(1 for x in d if x < 0)
+            zer = sum(1 for x in d if x == 0)
+            neff = pos + neg
+            pm = sign_test_two_sided(pos, neg)
+            stat_m[field] = {"label": label, "delta": d, "pos": pos, "neg": neg, "zero": zer,
+                             "median_delta": float(np.median(d)), "n_eff": neff, "p_sign": pm}
+            verdict = "🟡 显著（p<0.05）" if pm < 0.05 else "不显著"
+            if neff < 4:
+                verdict += f"⚠️ **功效受限**（n_eff={neff}）"
+            L.append(f"| {disp} | {len(pr)} | {np.median(d):+.4f} | {neff} | {pm:.4f} | {verdict} |")
+        L.append("")
+    L.append("⚠️ **口径**：本表是**后处理筛选**（同 seed 两臂同态）⇒ 只作**稳健性检查**，"
+             "**不替代** §③/§④ 的预注册全配对；子集 `n` 小 ⇒ 「不显著」**不可**读作「无效应」；"
+             "与全配对**冲突时判「不可判」**，不得挑对自己有利的那组（内评 09-19 §二）。")
+    L.append("")
+
+    # ---------------- ④c 功效口径（可检出阈，自算，不硬编码） ----------------
+    L.append("## ④c 功效口径（**可检出阈**，双侧 0.05 / 80%，由实测 σ_d 推出）")
+    L.append("")
+    L.append("> 口径：可检出 |Δ| ≈ `(t₀.₉₇₅,df + t₀.₈₀,df) · σ_d / √n`（σ_d = 实测配对差的样本标准差，df = n−1）。")
+    L.append("> 用途（内评 09-19 §三 请求）：把「**不显著**」写成**可证伪的句子** —— 只能是")
+    L.append("> 「**排除了 |Δ| ≳ 该值的效应**」，**不是**「无效应」。阈值**由功效推**，禁事后倒推（教训 2/9）。")
+    L.append("")
+    L.append("| 指标 | 配对数 n | σ_d | **可检出 \\|Δ\\|** | 中位 Δ |")
+    L.append("|---|---|---|---|---|")
+    det: dict[str, float] = {}
+    for field, st in stat.items():
+        d = st["delta"]
+        if len(d) < 2:
+            continue
+        thr = detectable_delta(d)
+        det[field] = thr
+        L.append(f"| {st['label']} | {len(d)} | {np.std(d, ddof=1):.4f} | "
+                 f"**{thr:.4f}** | {st['median_delta']:+.4f} |")
+    L.append("")
+    if stat:
+        _worst = max(det.values()) if det else None
+        if _worst is not None:
+            L.append(f"- ⇒ 本批**最宽松**的可检出阈 = **{_worst:.4f}**（最大者）；"
+                     "任何「不显著」都只能写作「排除了 ≳ 该量级的效应」。")
+            L.append("")
+
     # ---------------- ⑤ 区制 ----------------
     L.append("## ⑤ 区制（同 seed 跨臂是否翻转）")
     L.append("")
@@ -375,17 +494,22 @@ def main() -> int:
     L.append("2. **区制二分 + 近临界抽签** ⇒ 生态类指标必须**分层报**，不得合并均值（R38③）")
     L.append("3. **`n_eff` 偏低**时的「不显著」**不可**读作「无效应」（功效受限）")
     L.append("4. 若两臂属**纪元变更**（如字母表档位不同）⇒ **不是单变量对照**，结构差异可混入任何差异")
+    L.append("5. **§④b 区制匹配子集是后处理筛选**（conditional-on-post-treatment）⇒ 只作**稳健性检查**，"
+             "不替代预注册全配对；与全配对**冲突 ⇒ 判「不可判」**，不得挑组（内评 09-19 §二）")
+    L.append("6. **「不显著」必须按 §④c 的可检出阈写成「排除了 |Δ| ≳ X」**（内评 09-19 §三）；"
+             "不得写成「无效应」——**12k 短批只能排除大效应**")
+    _COMMON_B = ["（通用 1）只出统计层读数", "（通用 2）区制须分层", "（通用 3）n_eff 偏低不可读无效应",
+                 "（通用 4）纪元变更非单变量", "（通用 5）区制匹配子集仅作稳健性检查、冲突判不可判",
+                 "（通用 6）不显著须写成「排除了 ≳ 可检出阈」"]
     if extra_b:
         L.append("")
-        L.append("**本批专属边界**（调用方传入；缺省则只有上四条通用项）：")
+        L.append("**本批专属边界**（调用方传入；缺省则只有上六条通用项）：")
         L.append("")
         for b in extra_b:
             L.append(f"- {b}")
-        res_boundaries = ["（通用 1）只出统计层读数", "（通用 2）区制须分层", "（通用 3）n_eff 偏低不可读无效应",
-                          "（通用 4）纪元变更非单变量"] + list(extra_b)
+        res_boundaries = _COMMON_B + list(extra_b)
     else:
-        res_boundaries = ["（通用 1）只出统计层读数", "（通用 2）区制须分层", "（通用 3）n_eff 偏低不可读无效应",
-                          "（通用 4）纪元变更非单变量"]
+        res_boundaries = list(_COMMON_B)
     L.append("")
 
     text = "\n".join(L) + "\n"
@@ -407,6 +531,9 @@ def main() -> int:
             "block_frac_median": float(np.median(bf)) if bf else None,
             "block_frac_range": [float(min(bf)), float(max(bf))] if bf else None,
             "paired_stats": stat,
+            "paired_stats_regime_matched": stat_m,
+            "regime_matched_seeds": matched, "regime_matched_of": len(seeds),
+            "detectable_delta": det,
             "regime_flips": int(sum(flips)), "regime_flips_of": len(flips),
             "boundaries": res_boundaries,
             "rows": rows,

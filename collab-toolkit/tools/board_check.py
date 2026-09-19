@@ -41,7 +41,10 @@ DEFAULT_ROOT = os.path.dirname(os.path.dirname(_HERE))
 SHARE_FILES = ["讨论板.md", "路线共识.md", "待办与交接.md", "路线图.md",
                "README.md", "花名册.md"]
 SIZE_WARN_KB = 130
-SIZE_ERR_KB = 150  # AGENT.md §3.3 硬上限
+# 2026-09-19 由 fish 提议、[本地开发] 执行同步：150 → **200**
+# （AGENT.md §3.3 同日修订：单日两度触发归档、最短间隔 13.5h ⇒ 归档过频导致上下文断裂）
+# ⚠️ 本文件属 [协作] 线；本次为**阈值同步**（1 行 + 1 个测试），请该线复核。
+SIZE_ERR_KB = 200  # AGENT.md §3.3 硬上限
 
 # 署名行：### [角色] · YYYY-MM-DD HH:MM（旧帖可能无 HH:MM，只警告不报错）
 SIG_RE = re.compile(

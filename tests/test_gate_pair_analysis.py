@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import math
+import statistics
 import sys
 from pathlib import Path
 
@@ -110,3 +112,47 @@ def test_make_name_re_matches_only_given_arms():
     rex = gp.make_name_re("a8", "b4")
     assert rex.match("a8_s42") and rex.match("b4_s47")
     assert not rex.match("gated_s42") and not rex.match("a16_s42")
+
+
+# ---------------------------------------- 区制匹配子集（内评 09-19 §二）
+def test_matched_seeds_keeps_only_same_regime():
+    """**区制匹配**：同 seed 两臂同态（划法 A）才配；翻转者剔除；缺臂不配。"""
+    # s42 两臂 PRED/PRED（留）｜s43 SAT→PRED（翻转，剔）｜s44 SAT/SAT（留）
+    a = {42: {"pred": 0.95, "N": 200}, 43: {"pred": 0.30, "N": 3240},
+         44: {"pred": 0.30, "N": 3240}}
+    b = {42: {"pred": 0.96, "N": 300}, 43: {"pred": 0.95, "N": 3240},
+         44: {"pred": 0.20, "N": 3240}}
+    assert gp.matched_seeds(a, b, [42, 43, 44]) == [42, 44]   # 43 两臂不同态 ⇒ 剔除
+    assert gp.matched_seeds(a, b, [43]) == []
+    assert gp.matched_seeds(a, {}, [42]) == []                # 缺一侧 ⇒ 不配
+
+
+# ---------------------------------------- 功效口径（内评 09-19 §三）
+def test_power_k_matches_project_value():
+    """n=6 ⇒ K=3.491（内评 09-19 §三 的实际用值）⇒ 口径一致,防两处算法漂移（F-R23 家族）。"""
+    assert gp.power_k(6) == pytest.approx(3.491, abs=1e-3)
+    assert gp.power_k(1) > gp.power_k(6) > gp.power_k(1000)    # 小样本系数更大
+    assert gp.power_k(1000) == pytest.approx(2.802, abs=1e-3)  # 大样本 ⇒ 正态近似
+
+
+def test_detectable_delta_properties():
+    """功效阈的核心性质：σ ↑ ⇒ 阈 ↑；n ↑ ⇒ 阈 ↓；n<2 ⇒ nan（不得当 0）。"""
+    base = [0.10, 0.12, 0.08, 0.11, 0.09, 0.10]
+    assert gp.detectable_delta(base) < gp.detectable_delta([x * 3 for x in base])
+    assert gp.detectable_delta(base) > gp.detectable_delta(base * 4)   # n: 6 → 24
+    assert math.isnan(gp.detectable_delta([0.1]))
+
+
+def test_e023_marginal_rho_collapses_under_regime_matching():
+    """🔴 回归钉死（内评 09-19 §二 的实证）：
+
+    值取自 `_rerun_logs/cstep3patchy/_e023_A_pair_analysis.json`（本工具直出）——
+    全配对（含 4/6 区制翻转）`ρ` 中位 **+0.0546** ⇒ 同态子集（s45/s47，n=2）落到 **+0.0038 ≈ 0**。
+    ⇒ 该"边际过线"读数**可被区制解释掉**；若将来有人拿"某臂 CI 下界 > 0"当阳性，本测试是反例锚点。
+    """
+    # 值是 **配对差 Δρ = p8 − p4**（s42…s47），不是 p8 的 ρ 本身 —— 两者混淆会让本测试形同虚设
+    full = [0.1177, -0.0085, 0.0865, 0.0228, 0.1569, -0.0151]  # 中位 +0.0546
+    matched = [0.0228, -0.0151]                                # 仅同态 seed（s45 / s47）
+    assert statistics.median(full) == pytest.approx(0.0546, abs=1e-4)
+    assert statistics.median(matched) == pytest.approx(0.0038, abs=1e-4)  # ⇒ 塌回 ≈0
+    assert gp.detectable_delta(full) > 0.05                    # 该量级连阈都够不着
