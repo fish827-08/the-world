@@ -70,7 +70,10 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           signal_mode: str | None = None,
           signal_alphabet: str | None = None,
           gate_mode: str | None = None, gate_delta: str | None = None,
-          distribution: str | None = None) -> SphereEngine:
+          distribution: str | None = None,
+          # A′ 记忆朝向梯度（2026-09-19）：`orientation` 才启用；默认 `none` = 原式（逐位等价）
+          memory_gradient: str = "none",
+          memory_gradient_gain: float = 0.3) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -83,7 +86,12 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     # C4 对账"开关 vs 设计"时两边都是 uniform ⇒ 判通过。⇒ 见 R127 的 **C8 前提对账**。
     # 现改为**可配**：默认仍 "uniform"（与历史批可比）；"patchy" 须**显式指定**且**先过前提冒烟**。
     c.resources.distribution = str(distribution) if distribution else "uniform"
-    d2 = InfoStructureConfig(enabled=True)
+    # A′ 走向构造参数（而非构造后赋值）：`__post_init__` 只在构造时跑 ⇒ 赋值不会校验（F1 同型教训）
+    d2 = InfoStructureConfig(
+        enabled=True,
+        memory_gradient=str(memory_gradient),
+        memory_gradient_gain=float(memory_gradient_gain),
+    )
     d2.learning_bottleneck = True
     d2.learning_rate = 0.05
     d2.arbitrary_codebook = codebook           # R19/V12：4 机制=True，3 机制对照=False
@@ -150,6 +158,15 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     return SphereEngine(c)
 
 
+def _mg_frac(e, key: str) -> str:
+    """A′ 朝向梯度计数占比；未适用/不可用 ⇒ **空串**（不是 0，同 R120 n/a 口径）。"""
+    st = e.memory_gradient_stats()
+    if not st or not st.get("counters_available"):
+        return ""
+    v = st.get(key)
+    return "" if v is None else str(v)
+
+
 def main() -> None:
     # ⚠️ 2026-09-15（内评代修，对应已上板的同类缺陷）：本文件续跑路径 print("\u21bb ...")，
     #    而 Windows 默认 GBK 控制台**无法编码 U+21BB (↻)** ⇒ UnicodeEncodeError ⇒ **rc=1 假失败**。
@@ -208,6 +225,13 @@ def main() -> None:
                     choices=["content", "full"],
                     help="Δ 口径：content=只去**内容项**（保留存在性项，**付款闸推荐**）；"
                          "full=去两项（现探针口径）")
+    # A′ 记忆朝向梯度：默认 none（原式 ⇒ 与历史批逐位可比）
+    ap.add_argument("--memory-gradient", dest="memory_gradient", default="none",
+                    choices=("none", "orientation"),
+                    help="A′：none=原式（记忆格==邻居格才加分）；orientation=朝向梯度（cos 允许为负）")
+    ap.add_argument("--memory-gradient-gain", dest="memory_gradient_gain",
+                    type=float, default=0.3,
+                    help="A′：朝向梯度增益（默认 0.3，与原式同量级）")
     ap.add_argument("--signal-alphabet", dest="signal_alphabet", default=None,
                     choices=list(SIGNAL_ALPHABET_IMPLEMENTED),
                     help='信号字母表档位（R113/R121）："16"=现状 4 位（默认）；'
@@ -279,7 +303,9 @@ def main() -> None:
                   signal_mode=args.signal_mode,
                   signal_alphabet=args.signal_alphabet,
                   gate_mode=args.gate_mode, gate_delta=args.gate_delta,
-                  distribution=args.distribution)
+                  distribution=args.distribution,
+                  memory_gradient=args.memory_gradient,
+                  memory_gradient_gain=args.memory_gradient_gain)
         start_tick = 0
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
@@ -314,7 +340,9 @@ def main() -> None:
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
               "resp_a", "resp_b", "oracle_ratio",   # D-18⑥/D-8（累计口径）
-              "mem_bit_frac"]   # R128 §五 步骤 0：mem_bit 取值分布的**时间序列**（累计口径）
+              "mem_bit_frac",   # R128 §五 步骤 0：mem_bit 取值分布的**时间序列**（累计口径）
+              # A′（2026-09-19）：**先证"测到了"**再判读 ⇒ 两个可观测性占比（累计口径）
+              "mem_grad_slots_frac", "mem_grad_trig_frac"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -363,6 +391,9 @@ def main() -> None:
                 "oracle_ratio": e.oracle_stats()["oracle_return_ratio"],
                 # R128 §五 步骤 0：`mem_bit` 取值分布（累计占比 = mem_bit=1 的发射 / 状态编码发射）
                 # 非 "8" 档 ⇒ 空串（**未适用**，不是 0；同 R120 的 ratio n/a 口径）
+                # A′：朝向梯度的**可观测性**（非 orientation 模式 ⇒ 空串 = 未适用，不是 0）
+                "mem_grad_slots_frac": _mg_frac(e, "slots_frac"),
+                "mem_grad_trig_frac": _mg_frac(e, "trigger_frac"),
                 "mem_bit_frac": (
                     e.alphabet_stats()["mem_bit_frac"]
                     if e.alphabet_stats()["mem_bit_frac"] is not None else ""
@@ -411,6 +442,10 @@ def main() -> None:
             "learning_bottleneck": bool(e.config.info_structure.learning_bottleneck),
             "steels_alignment": bool(e.config.info_structure.steels_alignment),
             "reputation_weight": float(e.config.info_structure.reputation_weight),
+            # A′（2026-09-19）：开关**必须可读回**（C4）—— 冒烟时实测它曾缺席 ⇒
+            # 无法回答"跑的到底是哪个档"，与 R127 的 C8 前提对账同型缺陷。
+            "memory_gradient": str(e.config.info_structure.memory_gradient),
+            "memory_gradient_gain": float(e.config.info_structure.memory_gradient_gain),
             "use_sim_core": bool(e.config.simulation.use_sim_core),
             "distribution": e.config.resources.distribution,
             "initial_count": int(e.config.population.initial_count),
@@ -465,6 +500,8 @@ def main() -> None:
             "oracle": e.oracle_stats(),
             # R121 §3：字母表档位 + §3.5 码值域守卫（bad_code_n 在 "4" 下必须恒 0）
             "alphabet": e.alphabet_stats(),
+            # A′（2026-09-19）：记忆朝向梯度的可观测性计数（非 orientation ⇒ **None 未适用**）
+            "memory_gradient": e.memory_gradient_stats(),
             # R121 §4.2：记忆继承卫生（"生而知之"量化；纯观测）
             "inheritance": e.inheritance_stats(),
         },

@@ -466,6 +466,26 @@ PRESETS = {
                  template="_rerun_logs/cstep3membit8/p8f_s{seed}.csv"),
         ],
     ),
+    # A′（2026-09-19，`设计-A档记忆朝向梯度-20260919.md` §七）：记忆**朝向梯度**正式批
+    #   问题：个体**自己**记住的富食格位置会不会改变它往哪走？（零新通道、改决策语义）
+    #   臂：`mg`（orientation，朝向梯度 on）vs `mn`（none，**原式**）⇒ **同批同 seed**
+    #   🔴 对照**不可复用** E-023/E-024 的 `p4`（那是旧语义的批次）
+    #   档位固定 `"4"`（最小，避免字母表变量混入）；世界 patchy（C8 lat_r2=0.317 ✓）
+    #   预计 12 run × 12k ≈ **32–36 min**（参照 E-023 实测 36.0 min）
+    "cstep3memgrad": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap11",
+               "distribution=patchy", "signal-alphabet=4"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad/mn_s{seed}.csv"),
+        ],
+    ),
     # δ（R129 批准）：**区制图** —— 测绘「SAT:PRED 比例」随 max_count 的曲线（找可观测选择窗）
     # ------------------------------------------------------------------
     # 🔴 一维杠杆选 max_count：SAT 判据（N >= 0.9*max_count）由它**定义** ⇒ 唯一确定的杠杆

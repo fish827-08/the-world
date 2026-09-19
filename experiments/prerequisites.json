@@ -68,5 +68,23 @@
         "why": "容量若几乎全由纬度解释 ⇒ 食物位置可预测 ⇒『知道』不比『看到』多 ⇒ 信息价值≈0 ⇒ 判读前提不成立"
       }
     ]
+  },
+  "cstep3memgrad": {
+    "science_question": "A′：个体**自己**记住的富食格位置是否改变它的移动方向（朝向梯度 vs 原式）—— 这是『把位置传给别人』之前必须先立的前提",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "本批问的是『记住的位置有没有用』；uniform 世界里食物位置可由纬度预测 ⇒ 记忆/信息本就不值钱 ⇒ null 不可解读"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "容量若几乎全由纬度解释 ⇒ 富食格长期固定且可预测 ⇒ 记忆不提供额外信息 ⇒ 前提不成立"
+      }
+    ]
   }
 }

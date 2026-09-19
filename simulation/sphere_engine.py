@@ -209,6 +209,8 @@ class SphereEngine:
         "_repro_cooldown",
         "_valence", "_arousal", "_expectation", "_baseline", "_trust",
         "_work_memory", "_mem_ptr", "_interpret", "_nb_table",
+        # A′ 记忆朝向梯度计数器（2026-09-19）—— 本类用 `__slots__`，**新属性必须登记否则无法赋值**
+        "_mem_grad_dec", "_mem_grad_slots", "_mem_grad_trig", "_mem_grad_counts_valid",
         "_codebook", "_learning_count",  # D2 信息结构：任意性码本 + 学习瓶颈计数
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
@@ -522,6 +524,14 @@ class SphereEngine:
         # random 模式无 state ⇒ 不计入 ⇒ 分母 = 状态编码发射数，报告须标此口径）
         self._mem_bit_on = 0
         self._mem_bit_n = 0
+        # A′ 记忆朝向梯度（2026-09-19）：**先证"测到了"再判读**（E-022 的可观测性缺口）
+        #   decisions = 走朝向梯度分支的**决策次数**（分母）；slots = 其中"记忆有内容"的次数；
+        #   trigger  = 其中"梯度确实产生非 0 贡献"的次数（`|gain| > 1e-9`）。
+        # ⚠️ 只在 `memory_gradient="orientation"` 时累计；`"none"` 下全为 0（见 `memory_gradient_stats`）。
+        self._mem_grad_dec = 0
+        self._mem_grad_slots = 0
+        self._mem_grad_trig = 0
+        self._mem_grad_counts_valid = True   # Rust 路径下置 False（该侧不产计数 ⇒ 按 n/a 报）
         # 守恒三账审计（R102 条件 1 修正版）
         self._audit_calls = 0
         self._audit_sum_delta = 0.0
@@ -1025,6 +1035,10 @@ class SphereEngine:
                     0, 1_000_000, size=len(mi), dtype=np.int64
                 )
                 # Rust 移动决策（含移动扣费）
+                # A′：Rust 侧**不产**朝向梯度计数器（只做决策）⇒ 标记"计数不可用"，
+                #     `memory_gradient_stats()` 会按 n/a 报，**不**冒充 0（防假读数）。
+                self._mem_grad_counts_valid = False
+                _ifc_mg = self.config.info_structure
                 self._sim_core.step_movement(
                     self._flat[:P], energy, genes, self._trust[:P],
                     self._work_memory[:P].reshape(-1), self._interpret[:P],
@@ -1032,6 +1046,9 @@ class SphereEngine:
                     self._nb_table.reshape(-1),
                     mi.astype(np.int64), rand_choice, move_cost_ind,
                     self.world.n_cells, self._nb_table.shape[1],
+                    int(self.world.cols),
+                    1 if _ifc_mg.memory_gradient == "orientation" else 0,
+                    float(_ifc_mg.memory_gradient_gain),
                 )
                 # 5.6) 信任学习：移动到有信号的格子后验证真假
                 target_cells = self._flat[mi]
@@ -1092,6 +1109,11 @@ class SphereEngine:
                 d2_softmax = ifcfg3.enabled and ifcfg3.softmax_tau > 0
                 # B1：R2 声誉权重（0=关闭 → sig_weight 恒 0.5，与旧版逐位一致）
                 rep_w = ifcfg3.reputation_weight if ifcfg3.enabled else 0.0
+                # A′ 记忆朝向梯度（2026-09-19）：**不**受 `enabled` 门控 —— 与 ⑥ 探针同规格，
+                # 必须能**单独**开关，否则 A′ 会被学习瓶颈/码本/softmax 等一堆 D2 机制污染
+                # （⇒ 不再是单变量实验）。`none` 下走**原式**，逐位等价。
+                mem_grad_on = (ifcfg3.memory_gradient == "orientation")
+                mem_grad_gain = float(ifcfg3.memory_gradient_gain)
                 for i, idx in enumerate(mi):
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
                     # ⚠️ 禁用 nb[:4]：8 邻列序以 [上左,上,上右,左] 打头，取"前4个"
@@ -1122,7 +1144,18 @@ class SphereEngine:
                         fr * 0.5 + sp * sig_weight
                     ) + soc * densities[nb]
                     valid_mem = self._work_memory[idx][self._work_memory[idx] >= 0]
-                    if len(valid_mem) > 0:
+                    if mem_grad_on:
+                        # A′：先记"测到了没有"，再加朝向梯度（可观测性优先，见 memory_gradient_stats）
+                        self._mem_grad_dec += 1
+                        if len(valid_mem) > 0:
+                            self._mem_grad_slots += 1
+                            g = self._memory_orientation_cos(
+                                int(self._flat[idx]), nb, valid_mem)
+                            if float(np.abs(g).max()) > 1e-9:
+                                self._mem_grad_trig += 1
+                            score = score + mem_grad_gain * perc * g
+                    elif len(valid_mem) > 0:
+                        # 原式（**严格不动**：`0.3` 字面量，保与旧版逐位一致）
                         mem_in_nb = np.isin(nb, valid_mem)
                         score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
                     nb_sigs = self.signals._marks[nb]
@@ -1815,6 +1848,71 @@ class SphereEngine:
             "mem_inherit_far_n": far,
             "mem_inherit_far_frac": round(far / n, 6) if n else 0.0,
             "distance_convention": "grid_ring(行差+经度环绕列差)，未做纬度余弦缩放（上界）",
+        }
+
+    # ------------------------------------------------ A′ 记忆**朝向梯度**（2026-09-19）
+    def _memory_orientation_cos(self, cur: int, nb: np.ndarray,
+                                valid_mem: np.ndarray) -> np.ndarray:
+        """A′：候选邻居格方向 vs **记忆点方向** 的 `max cos`（每格一个值）。
+
+        `cos ∈ [-1, 1]` ⇒ **背向邻居会被减分** —— 这才是"梯度"而非单纯吸引。
+        取 `max` 而非 `Σ`：只让**最对准的那个记忆点**说话（语义干净，槽位多不会放大）。
+
+        ⚠️ **双路径契约**：表达式与 Rust（`sim_core/src/movement.rs` 的 `orientation` 分支）
+        **逐字同式**，包括经度环绕（Rust `rem_euclid` ≡ Python `%`（正除数即 floor-mod））
+        ⇒ 保**逐位一致**；改任一侧必须同步改另一侧（F-R23 家族的正面预防）。
+        """
+        cols = int(self.world.cols)
+        half = cols / 2.0
+        cr, cc = divmod(int(cur), cols)
+        nr, nc = np.divmod(nb.astype(np.int64), cols)
+        dnr = nr.astype(np.float64) - float(cr)
+        dnc = ((nc.astype(np.float64) - float(cc)) + half) % cols - half
+        mr, mc = np.divmod(valid_mem.astype(np.int64), cols)
+        dmr = mr.astype(np.float64) - float(cr)
+        dmc = ((mc.astype(np.float64) - float(cc)) + half) % cols - half
+        un = np.sqrt(dnr * dnr + dnc * dnc)
+        mn = np.sqrt(dmr * dmr + dmc * dmc)
+        # 🔴 两处过滤，缺一即错（与 Rust 的 `mc < 0 { continue }` / `m == cur { continue }` 对应）：
+        #   ① `-1` 空槽**必须**过滤 —— `divmod(-1, cols)` 会得到 (-1, 119) 这种"合法"行列
+        #      ⇒ 不过滤就会把空槽当成真实记忆点（本测试正是这样抓出来的）
+        #   ② 记忆点 == 当前格 ⇒ 方向为零向量 ⇒ 跳过
+        ok = (valid_mem >= 0) & (mn > 0.0)
+        if not ok.any():
+            return np.zeros(len(nb), dtype=np.float64)
+        dmr, dmc, mn = dmr[ok], dmc[ok], mn[ok]
+        num = dnr[:, None] * dmr[None, :] + dnc[:, None] * dmc[None, :]
+        den = un[:, None] * mn[None, :]
+        return (num / den).max(axis=1)
+
+    def memory_gradient_stats(self) -> dict | None:
+        """A′ 的可观测性计数 —— **先证"测到了"，再判读结果**（E-022 缺口的直接对策）。
+
+        非 `orientation` 模式 ⇒ **None（未适用）**，**不是 0**（同 R120 的 ratio n/a 口径）。
+        """
+        ifcfg = self.config.info_structure
+        if str(ifcfg.memory_gradient) != "orientation":
+            return None
+        if not self._mem_grad_counts_valid:
+            # Rust（use_sim_core=True）侧只做决策、不产计数 ⇒ **报 n/a，不冒充 0**
+            return {
+                "mode": "orientation",
+                "gain": float(ifcfg.memory_gradient_gain),
+                "counters_available": False,
+                "note": "Rust 路径不产朝向梯度计数器（仅 Python 路径统计）⇒ 计数按 n/a 报",
+            }
+        d = int(self._mem_grad_dec)
+        slots = int(self._mem_grad_slots)
+        trig = int(self._mem_grad_trig)
+        return {
+            "mode": "orientation",
+            "gain": float(ifcfg.memory_gradient_gain),
+            "counters_available": True,
+            "decisions": d,
+            "with_slots": slots,
+            "triggered": trig,
+            "slots_frac": (round(slots / d, 6) if d else None),
+            "trigger_frac": (round(trig / d, 6) if d else None),
         }
 
     def alphabet_stats(self) -> dict:

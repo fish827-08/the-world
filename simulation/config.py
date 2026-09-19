@@ -307,6 +307,18 @@ class InfoStructureConfig:
     alignment_step: float = 0.15          # 对齐步长（解读表向对方收敛的比例）
     alignment_noise: float = 0.02         # 对齐时附加噪声σ
 
+    # ---- 机制3.6：A′ 记忆**朝向梯度**（设计稿 `docs/设计文档/设计-A档记忆朝向梯度-20260919.md`）----
+    # 🔴 **不**受 `enabled` 门控（与 ⑥ 探针同规格）：A′ 必须能**单独**开关，否则测试会被
+    #    学习瓶颈/任意性码本/softmax 等一堆 D2 机制污染 ⇒ 不再是单变量。
+    # 现状问题：原记忆加分只在「记忆格 **恰好等于** 某个邻居格」时生效，而那格**本来就能直读**
+    #    （`food_ratio[nbc]` 在同一次决策里已被读到）⇒ **按构造就是冗余奖励**。
+    # "orientation"：改为朝向梯度 —— 记忆格（可远在感知之外）按其**方向**给对应邻居加分：
+    #    `gain(c) = memory_gradient_gain · perc · max_m cos(方向(cur→c), 方向(cur→m))`
+    #    🔴 `cos` **允许为负** ⇒ 背向邻居被减分 ⇒ 这才是"梯度"（不是单纯吸引）。
+    # "none" = 原式（**默认** ⇒ 与旧版逐位一致，可对拍/回退/当同批对照臂）。
+    memory_gradient: str = "none"
+    memory_gradient_gain: float = 0.3
+
     # ---- D-18 ⑥ 探针（R43：信号响应率三联报）----
     # 纯观测（零 RNG、零行为改变——有测试断言逐位一致）；只增每 tick 一点算术开销。
     # False = 关闭（默认；完全无开销）。⑥a 暴露率 / ⑥b Δ_i / ⑥=⑥a×⑥b + argmax 翻转率辅助。
@@ -321,6 +333,9 @@ class InfoStructureConfig:
         assert self.perception_noise >= 0
         assert self.softmax_tau >= 0
         assert self.reputation_weight >= 0, "声誉权重非负（0=关闭）"
+        assert self.memory_gradient in ("none", "orientation"), \
+            "memory_gradient 只支持 none（原式）或 orientation（朝向梯度）"
+        assert self.memory_gradient_gain >= 0, "记忆朝向梯度增益非负"
         assert 0.0 <= self.alignment_rate <= 1.0
         assert 0.0 <= self.alignment_step <= 1.0
         assert self.alignment_noise >= 0

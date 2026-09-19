@@ -51,6 +51,9 @@ pub fn step_movement(
     n_cells: usize,
     nb_stride: usize,
     gene_count: usize,
+    n_cols: usize,
+    mem_grad_mode: u8,
+    mem_grad_gain: f64,
 ) {
     let n = flat.len();
     if n == 0 || move_inds.is_empty() {
@@ -93,13 +96,61 @@ pub fn step_movement(
             let mut s = perc * (food_ratio[nbc] * 0.5 + sig_present[nbc] * 0.5 * trust_val)
                 + soc * densities[nbc];
 
-            // 工作记忆：记忆中的食物格子在邻格中 → 额外加分
+            // 工作记忆（A′，2026-09-19）：
+            //   mode = 0（none）⇒ **原式**：记忆格 == 该邻居格 ⇒ +gain·perc（行为不变）
+            //   mode = 1（orientation）⇒ **朝向梯度**：
+            //       s += gain · perc · max_m cos(方向(cur→nbc), 方向(cur→m))
+            //       🔴 cos **允许为负** ⇒ 背向邻居减分 ⇒ 这才叫"梯度"（不是单纯吸引）
+            //   ⚠️ 与 Python（`sphere_engine._memory_orientation_cos`）**逐字同式**：
+            //       cos 用 `(u·v)/(|u||v|)` 的**同一展开**；经度环绕用 `rem_euclid`
+            //       （≡ Python 对正除数取模）⇒ 保双路径逐位一致。
             let wm_base = idx * 4;
-            for w in 0..4 {
-                let mc = work_memory[wm_base + w];
-                if mc >= 0 && mc as usize == nbc {
-                    s += 0.3 * perc;
-                    break;
+            if mem_grad_mode == 0 {
+                for w in 0..4 {
+                    let mc = work_memory[wm_base + w];
+                    if mc >= 0 && mc as usize == nbc {
+                        s += mem_grad_gain * perc;
+                        break;
+                    }
+                }
+            } else {
+                let cur = flat[idx] as usize;
+                let cr = (cur / n_cols) as f64;
+                let cc = (cur % n_cols) as f64;
+                let cols_f = n_cols as f64;
+                let half = cols_f / 2.0;
+                let nr = (nbc / n_cols) as f64;
+                let nc0 = (nbc % n_cols) as f64;
+                let dnr = nr - cr;
+                let dnc = (nc0 - cc + half).rem_euclid(cols_f) - half;
+                let un = (dnr * dnr + dnc * dnc).sqrt();
+                let mut best: f64 = -2.0;
+                if un > 0.0 {
+                    for w in 0..4 {
+                        let mc = work_memory[wm_base + w];
+                        if mc < 0 {
+                            continue;
+                        }
+                        let m = mc as usize;
+                        if m == cur {
+                            continue;
+                        }
+                        let mr = (m / n_cols) as f64;
+                        let mc0 = (m % n_cols) as f64;
+                        let dmr = mr - cr;
+                        let dmc = (mc0 - cc + half).rem_euclid(cols_f) - half;
+                        let mn = (dmr * dmr + dmc * dmc).sqrt();
+                        if mn <= 0.0 {
+                            continue;
+                        }
+                        let cosv = (dnr * dmr + dnc * dmc) / (un * mn);
+                        if cosv > best {
+                            best = cosv;
+                        }
+                    }
+                }
+                if best > -2.0 {
+                    s += mem_grad_gain * perc * best;
                 }
             }
 
