@@ -229,6 +229,92 @@ def check_refs(root: str, board_path: str, limit: int = 10) -> list:
     return out
 
 
+SIG_LEVEL_WRONG_RE = re.compile(r"^#{1,2}\s*\[[^\]]+\]")
+SNAPSHOT_RE = re.compile(r"状态快照[（(](\d{4}-\d{2}-\d{2})")
+
+
+def latest_post_date(board_path: str) -> str | None:
+    """板内最后一帖的日期（**含格式不合规的帖** —— 漏帖正是要靠它发现的）。
+
+    取日期的顺序：① 标题里的 `· YYYY-MM-DD`（规范写法）；
+    ② 标题后 6 行内第一个 `YYYY-MM-DD`（容忍 `## [角色] …` 这类漏索引写法）。
+    """
+    with open(board_path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    last = None
+    for i, line in enumerate(lines):
+        if not re.match(r"^#{2,3}\s*\[[^\]]+\]", line):
+            continue
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", line)
+        if not m:
+            for follow in lines[i + 1:i + 7]:
+                m = re.search(r"(\d{4}-\d{2}-\d{2})", follow)
+                if m:
+                    break
+        if m:
+            last = max(last, m.group(1)) if last else m.group(1)
+    return last
+
+
+def check_signature_levels(board_path: str) -> list:
+    """署名层级检查：`## [角色] …`（应为 `### [角色] · YYYY-MM-DD HH:MM`）。
+
+    实证（2026-09-19 14:1x）：新板上 `[内评]` 的审稿帖用了 `##`，
+    导致按 `### [x] · 时间` 的自动索引**漏掉整帖**（体检报"0 帖"）。
+    """
+    bad = []
+    with open(board_path, encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            if SIG_LEVEL_WRONG_RE.match(line):
+                bad.append((i, line.strip()[:60]))
+    if not bad:
+        return [{"level": "ok", "item": "sig-level", "msg": "无层级/格式不合规的署名行"}]
+    return [{"level": "error", "item": "sig-level",
+             "msg": f"{len(bad)} 行署名用了 `##`（应为 `###`）—— 自动索引会漏帖（§3.1）: "
+                    + ", ".join(f"L{i}" for i, _ in bad[:5]),
+             "lines": [i for i, _ in bad]}]
+
+
+def check_summary_freshness(board_path: str) -> list:
+    """结构性摘要（状态快照 / 未落定项）是否落后于新帖。"""
+    with open(board_path, encoding="utf-8") as f:
+        text = f.read()
+    m = SNAPSHOT_RE.search(text)
+    last = latest_post_date(board_path)
+    if not m:
+        return [{"level": "warn", "item": "summary",
+                 "msg": "未找到'状态快照（YYYY-MM-DD）'表头，无法判新鲜度"}]
+    snap = m.group(1)
+    if last and last > snap:
+        return [{"level": "warn", "item": "summary",
+                 "msg": f"状态快照日期 {snap} < 板尾最新帖 {last} —— "
+                        f"结构性摘要可能已过期（归档/刷新未跟上）"}]
+    return [{"level": "ok", "item": "summary",
+             "msg": f"状态快照日期 {snap}（板尾最新帖 {last or '?'}）"}]
+
+
+def check_todo_sync(share_dir: str, board_path: str) -> list:
+    """待办与交接.md 的最后条目日期 vs 板尾最新帖日期（防'发板≠同步索引'）。"""
+    todo = os.path.join(share_dir, "待办与交接.md")
+    if not os.path.isfile(todo):
+        return [{"level": "warn", "item": "todo", "msg": "待办与交接.md 不存在"}]
+    last_todo = None
+    with open(todo, encoding="utf-8") as f:
+        for line in f:
+            m = re.match(r"^\|\s*(\d{4}-\d{2}-\d{2})\s", line)
+            if m:
+                last_todo = m.group(1)
+    last_post = latest_post_date(board_path)
+    if not last_todo:
+        return [{"level": "warn", "item": "todo", "msg": "待办表内未识别到日期条目"}]
+    if last_post and last_post > last_todo:
+        return [{"level": "warn", "item": "todo",
+                 "msg": f"待办最后条目 {last_todo} < 板尾最新帖 {last_post} —— "
+                        f"索引同步可能滞后（R111/R125 家族）"}]
+    return [{"level": "ok", "item": "todo",
+             "msg": f"待办最后条目 {last_todo}（板尾最新帖 {last_post or '?'}）"}]
+
+
 def check_pin(board_path: str, max_age_days: int | None = None) -> list:
     """T-6 置顶区体检（委托 board_pin.validate_pin；不可用时降级为标记检查）。"""
     try:
@@ -382,6 +468,9 @@ def cmd_check(args) -> int:
     findings += check_sizes(share_dir)
     findings += check_signatures(board)
     findings += check_clock(board)
+    findings += check_signature_levels(board)
+    findings += check_summary_freshness(board)
+    findings += check_todo_sync(share_dir, board)
     findings += check_pin(board)
     findings += check_locks(share_dir)
     findings += check_remote_refs(root, args.remote, args.branch, args.net)
@@ -404,6 +493,56 @@ def cmd_check(args) -> int:
     n_err = sum(1 for f in findings if f["level"] == "error")
     n_warn = sum(1 for f in findings if f["level"] == "warn")
     return 2 if n_err else (1 if n_warn else 0)
+
+
+# 目标文件：编号库（路线共识 / 待办 / 实验记录 / 项目记忆）+ 全文（讨论板 + 归档）
+SEARCH_TARGETS = [
+    os.path.join("_share", "路线共识.md"),
+    os.path.join("_share", "待办与交接.md"),
+    os.path.join("_share", "讨论板.md"),
+    os.path.join("docs", "实验记录.md"),
+    os.path.join(".workbuddy", "memory", "MEMORY.md"),
+]
+
+
+def cmd_find(args) -> int:
+    """检索：按编号（R116 / F-R24）或关键词，跨索引文件 + 讨论板（可含归档）。
+
+    用途 = 团队记忆机制设计稿 §三.2（决策与教训库可检索化）。
+    """
+    root = os.path.abspath(args.root)
+    if args.id:
+        pattern = re.compile(r"(?<![A-Za-z0-9-])" + re.escape(args.id) + r"\b")
+    elif args.kw:
+        pattern = re.compile(re.escape(args.kw), re.IGNORECASE)
+    else:
+        print("[错误] 需给 --id 或 --kw")
+        return 1
+
+    files = [os.path.join(root, p) for p in SEARCH_TARGETS]
+    if args.include_archive:
+        arc = os.path.join(root, "_share", "archive")
+        if os.path.isdir(arc):
+            files += sorted(os.path.join(arc, n)
+                            for n in os.listdir(arc) if n.endswith(".md"))
+    hits = []
+    for path in files:
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f, 1):
+                if pattern.search(line):
+                    hits.append((os.path.relpath(path, root), i,
+                                 line.strip()[:args.width]))
+    if not hits:
+        print(f"[无命中] {args.id or args.kw}")
+        return 0
+    print(f"命中 {len(hits)} 处 —— {args.id or args.kw}")
+    for rel, i, text in hits[:args.limit]:
+        print(f"  {rel}:{i}: {text}")
+    if len(hits) > args.limit:
+        print(f"  …另 {len(hits) - args.limit} 处（用 --limit 放宽）")
+    return 0
 
 
 def cmd_metrics(args) -> int:
@@ -450,6 +589,14 @@ def main(argv=None) -> int:
     p_ck.add_argument("--remote", default="gitee")
     p_ck.add_argument("--branch", default="main")
     p_ck.set_defaults(fn=cmd_check)
+
+    p_fd = sub.add_parser("find", parents=[common], help="检索编号/关键词（记忆库）")
+    p_fd.add_argument("--id", default=None, help="编号，如 R116 / F-R24")
+    p_fd.add_argument("--kw", default=None, help="关键词（忽略大小写）")
+    p_fd.add_argument("--include-archive", action="store_true", help="含归档板")
+    p_fd.add_argument("--limit", type=int, default=20)
+    p_fd.add_argument("--width", type=int, default=140, help="每行截断宽度")
+    p_fd.set_defaults(fn=cmd_find)
 
     p_mt = sub.add_parser("metrics", parents=[common], help="协作成本度量（T-4）")
     p_mt.add_argument("--json", action="store_true")

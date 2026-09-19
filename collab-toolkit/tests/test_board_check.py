@@ -139,6 +139,69 @@ def test_metrics_ruling_regex_excludes_fr(fake_share):
     assert m["defect_count"] == 2
 
 
+# ---------------- 署名层级 / 新鲜度 / 检索（2026-09-19 新增） ----------------
+def test_sig_level_error_on_double_hash(tmp_path):
+    """`## [角色] …` 会让自动索引漏帖 ⇒ 必须报错。"""
+    board = tmp_path / "讨论板.md"
+    board.write_text("# 板\n\n## [内评] 昨晚任务审核（09-19 14:0x）\n正文\n",
+                     encoding="utf-8")
+    findings = bc.check_signature_levels(str(board))
+    assert any(f["level"] == "error" and "L3" in f["msg"] for f in findings)
+
+
+def test_sig_level_ok(tmp_path):
+    board = tmp_path / "讨论板.md"
+    board.write_text("### [协作] · 2026-09-19 14:00（Asia/Shanghai）\n正文\n",
+                     encoding="utf-8")
+    assert bc.check_signature_levels(str(board))[0]["level"] == "ok"
+
+
+def test_latest_post_date_falls_back_to_body(tmp_path):
+    """标题不带 `· 日期` 时，从标题后 6 行内取日期（兼容漏索引写法）。"""
+    board = tmp_path / "讨论板.md"
+    board.write_text("## [内评] 审稿\n审核时刻 2026-09-19 14:0x；基线 x\n",
+                     encoding="utf-8")
+    assert bc.latest_post_date(str(board)) == "2026-09-19"
+
+
+def test_summary_freshness_stale(tmp_path):
+    board = tmp_path / "讨论板.md"
+    board.write_text(
+        "## 一、状态快照（2026-09-18）\n\n"
+        "### [所有者] · 2026-09-19 01:42（Asia/Shanghai）\n新帖\n",
+        encoding="utf-8")
+    findings = bc.check_summary_freshness(str(board))
+    assert findings[0]["level"] == "warn"
+    assert "2026-09-18" in findings[0]["msg"]
+
+
+def test_summary_freshness_ok(tmp_path):
+    board = tmp_path / "讨论板.md"
+    board.write_text("## 一、状态快照（2026-09-19）\n\n"
+                     "### [所有者] · 2026-09-19 01:42\n新帖\n", encoding="utf-8")
+    assert bc.check_summary_freshness(str(board))[0]["level"] == "ok"
+
+
+def test_todo_sync_lag_warns(tmp_path):
+    root = tmp_path / "r"
+    (root / "_share").mkdir(parents=True)
+    board = root / "_share" / "讨论板.md"
+    board.write_text("### [所有者] · 2026-09-19 01:42\n新帖\n", encoding="utf-8")
+    (root / "_share" / "待办与交接.md").write_text(
+        "| 2026-09-18 01:10 | 旧条目 |\n", encoding="utf-8")
+    findings = bc.check_todo_sync(str(root / "_share"), str(board))
+    assert findings[0]["level"] == "warn"
+
+
+def test_find_cli_by_id(fake_share, capsys):
+    root, share, _ = fake_share
+    with open(os.path.join(share, "路线共识.md"), "w", encoding="utf-8") as f:
+        f.write("| **R200** | 测试条目 |\n")
+    rc = bc.main(["find", "--root", root, "--id", "R200"])
+    out = capsys.readouterr().out
+    assert rc == 0 and "R200" in out and "路线共识.md:1" in out
+
+
 # ---------------- CLI ----------------
 def test_cli_check_exit_code(fake_share, capsys):
     root, _, _ = fake_share

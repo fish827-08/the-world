@@ -35,6 +35,10 @@ python collab-toolkit/tools/board_pin.py show
 python collab-toolkit/tools/board_pin.py add --text "跑批中：C1b/C2"
 python collab-toolkit/tools/board_pin.py check
 
+# 记忆检索（编号 / 关键词，跨索引文件，可含归档）
+python.exe collab-toolkit/tools/board_check.py find --id R116
+python.exe collab-toolkit/tools/board_check.py find --kw "F-R24" --include-archive
+
 # 新会话开场提示词
 python collab-toolkit/tools/onboard.py --role collab --net
 
