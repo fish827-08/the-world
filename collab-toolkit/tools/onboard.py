@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -110,6 +111,105 @@ def git_baseline(root: str, net: bool) -> str:
     return line
 
 
+# ---------------- 交接包（T-7 P1：上次进展 / 未完成 / 今天要读的三帖） ----------------
+def recent_daily_logs(memory_dir: str, n: int = 3) -> list:
+    """最近 n 天的日志文件路径（新→旧）。"""
+    import glob
+    files = sorted(glob.glob(os.path.join(memory_dir, "20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].md")),
+                   reverse=True)
+    return files[:n]
+
+
+EVIDENCE_TAGS = ("实测", "代码", "文献", "网络", "文档", "推断", "待核")
+
+
+def _section_role(line: str) -> str | None:
+    """从日志段落头 `## [协作·板桥] …` 提取角色 token（如 '协作·板桥'）。"""
+    m = re.match(r"^##\s*\[([^\]]+)\]", line)
+    return m.group(1) if m else None
+
+
+def role_recent_lines(memory_dir: str, role_tag: str, max_lines: int = 3) -> list:
+    """从最近日志里抓本角色最新一段的要点行（`- ` / `| ` 开头），取末尾 max_lines 条。"""
+    base = role_tag.strip("[]")  # '[协作]' -> '协作'
+    for path in recent_daily_logs(memory_dir, 3):
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        # 找本角色最新的段落头（token 以角色名开头，兼容 '[协作·板桥]' 变体）
+        start = None
+        for i, line in enumerate(lines):
+            token = _section_role(line)
+            if token and token.split("·")[0].strip() == base:
+                start = i
+        if start is None:
+            continue
+        pts = [ln.lstrip("-| ").strip(" `") for ln in lines[start + 1:]
+               if ln.strip().startswith(("- ", "| "))
+               and not ln.strip().startswith(("|--", "| ---"))]
+        pts = [p for p in pts if p][:max_lines]
+        if pts:
+            return pts
+    return []
+
+
+def role_open_items(board_path: str, role_sig: str, max_items: int = 2) -> list:
+    """从讨论板"未落定项"表抓责任方含本角色的行（决策点 + 未决）。"""
+    if not os.path.isfile(board_path):
+        return []
+    out = []
+    with open(board_path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip().startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 5 or cells[0] in ("#", "---") or "决策点" in cells[0]:
+                continue
+            owner_cell = cells[-1]
+            if role_sig in owner_cell or "板桥" in owner_cell and role_sig == "[协作]":
+                out.append(f"{cells[0]} {cells[1]} —— 未决: {cells[3]}")
+    return out[:max_items]
+
+
+def latest_posts(board_path: str, n: int = 3) -> list:
+    """板尾最近 n 帖的署名行（作为"今天要读的三帖"）。
+
+    排除证据小节（`### [实测] …` 等）——它们是帖内小标题，不是帖子。
+    """
+    if not os.path.isfile(board_path):
+        return []
+    sig = re.compile(r"^#{2,3}\s*\[([^\]]+)\]")
+    hits = []
+    with open(board_path, encoding="utf-8") as f:
+        for line in f:
+            m = sig.match(line)
+            if m and m.group(1) not in EVIDENCE_TAGS:
+                hits.append(line.strip()[:80])
+    return hits[-n:]
+
+
+def handover_section(role_key: str, root: str) -> str:
+    """交接包段（T-7 P1）。解析失败时给出占位符，不阻塞开场词生成。"""
+    r = ROLE_REGISTRY[role_key]
+    role_tag = r["署名"]
+    memory_dir = os.path.join(root, ".workbuddy", "memory")
+    board = os.path.join(root, "_share", "讨论板.md")
+    lines = ["", "## 交接包（T-7 P1：机器采集，人工复核）"]
+    recent = role_recent_lines(memory_dir, role_tag)
+    lines.append("### 上次进展（最近日志要点，≤3 条）")
+    lines += [f"- {p}" for p in recent] or ["- （未在最近 3 天日志找到本角色段落——人工补）"]
+    open_items = role_open_items(board, role_tag)
+    lines.append("### 未完成（未落定项表中本角色责任方，≤2 条）")
+    lines += [f"- {p}" for p in open_items] or ["- （板上未落定项中未找到本角色条目）"]
+    lines.append("### 今天要读的三帖（板尾最近 3 帖）")
+    lines += [f"- {p}" for p in latest_posts(board, 3)] or ["- （板为空）"]
+    lines.append("> ⚠️ 以上为机器采集的起点，**以板尾/日志原文为准**；"
+                 "结束会话前记得留『已完成/未完成/阻塞』三行。")
+    return "\n".join(lines)
+
+
 def render(role_key: str, root: str, net: bool) -> str:
     r = ROLE_REGISTRY[role_key]
     alias = r["花名"].strip("（）()")
@@ -140,6 +240,11 @@ def render(role_key: str, root: str, net: bool) -> str:
         "未 push 不算发言",
         "3. 只追加、不改他人文件；证据带标签（[实测]/[代码]/[文献]/[网络]/[文档]/[推断]/[待核]）",
     ]
+    # T-7 P1：交接包（上次进展 / 未完成 / 今天要读的三帖）
+    try:
+        lines.append(handover_section(role_key, root))
+    except Exception as e:  # 交接包是辅助，绝不能阻塞开场词
+        lines.append(f"\n## 交接包\n- （采集失败：{e} —— 请人工读板尾与日志）")
     return "\n".join(lines) + "\n"
 
 
