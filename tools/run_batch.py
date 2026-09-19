@@ -36,7 +36,8 @@ if HERE not in sys.path:
 
 from batch_progress import render, snapshot, target_ticks  # noqa: E402
 
-CLEAR = "\033[2J\033[H"
+CLEAR = "\033[2J\033[H"  # ⚠️ 已废弃（2026-09-19 fish：清整屏会抹掉之前的打印内容）；保留仅为兼容
+# 新做法：只重写进度条自己的区域（光标上移 n_lines 行 + \033[J 清屏尾），历史内容保留
 
 
 def read_tail(path: str, n: int = 4) -> list[str]:
@@ -76,6 +77,7 @@ def main() -> int:
     t0 = time.time()
     ticks, logi = target_ticks(args.preset, args.ticks)
     clear = (not args.plain) and sys.stdout.isatty()
+    n_lines = 0  # 进度条区域行数（首帧打印后记录；后续刷新只重写该区域，不清屏）
     if not clear:
         print("[run_batch] 非交互输出（或 --plain）⇒ 滚动模式；终端下运行时为原地刷新进度条\n")
 
@@ -96,7 +98,8 @@ def main() -> int:
                     if tail:
                         body += "\n── runner 日志尾 ──\n" + "\n".join(tail)
                 if clear:
-                    sys.stdout.write(CLEAR + body + "\n")
+                    sys.stdout.write((f"\033[{n_lines}A\033[J" if n_lines else "") + body + "\n")
+                    n_lines = body.count("\n") + 1
                 elif rc is None:
                     print(body, flush=True)
                 sys.stdout.flush()
