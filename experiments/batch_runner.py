@@ -498,7 +498,13 @@ PRESETS = {
     #      （引擎确定性 ⇒ 重跑 = 逐位重复），且把它们计入"≥15/20"会**重复使用**
     #      产生假设的那 6 个数据点（正是所有者 ② 说的"被选中的极端值"问题）⇒ 偏离已上板说明
     #   配置：δ（E-026）无健康窗 ⇒ 按 R132 §二 跑**原配置 max_count=3240**（所有者 18:45 §四.3 ✓）
-    "cstep3memgrad20": dict(
+    # 🔴 **4 码闭合候选批**（内评 21:5x 帖方案 (a)；原 `cstep3memgrad20` 预检版，因同名相撞
+    #    改名避让——E-027 实跑的是上面的 16 码版）。内评判定"4 码问题未闭合"：
+    #    字母表改变基线区制（s46/s47 在 4 码崩、16 码活）⇒ 16 码复测**不能**证伪 4 码假设。
+    #    seed 48–67（**全 fresh**，不与产生假设的 42–47 重叠——内评复测纪律 ②）。
+    #    ⏳ 是否跑 = 内评给的 (a)/(b) 二选一（(b) = 定向检验"无条件崩塌 seed 救助"），
+    #    由所有者/fish 裁；本 preset 备好待命。
+    "cstep3memgrad20a4": dict(
         script="experiments/a4_verify_capacity.py",
         grid=["seed=48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67"],
         fixed=["mode=on", "arm=main", "ticks=12000",
@@ -507,9 +513,9 @@ PRESETS = {
                "distribution=patchy", "signal-alphabet=4"],
         variants=[
             dict(name="mg", args=["memory-gradient=orientation"],
-                 template="_rerun_logs/cstep3memgrad20/mg_s{seed}.csv"),
+                 template="_rerun_logs/cstep3memgrad20a4/mg_s{seed}.csv"),
             dict(name="mn", args=["memory-gradient=none"],
-                 template="_rerun_logs/cstep3memgrad20/mn_s{seed}.csv"),
+                 template="_rerun_logs/cstep3memgrad20a4/mn_s{seed}.csv"),
         ],
     ),
     # R132 ⑤（所有者 18:45 建议，可选 +1h）：**uniform 判别臂** —— 排掉最大解释风险
@@ -569,6 +575,10 @@ PRESETS = {
     # 🔴 20 seed 连续（42–61）：n=20 双侧符号检验全同向 p≈1.9e-6，可判读；功效口径收尾时算
     # ⚠️ 独立快照目录 cstep_snap_mg20；判读预注册：pred_frac 同向性（双侧符号检验）+ 区制翻转方向
     #    （单向比 = 翻转中朝 SAT 的比例，二项检验 vs 0.5）
+    # 🔴 **E-027 实跑版**（保留供复现）：16 码（未显式传 signal-alphabet ⇒ 默认 16）、
+    #    s42–61、快照 `cstep_snap_mg20`。⚠️ 与 19:05 预检广告的 4码/48-67 版**同名相撞**、
+    #    文件序靠后者生效 ⇒ E-027 实跑 16 码（内评发现；4 码问题未闭合，闭合候选见
+    #    `cstep3memgrad20a4`）。**本条不得改名/删除**——它就是 E-027 的配置凭证。
     "cstep3memgrad20": dict(
         script="experiments/a4_verify_capacity.py",
         grid=["seed=42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61"],
@@ -584,6 +594,21 @@ PRESETS = {
         ],
     ),
 }
+
+# ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
+# 事故：两个会话先后登记了同名 `cstep3memgrad20`（内容不同：4码/48-67 vs 16码/42-61），
+# 启动时生效的是**文件序靠后**的那个 ⇒ 实跑配置（16码）≠ 预检广告的配置（4码）⇒ E-027 跑错配置。
+# dict 字面量的重复键在**编译期**合并、运行时无从查起 ⇒ 只能扫本文件源码兜底（fail-closed）。
+import re as _re_dup
+
+_src = Path(__file__).read_text(encoding="utf-8")
+_blk = _src[_src.index("PRESETS = {"):_src.index("\n}", _src.index("PRESETS = {"))]
+_preset_names = _re_dup.findall(r'^    "([a-z0-9_]+)": dict\(', _blk, _re_dup.M)
+_dupes = sorted({n for n in _preset_names if _preset_names.count(n) > 1})
+if _dupes:
+    raise RuntimeError(
+        f"PRESETS 存在同名定义（后者静默覆盖前者，F-R32）：{_dupes} —— "
+        "请先删除重复条目再运行（每个 preset 名全局唯一）")
 
 
 # ---------------------------------------------------------------- 单实例锁
@@ -723,6 +748,18 @@ def run_batch(runs: list[Run], conc: int, retries: int, python: str, workdir: Pa
     running: list[Run] = []
     t_start = time.time()
     guard_hits = 0
+
+    # ---- 🔴 F-R32 配套：**启动即落盘"解析后的完整命令行"**（resolved runlist）----
+    # 让"这次跑的到底是什么"在 launch 时刻就有据可查（summary 的 switches 属事后对账；
+    # E-027 的 16 码事故若有此文件，launch 后 1 分钟就能发现配置与预注册不符）。
+    if runs:
+        _rl = Path(runs[0].log).parent / "_resolved_runlist.txt"
+        with open(_rl, "w", encoding="utf-8") as _f:
+            _f.write(f"# resolved runlist —— {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            _f.write(f"# 共 {len(runs)} run；python = {python}\n")
+            for r in runs:
+                _f.write(f"{r.name}\t{r.status}\t{python} {' '.join(r.cmd)}\n")
+        print(f"  📋 resolved runlist → {_rl}")
 
     while pending or running:
         # 内存守卫：不足则不再拉起新 run（只排队，绝不杀已有进程）

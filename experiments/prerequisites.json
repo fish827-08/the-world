@@ -88,7 +88,7 @@
     ]
   },
   "cstep3memgrad20": {
-    "science_question": "R132 确证批：E-025 的探索性成簇信号（pred_frac 0/6 正 + 区制 4/6 单向翻转）在 **20 个 fresh seed** 上是否复现（判显著 ≥15/20；δ 无健康窗 ⇒ 按原配置 3240）",
+    "science_question": "R132 4码闭合候选（内评方案a）：E-025 的信号在 **4 码 + fresh seeds 48-67** 上是否复现（16 码复测不能证伪 4 码假设——字母表改变基线区制）",
     "items": [
       {
         "id": "dist_is_patchy",
@@ -114,6 +114,24 @@
         "key": "distribution",
         "value": "uniform",
         "why": "判别臂的前提就是 uniform（信息不值钱的世界）；若误跑 patchy ⇒ 判别失效"
+      }
+    ]
+  },
+  "cstep3memgrad20a4": {
+    "science_question": "R132 4码闭合候选（内评方案a）：E-025 的信号在 **4 码 + fresh seeds 48-67** 上是否复现（16 码复测不能证伪 4 码假设——字母表改变基线区制）",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "复测对象是 patchy 世界里的信号；若实际跑 uniform ⇒ 与 E-025 不同前提，复测无效"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "同 E-025：信息价值前提（δ 判无健康窗 ⇒ max_count 维持 3240）"
       }
     ]
   }
