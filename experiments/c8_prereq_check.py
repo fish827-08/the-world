@@ -63,13 +63,32 @@ def preset_args(dicts: list[dict]) -> dict[str, str]:
         for k in d.get("grid", []):
             key = k.split("=", 1)[0]
             out.setdefault(f"<grid>{key}", key)
+        # 🔴 臂变量：**摊平后会被后一个臂覆盖** ⇒ 另存 `<variant>{i}:{key}` 供
+        #    `variant_arg_equals` 使用（本批的"唯一被测变量"必须能被 C4 查到）。
+        for vi, v in enumerate(d.get("variants", [])):
+            for x in v.get("args", []):
+                if "=" in x:
+                    k2, v2 = x.split("=", 1)
+                    out[f"<variant>{vi}:{k2}"] = v2
+                else:
+                    out[f"<variant>{vi}:{x}"] = "true"
     return out
 
 
 def eval_item(item: dict, argv: dict[str, str], dist_for_r2: str) -> dict:
     """评估单条前提 ⇒ `{id, ok, got, want, note}`。"""
     kind = item["kind"]
-    if kind == "preset_arg_equals":
+    if kind == "variant_arg_equals":
+        # 臂变量版 `preset_arg_equals`：要求**至少一个臂**带 `key=value`
+        # （例：A-连续批两臂 k=2.0 / k=0.0——若两臂都读到 0.0 ⇒ 跑成了纯对照，整批作废）。
+        key, want = item["key"], str(item["value"])
+        hits = [v for k, v in argv.items()
+                if k.startswith("<variant>") and k.split(":", 1)[1] == key]
+        got = f"臂值集合={hits}" if hits else "（无任何臂带该参数）"
+        ok = want in hits
+        return {"id": item["id"], "ok": ok, "got": got, "want": f"至少一个臂 {key}={want}",
+                "note": item.get("why", "")}
+    elif kind == "preset_arg_equals":
         key, want = item["key"], str(item["value"])
         got = argv.get(key, item.get("default"))
         ok = (got == want)

@@ -118,7 +118,9 @@ def test_prerequisites_file_is_wellformed_and_has_patchy_gate():
         assert d.get("science_question"), f"{name} 缺 science_question"
         for it in d["items"]:
             assert it["kind"] in ("preset_arg_equals", "capacity_lat_r2_max",
-                                  "summary_switches_equals"), f"{name}: 未知 kind"
+                                  "summary_switches_equals",
+                                  # 臂变量（两臂取值不同 ⇒ `preset_arg_equals` 摊平后会被覆盖）
+                                  "variant_arg_equals"), f"{name}: 未知 kind"
             assert it.get("why"), f"{name}/{it.get('id')} 缺 why（R127 要求写明理由）"
     # patchy 侧必须声明「容量不可由纬度预测」这条**信息价值前提**
     kinds = {it["kind"] for it in decl["cstep3patchy"]["items"]}

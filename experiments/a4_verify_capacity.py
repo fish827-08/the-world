@@ -101,7 +101,9 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           predation_enabled: bool = True,
           soft_cap_target: float = 0.0,
           learning_bottleneck: bool = True,
-          reputation_weight: float = 0.0) -> SphereEngine:
+          reputation_weight: float = 0.0,
+          # R135 第3步 A-连续（2026-09-20）：凸 trade-off 取食倍率 (1−g16)^k
+          forage_tradeoff_k: float = 0.0) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -110,7 +112,12 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.population.max_count = max_count         # R41：标杆批口径 3240（⑤ 不饱和前提）
     # PC-1（R134）：S1 软顶（目标窗形式，冒烟后修订）/ S2 关捕食（默认 = 旧行为）
     c.population.soft_cap_target = float(soft_cap_target)
-    c.predation = PredationConfig(enabled=bool(predation_enabled))
+    # ⚠️ 这里是**整体替换** PredationConfig ⇒ **必须**把 k 一并传进去，
+    #    否则 A-连续的凸度会被静默重置为 0（F1 同型：传了开关却没生效）。
+    c.predation = PredationConfig(
+        enabled=bool(predation_enabled),
+        forage_tradeoff_k=float(forage_tradeoff_k),
+    )
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
     # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
@@ -271,6 +278,9 @@ def main() -> None:
     ap.add_argument("--soft-cap-target", dest="soft_cap_target", type=float, default=0.0,
                     help="PC-1 S1（目标窗形式）：N* = target×max_count，出生率在 N* 处线性归零；"
                          "0=关（默认=原式）。R134 PC-1 拟 0.6（窗 [0.2K,0.95K] 的中位）")
+    ap.add_argument("--forage-tradeoff-k", dest="forage_tradeoff_k", type=float, default=0.0,
+                    help="R135 第3步 A-连续：取食倍率 (1−g16)^k（凸 trade-off）；"
+                         "0=关（默认，与旧版逐位一致）；本批取 2.0（凸/加速下降 ⇒ 中间态杂食者吃亏）")
     ap.add_argument("--learning-bottleneck", dest="learning_bottleneck", default="true",
                     choices=("true", "false"),
                     help="PC-1 零模型臂：false=关学习瓶颈（配码本关=零模型）；默认 true")
@@ -359,7 +369,8 @@ def main() -> None:
                   predation_enabled=(args.predation_enabled == "true"),
                   soft_cap_target=args.soft_cap_target,
                   learning_bottleneck=(args.learning_bottleneck == "true"),
-                  reputation_weight=args.reputation_weight)
+                  reputation_weight=args.reputation_weight,
+                  forage_tradeoff_k=args.forage_tradeoff_k)
         start_tick = 0
     # 🔴 内评未闭合项 #6（2026-09-20 修）：**provenance 必须在跑之前采集**。
     #   收尾时采集记的是"跑完之后的代码树"——长批期间若有人推提交（E-027 就发生过），
@@ -538,6 +549,12 @@ def main() -> None:
             # PC-1（R134）：S1/S2 开关必须可读回（C4——E-027 的 16 码事故同型预防）
             "predation_enabled": bool(e.config.predation.enabled),
             "soft_cap_target": float(e.config.population.soft_cap_target),
+            # R135 第3步 A-连续：凸度必须可读回（C4）
+            "forage_tradeoff_k": float(e.config.predation.forage_tradeoff_k),
+            # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
+            #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
+            "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),
+            "learning_bottleneck": bool(e.config.info_structure.learning_bottleneck),
             "use_sim_core": bool(e.config.simulation.use_sim_core),
             "distribution": e.config.resources.distribution,
             "initial_count": int(e.config.population.initial_count),

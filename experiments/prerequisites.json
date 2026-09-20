@@ -174,5 +174,38 @@
         "why": "C3 人为拉满 = 本构造的被测件（R134 裁定 1.0）"
       }
     ]
+  },
+  "cstep3acont": {
+    "science_question": "A-连续：取食侧的**凸 trade-off** (1-g16)^k 是否让 g16 分布发生进化分支（双峰）——这是「营养级分化」的最小充分条件测试（R135 §二.1 只动曲率）",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "uniform 下食物位置可由纬度预测 ⇒ 取食效率不构成生态位维度 ⇒ trade-off 无从谈起"
+      },
+      {
+        "id": "curvature_armed",
+        "kind": "variant_arg_equals",
+        "key": "forage-tradeoff-k",
+        "value": "2.0",
+        "why": "C4 最小在场：曲率是本批**唯一**被测机制；若读到 0.0 ⇒ 跑成了对照臂，整批作废"
+      },
+      {
+        "id": "soft_cap_window",
+        "kind": "preset_arg_equals",
+        "key": "soft-cap-target",
+        "value": "0.6",
+        "why": "无软顶时该构造 N≈19-78（崩溃）⇒ g16 样本量低于双峰判据下限；软顶给出可判窗（两臂同加，不引入变量）"
+      },
+      {
+        "id": "alphabet_16",
+        "kind": "preset_arg_equals",
+        "key": "signal-alphabet",
+        "value": "16",
+        "why": "与本纪元其余批一致；字母表差异会改基线区制，不可混入"
+      }
+    ]
   }
 }

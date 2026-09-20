@@ -558,6 +558,36 @@ PRESETS = {
     #         `conv×H` 显著；⑥b_content 同向 ≥5/6 且超可检出阈；
     #         阴性结案 = 三臂不可区分 ⇒ 构念层复审；其余指标只报不判
     #   冒烟门（R127 + 稳态窗）：1 run × 12k 主臂，N_eq（末 2k 均值）∈ [0.2K, 0.95K] = [648, 3078]
+    # R135 第 3 步 **A-连续**（2026-09-20；fish 21:56 已下跑批令）：营养级专化的**凸 trade-off**。
+    #   文献锚：Geritz et al. 1998 *Evol. Ecol.* 12:35（**凸权衡 + 频率依赖 ⇒ 进化分支**）。
+    #   被测机制**只有一项**：取食倍率 `forage_mult(g16) = (1 − g16) ** k`（R135 §二.1「只动曲率」）。
+    #      k=0 ⇒ 恒 1（**与旧版逐位一致**，C7 digest 钉死：`tests/test_a_continuous.py`）
+    #      k=2 ⇒ 凸/加速下降（云端 §三陡峭表最接近 k≈1.74；取 2.0 以保证凸度足够）
+    #      对照（g16 → 倍率）：表 1.00/0.80/0.30/0.05/0.00 ↔ k=2 的 1.00/0.64/0.25/0.04/0.00
+    #   ⚠️ 只动**取食侧**；捕猎成功率侧（`energy_ratio ×(0.5+g16×0.5)`）在 Rust ⇒ 不动、不重编。
+    # 🔴 相对"现构造基线"的一处**故意偏离**：两臂**同加** `soft-cap-target=0.6`。
+    #    理由：无软顶时该构造 N≈19–78（崩溃态）⇒ g16 样本量**远低于**双峰判据的下限
+    #    （内评 §一.4i 要求样本量下限 + 功效）。软顶两臂同加 ⇒ **曲率仍是唯一变量**。
+    # 🔴 判据（预注册，R135 §二.8）：主 = **BC 系数 + 同方差 shuffle 置换零分布**；
+    #    副 = 均值稳定性 + 时序振荡。**样本量下限**：末 tick N ≥ 200（否则该 seed 判为不可判）。
+    #    ⚠️ 冒烟已示警：BC **单用会误判**——k=0 臂 skew=+2.56 把 BC 抬到 0.896（>0.555），
+    #    那是**右偏拖尾**不是真双峰 ⇒ **置换零分布是必需项，不是可选项**。
+    # 🔴 批角色 = **机制探索**（非科学集）⇒ 不得被科学侧 judge 计入（内评 21:45 结论 10）。
+    #    判读红线：即使出现双峰，也只能写"g16 分布分化"，**禁止**写"涌现/专化/语言"。
+    "cstep3acont": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=0",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6"],
+        variants=[
+            dict(name="ak2", args=["forage-tradeoff-k=2.0"],
+                 template="_rerun_logs/cstep3acont/ak2_s{seed}.csv"),
+            dict(name="ak0", args=["forage-tradeoff-k=0.0"],
+                 template="_rerun_logs/cstep3acont/ak0_s{seed}.csv"),
+        ],
+    ),
     "pc1": dict(
         script="experiments/a4_verify_capacity.py",
         grid=["seed=42,43,44,45,46,47"],

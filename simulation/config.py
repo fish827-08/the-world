@@ -222,12 +222,30 @@ class PredationConfig:
     transfer_ratio: float = 0.4        # 捕食成功：猎物能量转移比例
     stomach_transfer: float = 0.4      # 猎物胃粮转移比例
 
+    # ------------------------------------------------------------------
+    # R135 第 3 步 **A-连续**（2026-09-20）：营养级专化的**凸 trade-off**。
+    #
+    # 取食倍率 `forage_mult(g16) = (1 − g16) ** k`：
+    #   k = 0（默认）⇒ 恒 1 ⇒ **与旧版逐位一致**（C7 digest 钉死）
+    #   k = 1     ⇒ 线性权衡（g16=0.5 仍能吃 50%）
+    #   k > 1     ⇒ **凸（加速下降）**：g16=0.5 只吃 (0.5)^k ⇒ k=2 时仅 25%
+    #      ⇒ 中间态"杂食者"两边都不精 ⇒ 这是文献里唯一经检验能产生**进化分支**
+    #        （g16 分布双峰）的路径：Geritz et al. 1998, *Evol. Ecol.* 12:35（凸权衡 + 频率依赖）。
+    #   与云端开发者 §三"陡峭表"的对照（k=1.74 最接近该表；本批取 **k=2.0** 以保证凸度足够）：
+    #      g16:    0.0    0.2    0.5    0.8    1.0
+    #      表:    1.00   0.80   0.30   0.05   0.00
+    #      k=2:   1.00   0.64   0.25   0.04   0.00
+    # ⚠️ 只动**取食侧**。捕猎成功率侧保持原式 `energy_ratio × (0.5 + g16×0.5)`
+    #    （其在 Rust `predation.rs:99`，改它要重编；且 R135 裁定"一次只动曲率"）。
+    forage_tradeoff_k: float = 0.0
+
     def __post_init__(self) -> None:
         assert self.attack_cost > 0
         assert 0 <= self.success_floor < self.success_ceil <= 1.0
         assert 0.0 <= self.transfer_ratio <= 1.0
         assert 0.0 <= self.stomach_transfer <= 1.0
         assert 0.0 <= self.attack_gene_gate <= 1.0
+        assert self.forage_tradeoff_k >= 0.0, "凸度非负（0 = 关闭 = 旧行为）"
 
 
 # ---------------------------------------------------------------- "丰盛"阈值（R121 §4.1：**命名 + 度量**）

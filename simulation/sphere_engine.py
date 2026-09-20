@@ -940,8 +940,21 @@ class SphereEngine:
         )
         if (stomach < stomach_cap).any():
             eaters = np.flatnonzero(stomach < stomach_cap)
+            # R135 第 3 步 A-连续（2026-09-20）：**凸 trade-off** `forage_mult = (1−g16)^k`。
+            #   k=0（默认）⇒ 下面的乘子恒 1 ⇒ **与旧版逐位一致**；
+            #   k>1 ⇒ g16 高的个体**吃斑块的能力加速下降**（中间态杂食者最吃亏）。
+            #   只动取食侧（捕猎侧在 Rust，按裁定不动）⇒ **无需改 Rust、无需重编**。
+            #   详见 `PredationConfig.forage_tradeoff_k` 的对照表与文献锚。
+            # ⚠️ 此处**不能**沿用 `pcfg` 简写：本函数里 `pcfg` 指向的是
+            # `config.pleasure`（:447），捕食段那份在 :1374 才定义 ⇒ 必须全路径取。
+            _tk = float(self.config.predation.forage_tradeoff_k)
+            if _tk > 0.0:
+                _g16 = np.clip(genes[eaters, Gene.AGGRESSION], 0.0, 1.0)
+                _forage = np.power(1.0 - _g16, _tk)
+            else:
+                _forage = 1.0
             want = np.minimum(
-                ocfg.eat_amount * eat_mult[eaters],
+                ocfg.eat_amount * eat_mult[eaters] * _forage,
                 stomach_cap[eaters] - stomach[eaters],
             )
             # 3.5：批量进食双路径（Rust consume_many 与 numpy consume_many 逐位等价）
