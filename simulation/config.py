@@ -126,6 +126,12 @@ class GenomeConfig:
     mutation_rate: float = 0.05     # 每个基因发生变异的概率
     mutation_sigma: float = 0.05    # 变异震荡幅度（相对基因区间宽度）
 
+    # R141（2026-09-21）：**g16 初始投放**（能量校准预实验用）。
+    #   空串（默认）⇒ 旧行为（uniform 抽样）。给 `"0.05,0.5,0.9"` ⇒ 初始个体**均分**到
+    #   这些 g16 值上（交错分配保证各组 n 尽量相等）⇒ **保证三组的样本量都够**。
+    # ⚠️ 这**不是**自然分布 ⇒ 相应批次必须标为**仪器性质**（不进科学判读）。
+    init_g16_clusters: str = ""
+
     def __post_init__(self) -> None:
         assert self.gene_max > self.gene_min, "上限要大于下限"
         assert 0.0 <= self.mutation_rate <= 1.0, "变异率在 0~1"

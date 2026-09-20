@@ -61,6 +61,19 @@ from observatory.statistics import (  # D-16：单一口径实现
 from observatory.statistics import selection_gradient  # D-17：⑤ 单一口径
 
 
+# R139/R140：g16 直方图的箱数（值域 [0,1] 均分）。**改动它等于改判据口径** ⇒ 单一真源。
+G16_BINS = 10
+
+
+def _hist10(x) -> list[int]:
+    """g16 的 10-bin 直方图（值域 [0,1]，右开区间；越界值夹到两端）。"""
+    a = np.asarray(x, dtype=np.float64)
+    if a.size == 0:
+        return [0] * G16_BINS
+    idx = np.clip((a * G16_BINS).astype(np.int64), 0, G16_BINS - 1)
+    return np.bincount(idx, minlength=G16_BINS)[:G16_BINS].tolist()
+
+
 def _moments(x) -> tuple[float, float, float]:
     """样本标准差 / 偏度 / **超额**峰度（矩法）—— BC 双峰系数的输入（R135 第 -1 步①）。
 
@@ -413,6 +426,15 @@ def main() -> None:
               #    g16 捎带上漂（实测 s42 Δg16=+0.095 全由此而来）⇒ 没有 g4 就无法区分
               #    "g16 被选择" 与 "g16 被搭车"。详见 `sphere_engine._genome_summary`。
               "g16_std", "g16_skew", "g16_kurt", "g4",
+              # R139/R140 派工 **P0 观测列**（2026-09-21）：
+              # ① `g16_h0..h9` = g16 的 **10-bin 直方图**（值域 [0,1] 均分）——
+              #    ⚠️ 没有它，**置换零分布无从下手** ⇒ 双峰永远不可判（E-030 的教训：
+              #    只存矩 ⇒ shuffle/重算全落空；且 BC 单用已证明是误判机器）。
+              # ② `mean_energy` —— E_prey 推算的最大不确定源（R140 §四），优先级最高。
+              # ③ 死因**时间序列**（累计值，差分可得区间）：看死因结构随相位怎么变。
+              # ④ `g3` 寿命基因均值 —— 验证"长寿命是否被选择"（maturity ∝ lifespan ⇒ 应有晚熟代价）。
+              *[f"g16_h{i}" for i in range(G16_BINS)],
+              "mean_energy", "d_starv", "d_pred", "d_old", "g3",
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
@@ -446,6 +468,10 @@ def main() -> None:
         if t % args.log_interval == 0 or e.extinct:
             P = len(e._id)
             r = (e._flat[:P] // 120) if P else np.zeros(0)
+            # R140 P0：死因**时间序列**（累计口径，差分可得区间值）。
+            # 键名按 `DeathCause` 成员名归一化（枚举 str() 形如 "DeathCause.STARVATION"）。
+            _dct = {str(k).split(".")[-1].upper(): int(v)
+                    for k, v in e.death_cause_totals().items()}
             w.writerow({
                 "tick": t, "N": P,
                 "g14": round(float(e._genes[:P, 14].mean()), 4) if P else "",
@@ -456,6 +482,13 @@ def main() -> None:
                 **({} if P < 3 else dict(zip(
                     ("g16_std", "g16_skew", "g16_kurt"), _moments(e._genes[:P, 16])))),
                 "g4": round(float(e._genes[:P, 4].mean()), 4) if P else "",
+                **({} if P == 0 else dict(zip(
+                    (f"g16_h{i}" for i in range(G16_BINS)), _hist10(e._genes[:P, 16])))),
+                "mean_energy": round(float(e._energy[:P].mean()), 4) if P else "",
+                "d_starv": _dct.get("STARVATION", 0),
+                "d_pred": _dct.get("PREDATION", 0),
+                "d_old": _dct.get("OLD_AGE", 0),
+                "g3": round(float(e._genes[:P, 3].mean()), 4) if P else "",
                 "trust": round(float(e._trust[:P].mean()), 4) if P else "",
                 "max_gen": int(e._max_generation),          # R77：历史高水位（不回落）
                 "max_gen_cur": max_generation_current(e),   # R77：当刻最深（只看存活）
@@ -611,8 +644,10 @@ def main() -> None:
             "alphabet": e.alphabet_stats(),
             # A′（2026-09-19）：记忆朝向梯度的可观测性计数（非 orientation ⇒ **None 未适用**）
             "memory_gradient": e.memory_gradient_stats(),
-            # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图 + Δ）
+            # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图 + Δ + 真决斗三级拆分）
             "cannibalism": e.cannibalism_stats(),
+            # R141 P0：分通道能量记账（全球 + g16 三分箱；Rust 路径标 path=rust 且值为 None）
+            "energy_channels": e.energy_channel_stats(),
             # R135 第 -1 步③：t=0 基因组基线（搭车诊断）
             "genome_t0": {k: v for k, v in t0.items() if k != "gene_means"},
             # R121 §4.2：记忆继承卫生（"生而知之"量化；纯观测）

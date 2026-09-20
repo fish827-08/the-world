@@ -162,6 +162,34 @@ class PopulationView:
 # R135 第 -1 步④：互捕量化直方图的分箱数（g16 ∈ [0,1] ⇒ 每箱宽 0.2）
 CANNIB_BINS = 5
 
+# ---------------------------------------------------------------------------
+# R141 P0：**分通道能量记账**（能量校准预实验的前提）。
+#   通道索引（顺序即语义，勿随意重排）：
+#     0 intake_forage   取食（斑块）摄入
+#     1 intake_pred     捕食摄入（抢到的猎物能量）
+#     2 cost_meta       基础维持 + 恒温
+#     3 cost_move       移动扣费
+#     4 cost_attack     攻击成本（每次出手必付）
+#   按 **g16 三分箱**（食草 / 杂食 / 捕食 三腿）分别累计 ⇒ 才能验证
+#   C 档目标 `R_捕食 ≈ R_食草 > R_杂食`（**没有"杂食腿"则"中间最低"无法验证**）。
+#   ⚠️ 只在 **Python 路径**（`use_sim_core=False`）记账：Rust 路径的扣费发生在
+#      Rust 内部，Python 侧看不到 ⇒ `energy_channel_stats()` 会标 `path="rust"` + 值 None
+#      （**不报 0**——"没测到"与"测到 0"必须分开，本项目老坑）。
+EC_FORAGE, EC_PRED, EC_PHOTO, EC_META, EC_MOVE, EC_ATTACK = range(6)
+EC_N = 6
+EC_NAMES = ("intake_forage", "intake_pred", "intake_photo",
+            "cost_meta", "cost_move", "cost_attack")
+# 收入侧通道（净收入 = 收入 − 支出；缺 `intake_photo` 会让净收入虚假为负——
+# 光合是独立于取食的**直接收入**，不经过胃）。
+
+# R141/R138：真决斗三级拆分的键（**顺序固定**；全部预置 0 ⇒ 输出不随事件有无而变）
+#   nominal = len(attackers)：名义攻击者（= `cannibalism.n_attacks`，旧口径的分母）
+#   skip_*  = 三类"根本没出手"的原因；real_attempts = 真出手 = nominal − 三类 skip
+#   kills   = 致死（= `cannibalism.n_kills`）
+# ⇒ **真实出手成功率 = kills / real_attempts**（旧口径 kills / nominal 会低估）
+DUEL_KEYS = ("skip_no_energy", "skip_no_prey", "skip_already_eaten",
+             "real_attempts", "kills")
+
 
 def _genome_summary(genes) -> dict:
     """基因组摘要（t=0 基线；**只读、不消费 RNG**）。
@@ -299,6 +327,10 @@ class SphereEngine:
         "_genome_t0",
         # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图，只读）
         "_cannib_atk_hist", "_cannib_prey_hist",
+        # R141 P0：分通道能量记账
+        "_ec_global", "_ec_box", "_ec_n",
+        # R141/R138：真决斗三级拆分（名义/出手/致死 + skip 原因）
+        "_duel",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -624,10 +656,24 @@ class SphereEngine:
         # ⇒ **没有 t=0 基线，就无法区分"该基因被选择"与"该基因被搭车"**；
         #   ⇒ 推论：**单个 seed 的基因位移/分布不可跨批比较，必须同 seed 配对**。
         # （只读、不消费 RNG ⇒ 不改变任何既有批的逐位行为。）
+        # R141：g16 初始投放（默认空 = 旧行为；非空 ⇒ 覆盖 g16 列，交错分配保证组大小相等）
+        _cl = str(getattr(config.genome, "init_g16_clusters", "") or "")
+        if _cl:
+            _vals = [float(x) for x in _cl.split(",") if x.strip()]
+            if _vals:
+                # ⚠️ 不消费 RNG（直接赋值）⇒ 只改初始条件，不改随机流结构
+                for _i, _v in enumerate(_vals):
+                    self._genes[_i::len(_vals), Gene.AGGRESSION] = _v
         self._genome_t0 = _genome_summary(self._genes)
         # R135 第 -1 步④：互捕结构量化累计器（5-bin，g16 ∈ [0,1]）
         self._cannib_atk_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
         self._cannib_prey_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
+        # R141 P0：分通道能量记账（5 通道 × 全球/三分箱）。见 `energy_channel_stats`。
+        self._ec_global = np.zeros(EC_N, dtype=np.float64)
+        self._ec_box = np.zeros((3, EC_N), dtype=np.float64)
+        self._ec_n = np.zeros(3, dtype=np.int64)
+        # R141/R138：真决斗三级拆分（键预置 ⇒ 输出稳定，不随是否有事件而缺列）
+        self._duel = Counter({k: 0 for k in DUEL_KEYS})
 
     def cannibalism_stats(self) -> dict:
         """互捕结构量化（R135 第 -1 步④；F「去互捕」的前置证据）。
@@ -641,7 +687,26 @@ class SphereEngine:
         centers = (np.arange(CANNIB_BINS) + 0.5) / CANNIB_BINS
         ma = float((centers * a).sum() / na) if na else None
         mp = float((centers * p).sum() / npr) if npr else None
+        # R141/R138：真决斗三级拆分（Python 路径才有；Rust 路径计数全 0 ⇒ 报 None）
+        duel = None
+        if not self._use_sim_core:
+            nominal = int(na)          # = len(attackers) 累计（与 n_attacks 同源）
+            real = int(self._duel["real_attempts"])
+            kills = int(self._duel["kills"])
+            duel = {
+                "nominal_attackers": nominal,
+                "skip_no_energy": int(self._duel["skip_no_energy"]),
+                "skip_no_prey": int(self._duel["skip_no_prey"]),
+                "skip_already_eaten": int(self._duel["skip_already_eaten"]),
+                "real_attempts": real,
+                # 🔴 两个成功率口径**必须分开报**：旧口径的低估是真实存在的
+                "success_rate_nominal": (round(kills / nominal, 4) if nominal else None),
+                "success_rate_real": (round(kills / real, 4) if real else None),
+                "note": "nominal=含未出手；real=真出手（排除能量不足/无猎物/已被吃）"
+                        "⇒ 旧口径 kills/nominal 会**低估**成功率",
+            }
         return {
+            "duel": duel,
             "bins": CANNIB_BINS,
             "n_attacks": na if na else None,
             "n_kills": npr if npr else None,
@@ -652,6 +717,49 @@ class SphereEngine:
             "delta_g16": (round(ma - mp, 4) if (ma is not None and mp is not None) else None),
             "note": "g16 区间 [0,1] 均分 5 bin；n=None 表示本批没有该事件（不可读作 0）",
         }
+
+    def _ec_add(self, k: int, idx, amount) -> None:
+        """分通道能量记账累加（R141 P0；只读不写状态外，不改变 RNG）。
+
+        `idx=None` ⇒ 对**全体**当前存活者记账；否则按 `idx` 子集记账。
+        """
+        a = np.asarray(amount, dtype=np.float64)
+        if a.size == 0:
+            return
+        self._ec_global[k] += float(a.sum())
+        g16 = self._genes[:, Gene.AGGRESSION]
+        if idx is None:
+            b = np.clip((g16 * 3).astype(np.int64), 0, 2)
+            self._ec_box[:, k] += np.bincount(b, weights=a, minlength=3)[:3]
+        else:
+            ii = np.asarray(idx, dtype=np.int64)
+            b = np.clip((g16[ii] * 3).astype(np.int64), 0, 2)
+            self._ec_box[:, k] += np.bincount(b, weights=a, minlength=3)[:3]
+
+    def energy_channel_stats(self) -> dict:
+        """分通道能量记账（R141 P0 派工）。
+
+        返回 **累计**总量（J）与按 g16 三分箱的分腿量；`per_capita` = 累计 ÷ ∫N dt 的
+        箱计数（用 `_ec_n` 近似：每 tick 各箱的存活数之和，见 `_ec_tick_box_n`）。
+        ⚠️ `use_sim_core=True` ⇒ 返回 `path="rust"` 且各值为 **None**（未观测，非 0）。
+        """
+        if self._use_sim_core:
+            return {"path": "rust", "note": "Rust 路径不做 Python 侧记账 ⇒ 未观测（None，非 0）"}
+        tot = {EC_NAMES[i]: round(float(self._ec_global[i]), 3) for i in range(EC_N)}
+        box = {("herb", "omni", "carn")[r]: {
+            EC_NAMES[i]: round(float(self._ec_box[r, i]), 3) for i in range(EC_N)}
+            for r in range(3)}
+        box_n = {"herb": int(self._ec_n[0]), "omni": int(self._ec_n[1]),
+                 "carn": int(self._ec_n[2])}
+        net = {("herb", "omni", "carn")[r]: round(
+            float(self._ec_box[r, EC_FORAGE] + self._ec_box[r, EC_PRED]
+                  + self._ec_box[r, EC_PHOTO]
+                  - self._ec_box[r, EC_META] - self._ec_box[r, EC_MOVE]
+                  - self._ec_box[r, EC_ATTACK]), 3) for r in range(3)}
+        return {"path": "python", "channels": EC_NAMES, "global": tot,
+                "by_g16_box": box, "box_person_ticks": box_n, "net_by_box": net,
+                "note": "g16 三分箱 = [0,1/3) 食草 / [1/3,2/3) 杂食 / [2/3,1] 捕食；"
+                        "person_ticks 为该箱的 ∫N dt（近似，按存活数逐 tick 累计）"}
 
     def genome_t0_stats(self) -> dict:
         """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
@@ -793,6 +901,10 @@ class SphereEngine:
         self._run_born += stats.born
         self._run_died += stats.died
         self._run_deaths.update(stats.deaths_by_cause)
+        # R141 P0：分通道记账的**箱人口**（∫N dt 近似，逐 tick 累计各 g16 箱的存活数）
+        if not self._use_sim_core:
+            _b = np.clip((self._genes[:, Gene.AGGRESSION] * 3).astype(np.int64), 0, 2)
+            self._ec_n += np.bincount(_b, minlength=3)[:3]
         if self._history_limit > 0:
             overflow = len(self._history) - self._history_limit
             if overflow > 0:
@@ -881,11 +993,13 @@ class SphereEngine:
             # 1) 光合收入（g8）：少量、随光照。
             #    收入 = 光照(所在格,当前tick) × g8 × photo_max。
             #    植物化增强（g19）在 stage1 之后统一补，确保双路径一致。
-            energy += (
+            _pho = (
                 self.light.illumination(self._flat, self._tick)
                 * genes[:, Gene.PHOTOSYNTHESIS]
                 * ocfg.photo_max
             )
+            energy += _pho
+            self._ec_add(EC_PHOTO, None, _pho)   # R141 P0：intake_photo 通道
 
             # 2) 代谢转化：胃 → 能量（总量不变，快慢受温度+基因影响）
             #    转化速率 = base_metabolism × metabolic_mult × eff_activity
@@ -894,7 +1008,13 @@ class SphereEngine:
             digest_rate = ocfg.base_metabolism * metab_mult * eff_activity
             # 每 tick 最多转化这么多；不得超出胃里有的
             digest = np.minimum(stomach, digest_rate)
-            energy += digest * ocfg.eat_efficiency  # 同样食物 → 同样能量
+            _dg = digest * ocfg.eat_efficiency      # 同样食物 → 同样能量
+            energy += _dg
+            # R141 P0：`intake_forage` = **真正进入能量的量**（已乘 `eat_efficiency`）。
+            # 🔴 口径坑（我第一版就踩了）：若记"进胃的原始食物量"（未乘 3.0），
+            #    `net = 收入 − 支出` 会**虚假为负**（实测 −0.23/人·tick，而个体显然活着）
+            #    ⇒ 必须与 `intake_pred`/`intake_photo`（都直接进能量）同口径。
+            self._ec_add(EC_FORAGE, None, _dg)
             stomach -= digest
 
             # 3) 基础维持消耗（体温/活动，必扣，与温度无关基础价）
@@ -908,18 +1028,25 @@ class SphereEngine:
             age_mult = np.ones(P, dtype=np.float64)
             age_mult[age_f < maturity_age] = ocfg.growth_mult
             age_mult[age_f >= senile_age] = ocfg.senile_mult
-            energy -= ocfg.base_metabolism * metab_mult * age_mult
+            _cm = ocfg.base_metabolism * metab_mult * age_mult
+            energy -= _cm
+            # R141 P0：cost_meta 通道（基础维持；恒温费下一行另计，合并进同一通道）
+            self._ec_add(EC_META, None, _cm)
             #    + 恒温维持费（g9）：恒温个体每 tick 另付 homeo_upkeep
-            energy -= ocfg.homeo_upkeep * homeo
+            _ch = ocfg.homeo_upkeep * homeo
+            energy -= _ch
+            self._ec_add(EC_META, None, _ch)   # R141：并入 cost_meta 通道
 
         # 3.5) 植物化光合增强（g19）：统一在 stage1 之后补，确保 Rust/Python 双路径一致
         #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
-        energy += (
+        _pho2 = (
             self.light.illumination(self._flat, self._tick)
             * genes[:, Gene.PHOTOSYNTHESIS]
             * genes[:, Gene.ROOTING]
             * ocfg.photo_max
         )
+        energy += _pho2
+        self._ec_add(EC_PHOTO, None, _pho2)   # R141 P0：植物化增强并入 intake_photo
 
         # 3.5) L10a 植物蓄力→结果（默认关闭；确定性数值管线，Rust 可下沉）
         if self.config.fruit.enabled:
@@ -1317,6 +1444,8 @@ class SphereEngine:
                         targets[i] = nb[int(np.argmax(score))]
                 self._flat[mi] = targets
                 energy[mi] -= move_cost_ind[mi]
+                # R141 P0：cost_move 通道（只记 Python 路径；Rust 路径在 Rust 内扣费）
+                self._ec_add(EC_MOVE, mi, move_cost_ind[mi])
                 # 5.6) 信任学习
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
@@ -1444,18 +1573,31 @@ class SphereEngine:
             if len(attackers) > 0:
                 rand_prey = self.rng.integers(0, 1_000_000, size=len(attackers), dtype=np.int64)
                 rand_success = self.rng.random(len(attackers))
+                # R141 P0 + R138 §二：**真决斗三级拆分**（名义攻击者 / 有效出手 / 致死）
+                # 与**分通道记账**共用同一循环（零额外遍历）。
+                # 背景：`cannibalism_stats` 报的 5504 是**名义攻击者数**，其中含大量
+                # 根本没出手的 `continue`（能量不足 / 邻格无猎物 / 本 tick 已被吃）
+                # ⇒ 老工的 3.02% **低估**了真实出手成功率。这里把分母拆开。
+                _atk_i, _atk_amt = [], []
+                _pred_i, _pred_amt = [], []
                 for k, idx in enumerate(attackers):
                     if energy[idx] <= pcfg.attack_cost:
+                        self._duel["skip_no_energy"] += 1
                         continue
                     nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
                     nb_mask = np.isin(self._flat[:P], nb) & (np.arange(P) != idx)
                     prey_candidates = np.flatnonzero(nb_mask)
                     if len(prey_candidates) == 0:
+                        self._duel["skip_no_prey"] += 1
                         continue
                     prey = int(prey_candidates[int(rand_prey[k] % len(prey_candidates))])
                     if predation_mask[prey]:
+                        self._duel["skip_already_eaten"] += 1
                         continue
+                    self._duel["real_attempts"] += 1
                     energy[idx] -= pcfg.attack_cost
+                    _atk_i.append(idx)
+                    _atk_amt.append(float(pcfg.attack_cost))
                     success_rate = np.clip(
                         (energy[idx] / max(energy[idx] + energy[prey], 1e-9))
                         * (0.5 + attack_gene[idx] * pcfg.success_gene_gain),
@@ -1463,12 +1605,21 @@ class SphereEngine:
                     )
                     if rand_success[k] < success_rate:
                         predation_mask[prey] = True
-                        energy[idx] += energy[prey] * pcfg.transfer_ratio
+                        _tr = float(energy[prey]) * pcfg.transfer_ratio
+                        energy[idx] += _tr
+                        _pred_i.append(idx)
+                        _pred_amt.append(_tr)
+                        self._duel["kills"] += 1
                         stomach[idx] = np.minimum(
                             stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
                             ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
                         )
                         stomach[prey] = 0.0
+                # R141 P0：捕食侧两条通道（出手成本 / 掠得能量）——循环外统一记账
+                if _atk_amt:
+                    self._ec_add(EC_ATTACK, _atk_i, _atk_amt)
+                if _pred_amt:
+                    self._ec_add(EC_PRED, _pred_i, _pred_amt)
             # ── Python 分步：年龄推进（Rust 路径已由 stage2 就地 +1）──
             self._age[:P] += 1
             age_f = self._age[:P].astype(np.float64)
