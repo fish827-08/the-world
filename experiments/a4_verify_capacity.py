@@ -61,6 +61,28 @@ from observatory.statistics import (  # D-16：单一口径实现
 from observatory.statistics import selection_gradient  # D-17：⑤ 单一口径
 
 
+def _moments(x) -> tuple[float, float, float]:
+    """样本标准差 / 偏度 / **超额**峰度（矩法）—— BC 双峰系数的输入（R135 第 -1 步①）。
+
+    BC = (skew² + 1) / (kurt + 3(n-1)²/((n-2)(n-3)))，BC > 5/9 提示双峰。
+    ⚠️ 调用方须先保证 **n ≥ 3**：峰度是四阶矩，样本过小时方差极大（可有可无的天文数字）。
+    """
+    a = np.asarray(x, dtype=np.float64)
+    n = int(a.size)
+    if n < 3:
+        return 0.0, 0.0, 0.0
+    d = a - a.mean()
+    m2 = float((d ** 2).mean())
+    m3 = float((d ** 3).mean())
+    m4 = float((d ** 4).mean())
+    if m2 <= 1e-300:          # 退化分布（所有值相同）
+        return 0.0, 0.0, 0.0
+    std = float(np.sqrt(m2 * n / (n - 1)))          # ddof=1
+    skew = m3 / (m2 ** 1.5)
+    kurt = m4 / (m2 ** 2) - 3.0                     # 超额峰度（正态 = 0）
+    return round(std, 4), round(skew, 4), round(kurt, 4)
+
+
 def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           max_count: int = 5000, neutral: bool = False,
           sig_disabled: bool = False, oracle: bool = False,
@@ -339,6 +361,11 @@ def main() -> None:
                   learning_bottleneck=(args.learning_bottleneck == "true"),
                   reputation_weight=args.reputation_weight)
         start_tick = 0
+    # 🔴 内评未闭合项 #6（2026-09-20 修）：**provenance 必须在跑之前采集**。
+    #   收尾时采集记的是"跑完之后的代码树"——长批期间若有人推提交（E-027 就发生过），
+    #   manifest 会把**后人的代码**记成这批的产物 ⇒ 既不可复现，也会把排障带向错误方向。
+    #   `rng_draws` 例外：它只有收尾才准 ⇒ 在 summary 组装处单独回填。
+    prov_start = prov_collect(e.config, python_info=True)
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
         # R121 §3.1 + C4 读回：续跑时配置**由快照自带** ⇒ 命令行若另给档位而快照不同，
@@ -368,6 +395,13 @@ def main() -> None:
     _n_alpha = SIGNAL_ALPHABET_STATES[str(e.config.signal_alphabet)]
 
     fields = ["tick", "N", "g14", "g15", "g16", "trust",
+              # R135 第 -1 步①（2026-09-20）：g16 **分布矩**——
+              # 此前只有均值 ⇒ **判不了双峰**（双峰与单峰可同均值）。
+              # BC 双峰系数 = (skew²+1)/(kurt+3(n-1)²/((n-2)(n-3)))，故输出 std/skew/kurt/n。
+              # ⚠️ `g4` 是**搭车诊断列**：g16 与 g4（进食量倍率，强选择）的初始 LD 会把
+              #    g16 捎带上漂（实测 s42 Δg16=+0.095 全由此而来）⇒ 没有 g4 就无法区分
+              #    "g16 被选择" 与 "g16 被搭车"。详见 `sphere_engine._genome_summary`。
+              "g16_std", "g16_skew", "g16_kurt", "g4",
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
@@ -408,6 +442,9 @@ def main() -> None:
                 # g16 AGGRESSION 均值（所有者 09-20 01:02 派工：测"攻击基因固化"假说，
                 # 捕食态内战振荡的基因层证据——此前 g16 从未入 CSV）
                 "g16": round(float(e._genes[:P, 16].mean()), 4) if P else "",
+                **({} if P < 3 else dict(zip(
+                    ("g16_std", "g16_skew", "g16_kurt"), _moments(e._genes[:P, 16])))),
+                "g4": round(float(e._genes[:P, 4].mean()), 4) if P else "",
                 "trust": round(float(e._trust[:P].mean()), 4) if P else "",
                 "max_gen": int(e._max_generation),          # R77：历史高水位（不回落）
                 "max_gen_cur": max_generation_current(e),   # R77：当刻最深（只看存活）
@@ -454,7 +491,17 @@ def main() -> None:
     reached = last >= args.ticks
     stable50k = bool(tail) and all(int(r["N"]) > 0 for r in tail) and last >= 10000
     dc = {str(k): int(v) for k, v in e.death_cause_totals().items()}
-    prov = prov_collect(e.config, rng_draws=int(e.rng_draws))
+    t0 = e.genome_t0_stats()          # R135 第 -1 步③：t=0 基线（搭车诊断）
+    # provenance（**启动采集值**为准；仅 rng_draws 用收尾值）
+    prov = dict(prov_start)
+    prov["rng_draws"] = int(e.rng_draws)
+    prov["collected_at"] = "run_start"
+    # 漂移自检：跑的过程中若有人推提交 ⇒ 记录双方，供事后归因（不失败，因为产物仍有效）
+    prov_end = prov_collect(e.config, python_info=False)
+    if prov_end.get("code_tree_sha256") != prov.get("code_tree_sha256"):
+        prov["code_tree_drift"] = True
+        prov["code_tree_at_finish"] = prov_end.get("code_tree_sha256")
+        prov["code_subtrees_at_finish"] = prov_end.get("code_subtrees")
     prov_validate(prov, require_sim_core=bool(e.config.simulation.use_sim_core))
     summary = {
         "manifest": {
@@ -481,6 +528,13 @@ def main() -> None:
             # 无法回答"跑的到底是哪个档"，与 R127 的 C8 前提对账同型缺陷。
             "memory_gradient": str(e.config.info_structure.memory_gradient),
             "memory_gradient_gain": float(e.config.info_structure.memory_gradient_gain),
+            # R135 第 -1 步③：**t=0 基线**（跨批可比 + 搭车诊断）
+            # 没有它，同一个 g16 读数在 A 批是"选择"、在 B 批是"搭车"，无法分辨。
+            "g16_t0_mean": round(t0["g16_mean"], 4),
+            "g16_t0_std": round(t0["g16_std"], 4),
+            "g4_t0_mean": round(t0["g4_mean"], 4),
+            "corr_g16_g4_t0": (round(t0["corr_g16_g4"], 4)
+                               if t0.get("corr_g16_g4") is not None else None),
             # PC-1（R134）：S1/S2 开关必须可读回（C4——E-027 的 16 码事故同型预防）
             "predation_enabled": bool(e.config.predation.enabled),
             "soft_cap_target": float(e.config.population.soft_cap_target),
@@ -540,6 +594,10 @@ def main() -> None:
             "alphabet": e.alphabet_stats(),
             # A′（2026-09-19）：记忆朝向梯度的可观测性计数（非 orientation ⇒ **None 未适用**）
             "memory_gradient": e.memory_gradient_stats(),
+            # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图 + Δ）
+            "cannibalism": e.cannibalism_stats(),
+            # R135 第 -1 步③：t=0 基因组基线（搭车诊断）
+            "genome_t0": {k: v for k, v in t0.items() if k != "gene_means"},
             # R121 §4.2：记忆继承卫生（"生而知之"量化；纯观测）
             "inheritance": e.inheritance_stats(),
         },

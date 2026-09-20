@@ -159,6 +159,40 @@ class PopulationView:
     total_food_in_stomach: float
 
 
+# R135 第 -1 步④：互捕量化直方图的分箱数（g16 ∈ [0,1] ⇒ 每箱宽 0.2）
+CANNIB_BINS = 5
+
+
+def _genome_summary(genes) -> dict:
+    """基因组摘要（t=0 基线；**只读、不消费 RNG**）。
+
+    R135 第 -1 步③。核心字段 `corr_g16_g4`：搭档基因 g4（进食量倍率，强选择）
+    与 g16（攻击性，关捕食后中性）的**初始抽样 LD**。
+    实测（详见 `SphereEngine.__init__` 注释）表明该 LD 会通过**搭车效应**把 g16 拖走，
+    量级足以伪造"g16 被选择" ⇒ **判读任何基因位移前必须先扣掉它**。
+    """
+    g = np.asarray(genes, dtype=np.float64)
+    if g.ndim != 2 or g.shape[0] < 2 or g.shape[1] < 17:
+        return {}
+    m = g.mean(axis=0)
+    s = g.std(axis=0, ddof=1)
+    out = {
+        "n": int(g.shape[0]),
+        "gene_count": int(g.shape[1]),
+        "g16_mean": float(m[16]),
+        "g16_std": float(s[16]),
+        "g4_mean": float(m[4]),
+        "g4_std": float(s[4]),
+        "gene_means": [round(float(x), 6) for x in m],
+    }
+    # 相关系数：任一方退化（sd≈0）时给 None 而不是 NaN（NaN 会静默污染下游 JSON）
+    if float(s[16]) > 1e-12 and float(s[4]) > 1e-12:
+        out["corr_g16_g4"] = float(np.corrcoef(g[:, 16], g[:, 4])[0, 1])
+    else:
+        out["corr_g16_g4"] = None
+    return out
+
+
 class SphereEngine:
     """球面世界引擎：NumPy 数组整群推进。
 
@@ -261,6 +295,10 @@ class SphereEngine:
         # 目的：判断「吃到 − 回付」是否仍 ≥ 不通信者的平均摄入（若为负 ⇒ 规避标记格的激励）。
         "_recv_pend_cells", "_recv_pay_sum",
         "_recv_food_sum", "_recv_food_n", "_all_food_sum", "_all_food_n",
+        # R135 第 -1 步③：t=0 基因组摘要（搭车诊断基线，只读）
+        "_genome_t0",
+        # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图，只读）
+        "_cannib_atk_hist", "_cannib_prey_hist",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -571,6 +609,56 @@ class SphereEngine:
         self._run_born = 0
         self._run_died = 0
         self._run_deaths: Counter = Counter()
+
+        # ---- t=0 基因组摘要（R135 第 -1 步 ③，2026-09-20）--------------------
+        # 目的：让"某个基因发生了位移"事后**可归因**。
+        #
+        # 🔴 实测教训（s42/s45/s47 三 seed × 1200 tick）：**中性基因也会被搭车**
+        #    （genetic hitchhiking）。g16 在关捕食后**无直接选择**（消费点全集只有
+        #    捕食两处，见 `Gene.AGGRESSION` grep），但它与强选择基因 g4（进食量缩放）
+        #    之间存在**由 seed 决定的初始抽样连锁不平衡 LD**：
+        #      s42 corr0=+0.171 ⇒ Δg4=+0.246 ⇒ **Δg16=+0.095**
+        #      s47 corr0=+0.056 ⇒ Δg4=+0.224 ⇒ Δg16=+0.029
+        #      s45 corr0=-0.115 ⇒ Δg4=+0.138 ⇒ Δg16=-0.000
+        #    实测 ≈ 2.2 × corr0 × Δg4 × (sd16/sd4)，三 seed 定量一致（符号/单调/比值）。
+        # ⇒ **没有 t=0 基线，就无法区分"该基因被选择"与"该基因被搭车"**；
+        #   ⇒ 推论：**单个 seed 的基因位移/分布不可跨批比较，必须同 seed 配对**。
+        # （只读、不消费 RNG ⇒ 不改变任何既有批的逐位行为。）
+        self._genome_t0 = _genome_summary(self._genes)
+        # R135 第 -1 步④：互捕结构量化累计器（5-bin，g16 ∈ [0,1]）
+        self._cannib_atk_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
+        self._cannib_prey_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
+
+    def cannibalism_stats(self) -> dict:
+        """互捕结构量化（R135 第 -1 步④；F「去互捕」的前置证据）。
+
+        `delta_g16 = mean(攻击者 g16) − mean(猎物 g16)`：
+        `> 0` ⇒ 鹰吃鸽有结构；`≈ 0` ⇒ 随机互捕。**n=0 时返回 n_a=None（不是 0）**——
+        （把"没测到"写成"测到 0"是本项目的老坑，见 E-023 的 `ratio` 教训）。
+        """
+        a, p = self._cannib_atk_hist, self._cannib_prey_hist
+        na, npr = int(a.sum()), int(p.sum())
+        centers = (np.arange(CANNIB_BINS) + 0.5) / CANNIB_BINS
+        ma = float((centers * a).sum() / na) if na else None
+        mp = float((centers * p).sum() / npr) if npr else None
+        return {
+            "bins": CANNIB_BINS,
+            "n_attacks": na if na else None,
+            "n_kills": npr if npr else None,
+            "attacker_g16_hist": a.tolist(),
+            "prey_g16_hist": p.tolist(),
+            "attacker_g16_mean": round(ma, 4) if ma is not None else None,
+            "prey_g16_mean": round(mp, 4) if mp is not None else None,
+            "delta_g16": (round(ma - mp, 4) if (ma is not None and mp is not None) else None),
+            "note": "g16 区间 [0,1] 均分 5 bin；n=None 表示本批没有该事件（不可读作 0）",
+        }
+
+    def genome_t0_stats(self) -> dict:
+        """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
+
+        含 `corr_g16_g4`——**搭车诊断的关键量**：事后可直接解释每个 seed 的 g16 位移。
+        """
+        return dict(self._genome_t0)
 
     # ---- 只读状态（给观察者用） ------------------------------------------
 
@@ -1418,6 +1506,21 @@ class SphereEngine:
         deaths: Counter = Counter()
         n_starved = int(starved.sum())
         n_expired = int(expired.sum())
+        # ---- R135 第 -1 步④：**互捕结构量化**（F「去互捕」延后的前置；2026-09-20）----
+        # 只读 `predation_mask`（Python/Rust 两条路径的共同输出）+ `attackers`（Python 侧选出）
+        # ⇒ **双路径天然覆盖，无需改 Rust、无需重编**。
+        # 核心判据 = `Δ = mean(g16_attacker) − mean(g16_prey)`：
+        #   Δ > 0 ⇒ 「鹰吃鸽」有结构；Δ ≈ 0 ⇒ 随机互捕（不存在 g16 分层）。
+        # 同时留 5-bin 直方图（不只均值——双峰/分层信息在形状里，均值会抹平）。
+        if predation_mask.any():
+            _pm = np.flatnonzero(predation_mask)
+            self._cannib_prey_hist += np.bincount(
+                np.clip((attack_gene[_pm] * CANNIB_BINS).astype(np.int64), 0, CANNIB_BINS - 1),
+                minlength=CANNIB_BINS)[:CANNIB_BINS]
+        if attackers.size:
+            self._cannib_atk_hist += np.bincount(
+                np.clip((attack_gene[attackers] * CANNIB_BINS).astype(np.int64), 0, CANNIB_BINS - 1),
+                minlength=CANNIB_BINS)[:CANNIB_BINS]
         n_predation = int(predation_mask.sum())
         if n_starved:
             deaths[DeathCause.STARVATION] = n_starved
@@ -2580,7 +2683,20 @@ class SphereEngine:
              engine._diag_attrib_found, engine._diag_in_window, engine._diag_not_self,
              engine._diag_budget_ok, engine._diag_applied) = (int(x) for x in _df)
         if "r121_counters" in data:   # R121 §3/§4：旧快照回退零值（不报错，语义=未观测）
-            _rc = data["r121_counters"]
+            # 🔴 长度守卫（内评未闭合项 #7，2026-09-20 修）：
+            #   原写法是 **6 元元组解包** ⇒ 长度必须**严格相等**；旧快照（4 元）续跑到
+            #   新版会抛 ValueError 且**看不出是这个计数器**（只会看到 "not enough values"）。
+            #   改为：短 ⇒ 右侧补 0（语义 = 新增计数器未观测）；长 ⇒ 截断并**显式告警**
+            #   （多余的计数会被丢弃，这是信息丢失，不能静默）。
+            _rc = np.asarray(data["r121_counters"], dtype=np.int64).reshape(-1)
+            if _rc.size < 6:
+                _rc = np.concatenate([_rc, np.zeros(6 - _rc.size, dtype=np.int64)])
+            elif _rc.size > 6:
+                print(
+                    f"  [WARN] snapshot r121_counters has {_rc.size} entries but this "
+                    f"version reads 6 => the last {_rc.size - 6} counter(s) are dropped."
+                )
+                _rc = _rc[:6]
             (engine._diag_food_band_true_sig, engine._mem_inherit_n,
              engine._mem_inherit_far_n, engine._alpha_bad_code_n,
              engine._mem_bit_on, engine._mem_bit_n) = (int(x) for x in _rc)
