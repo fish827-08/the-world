@@ -558,6 +558,35 @@ PRESETS = {
     #         `conv×H` 显著；⑥b_content 同向 ≥5/6 且超可检出阈；
     #         阴性结案 = 三臂不可区分 ⇒ 构念层复审；其余指标只报不判
     #   冒烟门（R127 + 稳态窗）：1 run × 12k 主臂，N_eq（末 2k 均值）∈ [0.2K, 0.95K] = [648, 3078]
+    # R141/R142 能量校准预实验（`[所有者]` 派工单 §一/§二；工具 `tools/calib_solve.py` 按 §1.3 列名消费）。
+    #   目的：测**净收入结构**（三腿：g16 三分箱 lo/mid/hi），为 C 档参数**解析标定**提供输入——
+    #   不做网格试错（内评 §2.4：×45 全因子不可归因，降级为备选）。
+    #   两臂**并用**（R141 §二）：
+    #     `calA` = 案 A：自然 g16 分布（零新开关）
+    #     `calB` = 案 B：`init_g16_clusters="0.05,0.5,0.9"`（**仪器性质**，非自然分布 ⇒ 不进科学判读）
+    #   🔴 预注册判据（内评 01:16 §2.1–2.3 复核版）：
+    #     主 = `|净收入(hi) − 净收入(lo)| / 净收入(lo) ≤ 20%`（**窗口 4k–8k，逐 tick 统计量取中位**）
+    #     ⚠️ 20% 是否可检 ⇒ **本批兼作功效预跑**（用 seed 间离散算可检出阈，跑完必报）
+    #     ⚠️ **通道外溢检查**（内评 §2.1）：同类相食的收益含"竞争削减"（吃掉同类 ⇒ 幸存者食草收入升）
+    #        ⇒ 这笔账记在**食草腿** ⇒ 通道记账会**低估**捕食策略总适应度 ⇒ 须同时报两腿并声明
+    #     副① = 净收入(mid) < min(lo, hi)
+    #     副② = **稳健风险量**（IQR / 5–95 分位差）而非裸方差（内评 §2.2：方差被少数击杀支配）
+    #     ⚠️ 跨腿比较必须**同 run 内配对**（逐 seed 一个 Δ），禁跨腿独立 t
+    #   ⚠️ 本批 = **仪器性质**（判读归 `[所有者]/[内评]`）；跑起来后本线不得再改代码（F-R9）
+    "calib1": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=0",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="calA", args=[],
+                 template="_rerun_logs/calib1/calA_s{seed}.csv"),
+            dict(name="calB", args=["init-g16-clusters=0.05,0.5,0.9"],
+                 template="_rerun_logs/calib1/calB_s{seed}.csv"),
+        ],
+    ),
     # R135 第 3 步 **A-连续**（2026-09-20；fish 21:56 已下跑批令）：营养级专化的**凸 trade-off**。
     #   文献锚：Geritz et al. 1998 *Evol. Ecol.* 12:35（**凸权衡 + 频率依赖 ⇒ 进化分支**）。
     #   被测机制**只有一项**：取食倍率 `forage_mult(g16) = (1 − g16) ** k`（R135 §二.1「只动曲率」）。

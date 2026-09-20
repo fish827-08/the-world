@@ -45,33 +45,31 @@ def _engine(*, d2: bool = True, ticks: int = 300, seed: int = 42,
 # ---------------------------------------------------------------- ① 分通道记账
 
 def test_channel_accounting_has_six_channels_and_boxes():
-    ec = _engine().energy_channel_stats()
-    assert ec["path"] == "python"
-    assert set(ec["channels"]) == set(EC_NAMES)
+    el = _engine().energy_ledger()
+    assert el["path"] == "python"
+    # 派工单 §1.3 锁定的结构（段名/键名勿改——calib_solve.py 按此消费）
+    assert set(el["groups"].keys()) == {"lo", "mid", "hi"}
     assert len(EC_NAMES) == EC_N == 6
-    # 光合是**独立收入通道**（不经过胃）——缺它会让"净收入"虚假为负
-    assert "intake_photo" in ec["channels"]
-    for ch in ("global",):
-        assert set(ec[ch].keys()) == set(EC_NAMES)
-    assert set(ec["by_g16_box"].keys()) == {"herb", "omni", "carn"}
+    assert "intake_photo" in EC_NAMES          # 光合是独立收入通道（不经过胃）
+    for k in ("obs_count", "global", "groups", "prey", "attack"):
+        assert k in el
 
 
 def test_channel_accounting_is_additive():
     """收入通道必须为正、支出通道必须为正（符号约定：全部记"量"而非"带符号量"）。"""
-    ec = _engine(ticks=400).energy_channel_stats()
-    g = ec["global"]
-    for k in ("intake_forage", "intake_photo"):
+    g = _engine(ticks=400).energy_ledger()["global"]
+    for k in ("intake_forage_sum", "intake_photo_sum"):
         assert g[k] > 0, f"{k} 应 > 0（收入通道）"
-    for k in ("cost_meta", "cost_move"):
+    for k in ("cost_meta_sum", "cost_move_sum"):
         assert g[k] > 0, f"{k} 应 > 0（支出量）"
 
 
 def test_channel_accounting_reports_none_on_rust_path():
     """Rust 路径 ⇒ **None（未观测）**，不是 0。把"没测到"写成"测到 0"是本项目老坑。"""
-    ec = _engine(use_core=True, ticks=50).energy_channel_stats()
-    assert ec["path"] == "rust"
-    assert "global" not in ec
-    assert "None" in ec["note"] or "未观测" in ec["note"]
+    el = _engine(use_core=True, ticks=50).energy_ledger()
+    assert el["path"] == "rust"
+    assert "global" not in el
+    assert "None" in el["note"] or "未观测" in el["note"]
 
 
 # ---------------------------------------------------------------- ② 三级拆分

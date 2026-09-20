@@ -179,6 +179,8 @@ EC_FORAGE, EC_PRED, EC_PHOTO, EC_META, EC_MOVE, EC_ATTACK = range(6)
 EC_N = 6
 EC_NAMES = ("intake_forage", "intake_pred", "intake_photo",
             "cost_meta", "cost_move", "cost_attack")
+# 三腿的分组名（派工单 §1.1：**每 tick 按个体当前 g16 现算**，不用出生标签 ⇒ 防杂交后失效）
+EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
 # 收入侧通道（净收入 = 收入 − 支出；缺 `intake_photo` 会让净收入虚假为负——
 # 光合是独立于取食的**直接收入**，不经过胃）。
 
@@ -327,8 +329,9 @@ class SphereEngine:
         "_genome_t0",
         # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图，只读）
         "_cannib_atk_hist", "_cannib_prey_hist",
-        # R141 P0：分通道能量记账
-        "_ec_global", "_ec_box", "_ec_n",
+        # R141 P0：分通道能量记账（逐个体缓冲 + 逐 tick 统计序列）
+        "_ec_global", "_ec_box", "_ec_n", "_ec_pt", "_ec_ts",
+        "_ec_prey_e_sum", "_ec_prey_kill_n",
         # R141/R138：真决斗三级拆分（名义/出手/致死 + skip 原因）
         "_duel",
     )
@@ -672,6 +675,11 @@ class SphereEngine:
         self._ec_global = np.zeros(EC_N, dtype=np.float64)
         self._ec_box = np.zeros((3, EC_N), dtype=np.float64)
         self._ec_n = np.zeros(3, dtype=np.int64)
+        # R141 P0（派工单 §1.2）：**逐个体**当 tick 记账缓冲 + 逐 tick 统计时间序列
+        self._ec_pt = np.zeros((EC_N, 0), dtype=np.float64)
+        self._ec_ts: list[dict] = []
+        self._ec_prey_e_sum = 0.0     # Σ 被击杀瞬间的猎物能量（R141 解方程关键输入）
+        self._ec_prey_kill_n = 0
         # R141/R138：真决斗三级拆分（键预置 ⇒ 输出稳定，不随是否有事件而缺列）
         self._duel = Counter({k: 0 for k in DUEL_KEYS})
 
@@ -718,48 +726,115 @@ class SphereEngine:
             "note": "g16 区间 [0,1] 均分 5 bin；n=None 表示本批没有该事件（不可读作 0）",
         }
 
+    def _ec_ensure(self, n: int) -> None:
+        """确保逐个体记账缓冲够长（P 会随生死/繁殖变化）。"""
+        if self._ec_pt.shape[1] < n:
+            pad = np.zeros((EC_N, n - self._ec_pt.shape[1]), dtype=np.float64)
+            self._ec_pt = np.concatenate([self._ec_pt, pad], axis=1)
+
     def _ec_add(self, k: int, idx, amount) -> None:
-        """分通道能量记账累加（R141 P0；只读不写状态外，不改变 RNG）。
+        """逐个体记账（R141 P0；**写当 tick 缓冲**，tick 末由 `_ec_flush` 统计后清零）。
 
         `idx=None` ⇒ 对**全体**当前存活者记账；否则按 `idx` 子集记账。
         """
         a = np.asarray(amount, dtype=np.float64)
         if a.size == 0:
             return
-        self._ec_global[k] += float(a.sum())
-        g16 = self._genes[:, Gene.AGGRESSION]
+        self._ec_ensure(a.size if idx is None else int(np.max(idx)) + 1)
         if idx is None:
-            b = np.clip((g16 * 3).astype(np.int64), 0, 2)
-            self._ec_box[:, k] += np.bincount(b, weights=a, minlength=3)[:3]
+            self._ec_pt[k, :a.size] += a
         else:
-            ii = np.asarray(idx, dtype=np.int64)
-            b = np.clip((g16[ii] * 3).astype(np.int64), 0, 2)
-            self._ec_box[:, k] += np.bincount(b, weights=a, minlength=3)[:3]
+            # `np.add.at` 对重复索引安全（移动/捕食的 idx 理论上唯一，但不赌）
+            np.add.at(self._ec_pt[k], np.asarray(idx, dtype=np.int64), a)
 
-    def energy_channel_stats(self) -> dict:
-        """分通道能量记账（R141 P0 派工）。
+    def _ec_flush(self) -> None:
+        """tick 末：按 g16 三分箱统计净收入（n / mean / p50 / var）⇒ 时间序列；然后清零。
 
-        返回 **累计**总量（J）与按 g16 三分箱的分腿量；`per_capita` = 累计 ÷ ∫N dt 的
-        箱计数（用 `_ec_n` 近似：每 tick 各箱的存活数之和，见 `_ec_tick_box_n`）。
-        ⚠️ `use_sim_core=True` ⇒ 返回 `path="rust"` 且各值为 **None**（未观测，非 0）。
+        🔴 口径与列名由派工单锁定（`docs/tasks/派工-本地开发-P0能量记账与投放-20260921.md` §1.2/§1.3）：
+          `net = intake_forage + intake_pred − cost_meta − cost_move − cost_attack`
+          **不含光合**（光合是可选单列）；样本量 n=0 ⇒ 统计量写 **None 不写 0**。
+        ⚠️ 为什么要**逐 tick**统计而不是窗口合并：时间自相关 ⇒ 合并会伪重复（内评 01:16 §1.3③）。
+        """
+        # ⚠️ P 必须取**各数组的最小一致长度**：繁殖后 `_genes` 会比 `_id` 先扩容，
+        #    直接传 `len(self._id)` 会造成 `net[m]` 与 `box` 长度不匹配（IndexError，已踩）。
+        P = int(min(self._genes.shape[0], self._energy.shape[0],
+                    self._id.shape[0], self._ec_pt.shape[1]))
+        if self._use_sim_core or P <= 0:
+            return
+        pt = self._ec_pt[:, :P]
+        net = (pt[EC_FORAGE] + pt[EC_PRED]
+               - pt[EC_META] - pt[EC_MOVE] - pt[EC_ATTACK])
+        box = np.clip((self._genes[:P, Gene.AGGRESSION] * 3).astype(np.int64), 0, 2)
+        row: dict = {}
+        for b, name in enumerate(EC_BOX_NAMES):
+            m = box == b
+            n = int(m.sum())
+            row[f"g_{name}_n"] = n
+            if n == 0:
+                for k in ("net_mean", "net_p50", "net_var"):
+                    row[f"g_{name}_{k}"] = None
+                continue
+            v = net[m]
+            row[f"g_{name}_net_mean"] = float(v.mean())
+            row[f"g_{name}_net_p50"] = float(np.percentile(v, 50))
+            row[f"g_{name}_net_var"] = float(v.var(ddof=1)) if n > 1 else None
+            # 附：含光合的净收入（超出派工单规格的**附加**信息，供完整性核对用）
+            row[f"g_{name}_net_incl_photo"] = float((v + pt[EC_PHOTO][m]).mean())
+        row["forage_in_mean"] = float(pt[EC_FORAGE].sum() / P)
+        row["pred_in_mean"] = float(pt[EC_PRED].sum() / P)
+        row["photo_in_mean"] = float(pt[EC_PHOTO].sum() / P)
+        row["mean_energy"] = float(self._energy[:P].mean())
+        row["prey_energy_mean"] = (self._ec_prey_e_sum / self._ec_prey_kill_n
+                                   if self._ec_prey_kill_n else None)
+        self._ec_ts.append(row)
+        # 累计进 summary 用的累加器（窗口无关的全批口径）
+        self._ec_global[:] += pt.sum(axis=1)
+        for b in range(3):
+            m = box == b
+            if m.any():
+                self._ec_box[b, :] += pt[:, m].sum(axis=1)
+                self._ec_n[b] += int(m.sum())
+        self._ec_pt[:, :P] = 0.0
+
+    def ec_timeseries(self) -> list[dict]:
+        """逐 tick 的净收入统计序列（CSV 16 列的来源；派工单 §1.3 列名）。"""
+        return self._ec_ts
+
+    def energy_ledger(self) -> dict:
+        """`energy_ledger` 段（summary；派工单 §1.3 结构，**列名勿改**——`calib_solve.py` 按此消费）。
+
+        ⚠️ `use_sim_core=True` ⇒ `path="rust"` 且无数据（**未观测**，不是 0）。
         """
         if self._use_sim_core:
-            return {"path": "rust", "note": "Rust 路径不做 Python 侧记账 ⇒ 未观测（None，非 0）"}
-        tot = {EC_NAMES[i]: round(float(self._ec_global[i]), 3) for i in range(EC_N)}
-        box = {("herb", "omni", "carn")[r]: {
-            EC_NAMES[i]: round(float(self._ec_box[r, i]), 3) for i in range(EC_N)}
-            for r in range(3)}
-        box_n = {"herb": int(self._ec_n[0]), "omni": int(self._ec_n[1]),
-                 "carn": int(self._ec_n[2])}
-        net = {("herb", "omni", "carn")[r]: round(
-            float(self._ec_box[r, EC_FORAGE] + self._ec_box[r, EC_PRED]
-                  + self._ec_box[r, EC_PHOTO]
-                  - self._ec_box[r, EC_META] - self._ec_box[r, EC_MOVE]
-                  - self._ec_box[r, EC_ATTACK]), 3) for r in range(3)}
-        return {"path": "python", "channels": EC_NAMES, "global": tot,
-                "by_g16_box": box, "box_person_ticks": box_n, "net_by_box": net,
-                "note": "g16 三分箱 = [0,1/3) 食草 / [1/3,2/3) 杂食 / [2/3,1] 捕食；"
-                        "person_ticks 为该箱的 ∫N dt（近似，按存活数逐 tick 累计）"}
+            return {"path": "rust",
+                    "note": "Rust 路径不做 Python 侧记账 ⇒ 未观测（None，非 0）"}
+        g = {EC_NAMES[i] + "_sum": round(float(self._ec_global[i]), 3) for i in range(EC_N)}
+        groups = {}
+        for b, name in enumerate(EC_BOX_NAMES):
+            n = int(self._ec_n[b])
+            groups[name] = {
+                "n_sum": n,
+                **{EC_NAMES[i] + "_sum": round(float(self._ec_box[b, i]), 3)
+                   for i in range(EC_N)},
+            }
+            # 净收入（**按派工单口径，不含光合**）+ 含光合的附加量
+            groups[name]["net_sum"] = round(float(
+                self._ec_box[b, EC_FORAGE] + self._ec_box[b, EC_PRED]
+                - self._ec_box[b, EC_META] - self._ec_box[b, EC_MOVE]
+                - self._ec_box[b, EC_ATTACK]), 3)
+            groups[name]["net_incl_photo_sum"] = round(float(
+                groups[name]["net_sum"] + self._ec_box[b, EC_PHOTO]), 3)
+        return {
+            "path": "python",
+            "obs_count": int(self._ec_n.sum()),
+            "global": g,
+            "groups": groups,
+            "prey": {"kills": int(self._ec_prey_kill_n),
+                     "energy_sum": round(float(self._ec_prey_e_sum), 3)},
+            "attack": {"attempts": int(self._duel["real_attempts"])},
+            "note": "net = intake_forage + intake_pred − cost_meta − cost_move − cost_attack"
+                    "（**不含光合**，派工单 §1.2）；net_incl_photo_* 为附加口径",
+        }
 
     def genome_t0_stats(self) -> dict:
         """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
@@ -901,10 +976,9 @@ class SphereEngine:
         self._run_born += stats.born
         self._run_died += stats.died
         self._run_deaths.update(stats.deaths_by_cause)
-        # R141 P0：分通道记账的**箱人口**（∫N dt 近似，逐 tick 累计各 g16 箱的存活数）
-        if not self._use_sim_core:
-            _b = np.clip((self._genes[:, Gene.AGGRESSION] * 3).astype(np.int64), 0, 2)
-            self._ec_n += np.bincount(_b, minlength=3)[:3]
+        # R141 P0：tick 末结算分通道记账（派工单 §1.2：**逐 tick** 出 n/mean/p50/var
+        # ⇒ 避免"跨 tick 合并样本"造成的时间自相关伪重复，内评 01:16 §1.3③）
+        self._ec_flush()
         if self._history_limit > 0:
             overflow = len(self._history) - self._history_limit
             if overflow > 0:
@@ -1605,6 +1679,9 @@ class SphereEngine:
                     )
                     if rand_success[k] < success_rate:
                         predation_mask[prey] = True
+                        # R141：ΣE_prey（**击杀瞬间**的猎物能量）——解 `transfer*` 的关键输入
+                        self._ec_prey_e_sum += float(energy[prey])
+                        self._ec_prey_kill_n += 1
                         _tr = float(energy[prey]) * pcfg.transfer_ratio
                         energy[idx] += _tr
                         _pred_i.append(idx)

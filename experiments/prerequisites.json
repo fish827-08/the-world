@@ -207,5 +207,38 @@
         "why": "与本纪元其余批一致；字母表差异会改基线区制，不可混入"
       }
     ]
+  },
+  "calib1": {
+    "science_question": "能量校准预实验（仪器性质）：测三腿（g16 三分箱）净收入结构，为 C 档参数**解析标定**提供输入；并兼作 20% 阈值的**功效预跑**",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "校准的是正式构造；uniform 下取食收益结构不同 ⇒ 标定值不可移植"
+      },
+      {
+        "id": "soft_cap_window",
+        "kind": "preset_arg_equals",
+        "key": "soft-cap-target",
+        "value": "0.6",
+        "why": "无软顶时 N 崩溃(≈19-78) ⇒ 三腿样本量不足 ⇒ 中位数不可估"
+      },
+      {
+        "id": "curvature_off",
+        "kind": "preset_arg_equals",
+        "key": "forage-tradeoff-k",
+        "value": "0.0",
+        "why": "校准的是**现状**收支结构（C 档实施前的基线）；开曲率会把标定值污染成\"C 档后的值\""
+      },
+      {
+        "id": "cluster_arm_present",
+        "kind": "variant_arg_equals",
+        "key": "init-g16-clusters",
+        "value": "0.05,0.5,0.9",
+        "why": "案 B（三簇投放）必须真在场：它保证三腿 n 足够；若读到空 ⇒ 该臂退化为案 A，重复跑无信息"
+      }
+    ]
   }
 }
