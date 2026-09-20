@@ -94,7 +94,12 @@ def leg_stats(rows: list[dict], leg: str) -> dict:
     def col(suffix):
         return [x for x in (_f(r.get(f'g_{leg}_net_{suffix}')) for r in rows) if x is not None]
 
-    means, p50s, vars_, ns = col('mean'), col('p50'), col('var'), col('n')
+    def col_n():
+        # ⚠️ 人数列名是 `g_{leg}_n`（**不含 `_net_`**）——2026-09-21 修（旧版写成
+        #    `g_{leg}_net_n` ⇒ 恒 None，是**我自己的 bug**，非数据问题）。
+        return [x for x in (_f(r.get(f'g_{leg}_n')) for r in rows) if x is not None]
+
+    means, p50s, vars_, ns = col('mean'), col('p50'), col('var'), col_n()
     out = {}
     for k, v in (('mean', means), ('p50', p50s), ('var', vars_)):
         out[k] = st.median(v) if v else None
