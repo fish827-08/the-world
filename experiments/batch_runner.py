@@ -738,6 +738,42 @@ PRESETS = {
                  template="_rerun_logs/l1l2seg1/Ep_s{seed}.csv"),
         ],
     ),
+    # R152 **P0：捕食双峰验证（短实验）** —— 3 臂 × 4 seed × **8k** = 12 run
+    # ==================================================================
+    # 🔴 假设（唯一一条）：**给捕食者真实代价 + 让中间态最差 ⇒ 能否止住"单向扫荡到边界"**。
+    #    **不判"分化"**（8k 只有 ~10 代，世代门 ≥30 ⇒ 本批只判**方向**）；达标才快照续跑 40k。
+    # 🔴 依据：段一 30/30 判读（R152 帖）—— L1/L2 **接线成立但无处理效应**（Fisher p≈0.34），
+    #    且 `forage_tradeoff_k=0` ⇒ 捕食者取食不打折（实测取食入 1.44–2.10 ≥ 素食端 1.14–1.89）
+    #    ⇒ 提高攻击性边际收益恒正 ⇒ **收敛点在边界，结构上不可能有内部双峰**。
+    # 🔴 文献（`[网络]`）：Geritz 1998 分支三条件（奇异点/收敛稳定/**H>0 破坏性选择**）+
+    #    I<0（负频率依赖）；同类相食多态（J Theor Biol 2003）：**无剧增效应则不能稳定共存**。
+    # ⚠️ **L1/L2 全关**（段一已证其无效应）⇒ 本批**只动生态位结构**（一次改一件事）。
+    # ⚠️ seed 取 42–45：与段一 A 臂（42–47）**同 seed 可比**；A0 与段一 A 臂同构造 ⇒ 天然对照。
+    # 臂表：
+    #   A0 = 现构造（k=0 / cost 0.1 / transfer 0.4 …全默认）—— 漂变零模型 + 对照
+    #   B0 = **只压中间态**（k=2）—— 单测"破坏性选择"够不够
+    #   C0 = **压中间态 + 真实成本 + 高收益**（= fish 批的 C 档 + 压中间态）
+    # 成本估：12 run × 8k / 并发 19 ⇒ 单波 ⇒ **12–18 min**
+    "p0niche": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/p0niche_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true"],
+        variants=[
+            dict(name="A0", args=[],
+                 template="_rerun_logs/p0niche/A0_s{seed}.csv"),
+            dict(name="B0", args=["forage-tradeoff-k=2.0"],
+                 template="_rerun_logs/p0niche/B0_s{seed}.csv"),
+            dict(name="C0", args=["forage-tradeoff-k=2.0", "attack-cost=1.0",
+                                  "transfer-ratio=0.8", "attack-gate=0.15",
+                                  "attack-prob-coef=0.5", "success-floor=0.35",
+                                  "success-ceil=0.95"],
+                 template="_rerun_logs/p0niche/C0_s{seed}.csv"),
+        ],
+    ),
 }
 
 # ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----

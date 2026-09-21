@@ -147,6 +147,10 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           reputation_weight: float = 0.0,
           # R135 第3步 A-连续（2026-09-20）：凸 trade-off 取食倍率 (1−g16)^k
           forage_tradeoff_k: float = 0.0,
+          # R152/P0（2026-09-22）：捕食生态位结构 6 参（**默认值 = 旧行为，逐位一致**）
+          attack_cost: float = 0.1, transfer_ratio: float = 0.4,
+          attack_gene_gate: float = 0.3, attack_prob_coef: float = 0.2,
+          success_floor: float = 0.1, success_ceil: float = 0.9,
           # R141 P0-2（派工单 §二）：g16 初始投放（"" = 旧行为；"0.05,0.5,0.9" = 校准批）
           init_g16_clusters: str = "",
           # R144/R145：能量封顶开关（默认 False = 与 E-017~E-031/calib1 可比）
@@ -170,6 +174,13 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.predation = PredationConfig(
         enabled=bool(predation_enabled),
         forage_tradeoff_k=float(forage_tradeoff_k),
+        # R152/P0：捕食生态位结构 6 参（**整体替换 ⇒ 必须一次传全**，漏一个就被静默重置为默认）
+        attack_cost=float(attack_cost),
+        transfer_ratio=float(transfer_ratio),
+        attack_gene_gate=float(attack_gene_gate),
+        attack_prob_coef=float(attack_prob_coef),
+        success_floor=float(success_floor),
+        success_ceil=float(success_ceil),
     )
     c.genome.init_g16_clusters = str(init_g16_clusters or "")   # R141 P0-2
     c.organisms.energy_cap_enabled = bool(energy_cap)           # R144：能量封顶（新纪元开关）
@@ -371,6 +382,22 @@ def main() -> None:
     ap.add_argument("--forage-tradeoff-k", dest="forage_tradeoff_k", type=float, default=0.0,
                     help="R135 第3步 A-连续：取食倍率 (1−g16)^k（凸 trade-off）；"
                          "0=关（默认，与旧版逐位一致）；本批取 2.0（凸/加速下降 ⇒ 中间态杂食者吃亏）")
+    # ---- R152/P0（2026-09-22）：**捕食生态位结构** 6 个参数上 CLI -----------------
+    # 🔴 目的：P0 要测"给捕食者真实代价 + 让中间态最差"，而这些值此前**只能改源码**
+    #    ⇒ 无法做臂间对照（F1 家族："传了开关却没生效"的可预防形态）。
+    # ⚠️ 全部**默认 = 旧行为**（逐位一致）：0.1 / 0.4 / 0.3 / 0.2 / 0.1 / 0.9。
+    ap.add_argument("--attack-cost", dest="attack_cost", type=float, default=0.1,
+                    help="每次**真出手**的能耗（现 0.1 ≈ 代谢的 0.1%%；P0 拟 1.0 = 高风险）")
+    ap.add_argument("--transfer-ratio", dest="transfer_ratio", type=float, default=0.4,
+                    help="捕食成功抢走猎物能量比例（现 0.4；P0 拟 0.8）")
+    ap.add_argument("--attack-gate", dest="attack_gene_gate", type=float, default=0.3,
+                    help="攻击性低于该值不发动攻击（现 0.3；P0 拟 0.15）")
+    ap.add_argument("--attack-prob-coef", dest="attack_prob_coef", type=float, default=0.2,
+                    help="出手概率 ≈ 攻击性 × 该系数 × 饥饿度（现 0.2；P0 拟 0.5）")
+    ap.add_argument("--success-floor", dest="success_floor", type=float, default=0.1,
+                    help="成功率下限（现 0.1；P0 拟 0.35）")
+    ap.add_argument("--success-ceil", dest="success_ceil", type=float, default=0.9,
+                    help="成功率上限（现 0.9；P0 拟 0.95）")
     ap.add_argument("--learning-bottleneck", dest="learning_bottleneck", default="true",
                     choices=("true", "false"),
                     help="PC-1 零模型臂：false=关学习瓶颈（配码本关=零模型）；默认 true")
@@ -467,7 +494,12 @@ def main() -> None:
                   # R146/R149（R150 B1）：L1/L2 臂身份（默认全关 = 旧行为）
                   l1_seek=bool(args.l1_seek), l1_fear=bool(args.l1_fear),
                   l2_dash=bool(args.l2_dash), w_seek_max=args.w_seek_max,
-                  w_fear=args.w_fear, l1_prey_mode=args.l1_prey_mode)
+                  w_fear=args.w_fear, l1_prey_mode=args.l1_prey_mode,
+                  # R152/P0：捕食生态位结构 6 参
+                  attack_cost=args.attack_cost, transfer_ratio=args.transfer_ratio,
+                  attack_gene_gate=args.attack_gene_gate,
+                  attack_prob_coef=args.attack_prob_coef,
+                  success_floor=args.success_floor, success_ceil=args.success_ceil)
         start_tick = 0
     # 🔴 内评未闭合项 #6（2026-09-20 修）：**provenance 必须在跑之前采集**。
     #   收尾时采集记的是"跑完之后的代码树"——长批期间若有人推提交（E-027 就发生过），
@@ -710,6 +742,14 @@ def main() -> None:
             "soft_cap_target": float(e.config.population.soft_cap_target),
             # R135 第3步 A-连续：凸度必须可读回（C4）
             "forage_tradeoff_k": float(e.config.predation.forage_tradeoff_k),
+            # R152/P0：捕食生态位结构 6 参必须可读回（C4）—— 臂间差就在这几个键上，
+            # 缺席 ⇒ 外复核只能靠 preset 名（R136 §一 增量 2 的同型缺口）
+            "attack_cost": float(e.config.predation.attack_cost),
+            "transfer_ratio": float(e.config.predation.transfer_ratio),
+            "attack_gene_gate": float(e.config.predation.attack_gene_gate),
+            "attack_prob_coef": float(e.config.predation.attack_prob_coef),
+            "success_floor": float(e.config.predation.success_floor),
+            "success_ceil": float(e.config.predation.success_ceil),
             # R141 P0-2：初始投放必须可读回（C4）
             "init_g16_clusters": str(e.config.genome.init_g16_clusters),
             # R144/R145：能量封顶与光合必须可读回（C4；且封顶开关进指纹 ⇒ 纪元可判）
