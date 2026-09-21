@@ -94,8 +94,31 @@ pub fn predation_attack_with_csr(
         let total = energy[idx] + energy[prey];
         let energy_ratio = energy[idx] / total.max(1e-9);
         let g16 = genes[idx * gene_count + G_AGGRESSION];
+
+        // 冲刺机制（feat/predator-dash）：
+        // - 专性捕食者（g16 > 0.7）：有冲刺能力，成功率 ×1.5，攻击耗能 ×2
+        // - 杂食者（0.3 < g16 < 0.7）：无冲刺能力，成功率 ×0.5
+        // - 专性食草者（g16 < 0.3）：不会被选为攻击者（上游已过滤）
+        let dash_mult: f64;
+        let dash_cost_mult: f64;
+        if g16 > 0.7 {
+            dash_mult = 1.5;      // 专性捕食者：冲刺加成
+            dash_cost_mult = 2.0; // 冲刺耗能 ×2
+        } else if g16 > 0.3 {
+            dash_mult = 0.5;      // 杂食者：无冲刺，成功率减半
+            dash_cost_mult = 1.0;
+        } else {
+            dash_mult = 0.0;      // 专性食草者：理论上不会到这里
+            dash_cost_mult = 1.0;
+        }
+
+        // 冲刺额外耗能（在攻击成本基础上再加）
+        if dash_cost_mult > 1.0 {
+            energy[idx] -= attack_cost * (dash_cost_mult - 1.0);
+        }
+
         let success_rate =
-            (energy_ratio * (0.5 + g16 * success_gene_gain)).clamp(success_floor, success_ceil);
+            (energy_ratio * (0.5 + g16 * success_gene_gain) * dash_mult).clamp(success_floor, success_ceil);
 
         if rand_success[k] < success_rate {
             predation_mask[prey] = true;
