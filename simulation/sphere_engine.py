@@ -40,7 +40,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from core.lifecycle import DeathCause
-from simulation.config import CALIBRATION_M_RANGE, SIGNAL_COST, SimConfig
+from simulation.config import (
+    CALIBRATION_M_RANGE,
+    FOOD_RICH_LEVEL,
+    SIGNAL_ALPHABET_CODE_MAX,
+    SIGNAL_ALPHABET_IMPLEMENTED,
+    SIGNAL_ALPHABET_STATES,
+    SIGNAL_COST,
+    SimConfig,
+)
 from simulation.genes import Gene
 from simulation.oracle import EMISSION_COST, apply_oracle, attribution_ok
 from simulation.provenance import CountingRNG
@@ -49,6 +57,95 @@ from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
 from world.signal_field import SignalField
 from world.sphere_world import SphereWorld
+
+
+def codebook_init_rows(n_rows: int, alphabet: str) -> NDArray[np.uint8]:
+    """按 `signal_alphabet` 档位构造初始码本（形状 `(n_rows, 16)`，uint8）。
+
+    R113/R121（设计稿 §3.2）——**数组宽度恒为 16**（存档兼容，R113 明文）：
+      · `"16"`：恒等映射 `arange(16)`（0–15）⇒ **与旧版逐位一致**（既有批次口径不动）
+      · `"4"` ：`clip(arange(16)+1, 1, 4)` ⇒ 有效槽 0–3 → `{1,2,3,4}`；槽 4–15 保持初值
+                （**码 0 永不出现** ⇒ 设计稿 §2.4 的"隐形发射 + 清除他人标记"后果消失）
+      · `"8"` ：`clip(arange(16)+1, 1, 8)`（B③ 载体；**本版未实施** ⇒ 调用即硬失败）
+
+    未实施的档位**硬失败**（教训 2：静默 no-op 最危险），不降级、不报警后继续。
+    """
+    if alphabet not in SIGNAL_ALPHABET_IMPLEMENTED:
+        raise NotImplementedError(
+            f"signal_alphabet={alphabet!r} 尚未实施"
+            f"（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+        )
+    if alphabet == "16":
+        row = np.arange(16, dtype=np.int64)
+    else:
+        row = np.clip(np.arange(16, dtype=np.int64) + 1, 1,
+                      SIGNAL_ALPHABET_CODE_MAX[alphabet])
+    return np.asarray(row, dtype=np.uint8)[np.newaxis, :].repeat(
+        int(n_rows), axis=0
+    ).copy()
+
+
+def encode_signal_states(
+    energy: NDArray[np.float64],
+    grid: NDArray[np.float64],
+    capacity: NDArray[np.float64],
+    occ: NDArray[np.int64],
+    e_flat: NDArray[np.int64],
+    emitters: NDArray[np.int64],
+    max_energy: float,
+    alphabet: str,
+    work_memory: NDArray[np.int64] | None = None,
+) -> tuple[NDArray[np.int64], int]:
+    """按 `signal_alphabet` 档位把**发射者状态**编码为 `(state, code_offset)`。
+
+    抽成**纯函数**的目的（设计稿 §3.6 测试 3）：让"冗余位是否确被删"可**不插桩**直接验证 ——
+    只需给同 `e_bin`、不同 (食物, 邻居) 的两组输入，看 `state` 是否相同。
+
+    · `"16"`：能量档 2 位 + 食物 1 位 + 邻居 1 位 ⇒ `state = e_bin*4 + f_bit*2 + n_bit`（0–15）；
+              `code_offset = 0` ⇒ 无码本时 `code = state`（**0 是合法值** = 无信号，旧语义）
+    · `"4"` ：**仅**能量档 2 位 ⇒ `state = e_bin`（0–3）；`code_offset = 1`
+              ⇒ 无码本时 `code = e_bin + 1 ∈ {1,2,3,4}`，**码 0 永不出现**
+              （删 `f_bit`：阈值错位，拟 F-M2；删 `n_bit`：严格冗余，内评 §二.1）
+    · `"8"` ：能量档 2 位 + **记忆位** 1 位 ⇒ `state = e_bin*2 + mem_bit`（0–7）；
+              `code_offset = 1` ⇒ 无码本时 `code = state + 1 ∈ {1..8}`
+              （`mem_bit` 语义见下方分支注释；**2026-09-19 已按内评抽核修正为"非当前格命中"**）
+    · 其余档位：`NotImplementedError`（不静默降级，教训 2）
+
+    ⚠️ `code_offset` 只在**无码本（恒等映射）**时使用；开码本时 `pattern = codebook[:, state]`，
+    其值域由 `codebook_init_rows` 与变异域共同保证（"4" ⇒ ⊆ [1,4]）。
+    """
+    e_bin = np.clip(
+        (energy[emitters] / max(1e-9, max_energy) * 4).astype(np.int64), 0, 3
+    )
+    if alphabet == "16":
+        f_bit = (grid[e_flat] > FOOD_RICH_LEVEL * capacity[e_flat]).astype(np.int64)
+        n_bit = (occ[e_flat] > 1).astype(np.int64)
+        return (e_bin * 4 + f_bit * 2 + n_bit).astype(np.int64), 0
+    if alphabet == "4":
+        return e_bin.astype(np.int64), 1
+    if alphabet == "8":
+        # B③（R123 2026-09-18 实施 / **2026-09-19 构念修正**）：能量档 2 位 + **记忆位** 1 位
+        #   `mem_bit = 1` ⟺ 发射者记忆中**存在一个 ≠ 当前格**的富食点（"我知道**别处**哪儿有食物"）。
+        #   🔴 为何修正（内评 2026-09-19 01:4x 抽核）：原实现 = 「**当前格**在我记忆里」，而
+        #   `_work_memory` 是**站在富食格上时**写入的 ⇒ 该判据 ≈「这一格曾经富过」= `f_bit` 的
+        #   **时间延迟版**，而当前格的瞬时食物**接收者本来就能直读** ⇒ 该位**仍冗余**（预期 null；
+        #   且其 null **不可**读作「私有内容无用」——那是仪器/构念问题，不是信号问题）。
+        #   改为「非当前格命中」后，该位指向**接收者无法直读的个体历史（另一些格位）**⇒ 才符合
+        #   B③ 的原始意图（设计稿 §5.1）。
+        #   ⚠️ **残留口径**（内评 §三，列为**下一档选项**）：记忆中的格若落在感知半径 4 内，接收者
+        #   仍可直读 ⇒ 严格的「非直读」版本需加**距离/方位**判据（本档不做，避免一次改两件事）。
+        if work_memory is None:
+            raise ValueError(
+                'signal_alphabet="8" 需要 work_memory（记忆位 mem_bit 的输入）——收到 None'
+            )
+        _mem = work_memory[emitters]
+        # `-1` = 空槽哨兵（`e_flat ≥ 0` ⇒ 不会误命中）；同时排除"当前格"本身
+        mem_hit = ((_mem != -1) & (_mem != e_flat[:, None])).any(axis=1).astype(np.int64)
+        return (e_bin * 2 + mem_hit).astype(np.int64), 1
+    raise NotImplementedError(
+        f"signal_alphabet={alphabet!r} 的编码尚未实施"
+        f"（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+    )
 
 
 @dataclass(frozen=True)
@@ -60,6 +157,70 @@ class PopulationView:
     max_generation: int
     total_energy: float
     total_food_in_stomach: float
+
+
+# R135 第 -1 步④：互捕量化直方图的分箱数（g16 ∈ [0,1] ⇒ 每箱宽 0.2）
+CANNIB_BINS = 5
+
+# ---------------------------------------------------------------------------
+# R141 P0：**分通道能量记账**（能量校准预实验的前提）。
+#   通道索引（顺序即语义，勿随意重排）：
+#     0 intake_forage   取食（斑块）摄入
+#     1 intake_pred     捕食摄入（抢到的猎物能量）
+#     2 cost_meta       基础维持 + 恒温
+#     3 cost_move       移动扣费
+#     4 cost_attack     攻击成本（每次出手必付）
+#   按 **g16 三分箱**（食草 / 杂食 / 捕食 三腿）分别累计 ⇒ 才能验证
+#   C 档目标 `R_捕食 ≈ R_食草 > R_杂食`（**没有"杂食腿"则"中间最低"无法验证**）。
+#   ⚠️ 只在 **Python 路径**（`use_sim_core=False`）记账：Rust 路径的扣费发生在
+#      Rust 内部，Python 侧看不到 ⇒ `energy_channel_stats()` 会标 `path="rust"` + 值 None
+#      （**不报 0**——"没测到"与"测到 0"必须分开，本项目老坑）。
+EC_FORAGE, EC_PRED, EC_PHOTO, EC_META, EC_MOVE, EC_ATTACK = range(6)
+EC_N = 6
+EC_NAMES = ("intake_forage", "intake_pred", "intake_photo",
+            "cost_meta", "cost_move", "cost_attack")
+# 三腿的分组名（派工单 §1.1：**每 tick 按个体当前 g16 现算**，不用出生标签 ⇒ 防杂交后失效）
+EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
+# 收入侧通道（净收入 = 收入 − 支出；缺 `intake_photo` 会让净收入虚假为负——
+# 光合是独立于取食的**直接收入**，不经过胃）。
+
+# R141/R138：真决斗三级拆分的键（**顺序固定**；全部预置 0 ⇒ 输出不随事件有无而变）
+#   nominal = len(attackers)：名义攻击者（= `cannibalism.n_attacks`，旧口径的分母）
+#   skip_*  = 三类"根本没出手"的原因；real_attempts = 真出手 = nominal − 三类 skip
+#   kills   = 致死（= `cannibalism.n_kills`）
+# ⇒ **真实出手成功率 = kills / real_attempts**（旧口径 kills / nominal 会低估）
+DUEL_KEYS = ("skip_no_energy", "skip_no_prey", "skip_already_eaten",
+             "real_attempts", "kills")
+
+
+def _genome_summary(genes) -> dict:
+    """基因组摘要（t=0 基线；**只读、不消费 RNG**）。
+
+    R135 第 -1 步③。核心字段 `corr_g16_g4`：搭档基因 g4（进食量倍率，强选择）
+    与 g16（攻击性，关捕食后中性）的**初始抽样 LD**。
+    实测（详见 `SphereEngine.__init__` 注释）表明该 LD 会通过**搭车效应**把 g16 拖走，
+    量级足以伪造"g16 被选择" ⇒ **判读任何基因位移前必须先扣掉它**。
+    """
+    g = np.asarray(genes, dtype=np.float64)
+    if g.ndim != 2 or g.shape[0] < 2 or g.shape[1] < 17:
+        return {}
+    m = g.mean(axis=0)
+    s = g.std(axis=0, ddof=1)
+    out = {
+        "n": int(g.shape[0]),
+        "gene_count": int(g.shape[1]),
+        "g16_mean": float(m[16]),
+        "g16_std": float(s[16]),
+        "g4_mean": float(m[4]),
+        "g4_std": float(s[4]),
+        "gene_means": [round(float(x), 6) for x in m],
+    }
+    # 相关系数：任一方退化（sd≈0）时给 None 而不是 NaN（NaN 会静默污染下游 JSON）
+    if float(s[16]) > 1e-12 and float(s[4]) > 1e-12:
+        out["corr_g16_g4"] = float(np.corrcoef(g[:, 16], g[:, 4])[0, 1])
+    else:
+        out["corr_g16_g4"] = None
+    return out
 
 
 class SphereEngine:
@@ -112,6 +273,8 @@ class SphereEngine:
         "_repro_cooldown",
         "_valence", "_arousal", "_expectation", "_baseline", "_trust",
         "_work_memory", "_mem_ptr", "_interpret", "_nb_table",
+        # A′ 记忆朝向梯度计数器（2026-09-19）—— 本类用 `__slots__`，**新属性必须登记否则无法赋值**
+        "_mem_grad_dec", "_mem_grad_slots", "_mem_grad_trig", "_mem_grad_counts_valid",
         "_codebook", "_learning_count",  # D2 信息结构：任意性码本 + 学习瓶颈计数
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
@@ -126,12 +289,24 @@ class SphereEngine:
         "_oracle_transfers", "_oracle_count",
         "_resp_decisions", "_resp_exposed", "_resp_delta_sum", "_resp_flip",
         "_measure_resp", "_oracle_on",
+        # ---- R123/B② 门控臂（付款闸用逐个体 Δ；纯观测计数）----
+        "_delta_full_by_id", "_delta_content_by_id", "_delta_tick_by_id",
+        "_gate_on", "_gate_delta",
+        "_diag_gate_pass", "_diag_gate_block",
+        "_gate_arrivals", "_gate_delta_full_sum", "_gate_delta_content_sum",
+        "_resp_delta_content_sum",
         # ---- D-26a：oracle 四环节诊断漏斗（纯观测计数，D-24 G-A 不过后定位瓶颈）----
         # 内评 _eval/D24判读预析 §4.1：分开记 ①发射 ②归因成功 ③true_sig ④实际转移，
         # 否则只有聚合 return_ratio、不知道卡在哪一环。仅在 oracle 开启时累加。
         "_diag_had_sig", "_diag_true_sig", "_diag_sel",
         "_diag_attrib_found", "_diag_in_window", "_diag_not_self",
         "_diag_budget_ok", "_diag_applied",
+        # ---- R121 §3/§4（2026-09-18）：信号字母表档位 + 两个零机时观测计数器 ----
+        # ⚠️ __slots__ 是硬约束：新属性**必须**在此登记，否则运行期 AttributeError
+        "_alpha", "_alpha_states", "_alpha_code_max",
+        "_diag_food_band_true_sig", "_mem_inherit_n", "_mem_inherit_far_n",
+        "_alpha_bad_code_n",
+        "_mem_bit_on", "_mem_bit_n",   # 2026-09-19：mem_bit 取值分布（闭合可观测性缺口）
         # ---- R102/条件 1（修正版）：守恒三账审计（★在引擎侧**独立**核算，非"同一个数抄三遍"）----
         # 撤销 R100 条件 1 原定的 "system_energy_injected"：机制复核（R102 §三）已证
         # apply_oracle 是**双向转移** ⇒ 纯再分配、**C-2 守恒成立**、无注入。
@@ -150,6 +325,15 @@ class SphereEngine:
         # 目的：判断「吃到 − 回付」是否仍 ≥ 不通信者的平均摄入（若为负 ⇒ 规避标记格的激励）。
         "_recv_pend_cells", "_recv_pay_sum",
         "_recv_food_sum", "_recv_food_n", "_all_food_sum", "_all_food_n",
+        # R135 第 -1 步③：t=0 基因组摘要（搭车诊断基线，只读）
+        "_genome_t0",
+        # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图，只读）
+        "_cannib_atk_hist", "_cannib_prey_hist",
+        # R141 P0：分通道能量记账（逐个体缓冲 + 逐 tick 统计序列）
+        "_ec_global", "_ec_box", "_ec_n", "_ec_pt", "_ec_ts",
+        "_ec_prey_e_sum", "_ec_prey_kill_n",
+        # R141/R138：真决斗三级拆分（名义/出手/致死 + skip 原因）
+        "_duel",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -306,11 +490,22 @@ class SphereEngine:
         self._mem_ptr = 0
         # 信号解读表（L5 文化传递）：(N,16)，对 16 种信号模式的响应倾向
         # 正值=移向，负值=逃避，0=忽略；初始随机，幼体向周围成体学习
+        # R113/R121 信号字母表档位（fail-loud：未实施的档位在**构造期**即报错，
+        # 不留到运行期 —— 与 :756 的"静默 no-op"教训同族）
+        _alpha = str(config.signal_alphabet)
+        if _alpha not in SIGNAL_ALPHABET_IMPLEMENTED:
+            raise NotImplementedError(
+                f"signal_alphabet={_alpha!r} 尚未实施"
+                f"（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+            )
+        self._alpha = _alpha
+        self._alpha_states = SIGNAL_ALPHABET_STATES[_alpha]
+        self._alpha_code_max = SIGNAL_ALPHABET_CODE_MAX[_alpha]
         self._interpret = self.rng.normal(0.0, 0.3, size=(n, 16))
         # D2 任意性码本：(N,16)，每个状态(0~15)映射到一个信号模式(0~15)
         # 初始恒等映射 codebook[state]=state（与旧版硬编码行为一致）；
         # 繁殖时遗传+突变，映射可漂移可协商。D2 disabled 时不使用。
-        self._codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(n, axis=0).copy()
+        self._codebook = codebook_init_rows(n, config.signal_alphabet)
         # D2 学习瓶颈计数：(N,)，每个个体已完成的观察学习次数；
         # 达到 learning_samples_max 后停止学习（=瓶颈）。D2 disabled 时不使用。
         self._learning_count = np.zeros(n, dtype=np.int32)
@@ -347,8 +542,41 @@ class SphereEngine:
         self._resp_exposed = 0
         self._resp_delta_sum = 0.0
         self._resp_flip = 0
+        self._resp_delta_content_sum = 0.0   # R123：内容项单去的 Δ_content 累计（并列报告）
         self._measure_resp = bool(config.info_structure.measure_signal_response)
         self._oracle_on = bool(config.oracle.enabled)
+        # R123/B② 门控臂：逐个体 Δ（**按 _id 键控**——死亡压缩会重排槽位，禁槽位键控）；
+        # `_delta_tick_by_id` 记"该 Δ 属于哪一 tick" ⇒ 付款时要求 `== 本 tick`，
+        # **免去每 tick 复位**且杜绝"陈旧正值误触发付款"（静默错型）。
+        self._delta_full_by_id = z(np.float32)
+        self._delta_content_by_id = z(np.float32)
+        self._delta_tick_by_id = np.full(n, -1, dtype=np.int32)
+        self._gate_on = False
+        self._gate_delta = str(config.oracle.gate_delta)
+        self._diag_gate_pass = 0
+        self._diag_gate_block = 0
+        self._gate_arrivals = 0
+        self._gate_delta_full_sum = 0.0
+        self._gate_delta_content_sum = 0.0
+        # ---- 门控臂守卫（三处齐发之一；另两处 = config.__post_init__ / a4 build）----
+        if str(config.oracle.gate_mode) == "delta_positive":
+            if not self._oracle_on:
+                raise ValueError("门控臂需要 oracle.enabled=True（否则根本无付款可闸）")
+            if not self._measure_resp:
+                raise ValueError(
+                    "门控臂需要 info_structure.measure_signal_response=True —— 否则 Δ≡0 "
+                    "⇒ **所有付款消失**（ratio=0），会被读成「信号无用」的**假结论**（比没数据更坏）"
+                )
+            _ifc = config.info_structure
+            if not (_ifc.enabled and _ifc.perception_radius == 4 and _ifc.softmax_tau > 0):
+                raise ValueError(
+                    "门控臂的 Δ 由 ⑥ 探针产生，而探针只存在于**信息不对称路径**"
+                    "（enabled ∧ perception_radius=4 ∧ softmax_tau>0）的 softmax 分支里 "
+                    "⇒ 该组合下 Δ 恒为 0（同上假结论）"
+                )
+            if not config.oracle.is_calibration_arm:
+                raise ValueError("门控臂是仪器（改付款规则）⇒ 必须登记 is_calibration_arm=True")
+            self._gate_on = True
         # D-26a 四环节诊断累计器（纯观测；oracle off 时恒零且不累加）
         self._diag_had_sig = 0        # 移动者落点"有信号"的次数
         self._diag_true_sig = 0       # 其中落点同时"有食物"（oracle 选中的语义）
@@ -358,6 +586,25 @@ class SphereEngine:
         self._diag_not_self = 0       # 且 发送者 ≠ 接收者（不自反馈）
         self._diag_budget_ok = 0      # 且 C-9 保本额度 > 0
         self._diag_applied = 0        # 实际成交（转移发生）次数
+        # ---- R121 §3.5/§4（2026-09-18）纯观测计数器（零机时；不改状态与随机流）----
+        self._diag_food_band_true_sig = 0   # §4.1：true_sig 中落点 food_ratio ∈ (0.3, 0.5]
+        self._mem_inherit_n = 0             # §4.2：出生继承记忆的槽位总数
+        self._mem_inherit_far_n = 0         # §4.2：其中"距出生格 > 感知半径"的槽位数
+        self._alpha_bad_code_n = 0          # §3.5：码 ==0 或 > 档位上限 的发射次数（须恒 0）
+        # 2026-09-19（内评 01:4x + 所有者 03:02 §五 建议）：`mem_bit` 实际取值分布
+        # E-022/E-023 两份记录均把"该位运行分布无读数"列为**可观测性缺口** ⇒ 加纯观测计数器。
+        # `mem_bit_frac = _mem_bit_on / _mem_bit_n`（只在走"状态编码"的发射上累计；
+        # random 模式无 state ⇒ 不计入 ⇒ 分母 = 状态编码发射数，报告须标此口径）
+        self._mem_bit_on = 0
+        self._mem_bit_n = 0
+        # A′ 记忆朝向梯度（2026-09-19）：**先证"测到了"再判读**（E-022 的可观测性缺口）
+        #   decisions = 走朝向梯度分支的**决策次数**（分母）；slots = 其中"记忆有内容"的次数；
+        #   trigger  = 其中"梯度确实产生非 0 贡献"的次数（`|gain| > 1e-9`）。
+        # ⚠️ 只在 `memory_gradient="orientation"` 时累计；`"none"` 下全为 0（见 `memory_gradient_stats`）。
+        self._mem_grad_dec = 0
+        self._mem_grad_slots = 0
+        self._mem_grad_trig = 0
+        self._mem_grad_counts_valid = True   # Rust 路径下置 False（该侧不产计数 ⇒ 按 n/a 报）
         # 守恒三账审计（R102 条件 1 修正版）
         self._audit_calls = 0
         self._audit_sum_delta = 0.0
@@ -397,6 +644,204 @@ class SphereEngine:
         self._run_born = 0
         self._run_died = 0
         self._run_deaths: Counter = Counter()
+
+        # ---- t=0 基因组摘要（R135 第 -1 步 ③，2026-09-20）--------------------
+        # 目的：让"某个基因发生了位移"事后**可归因**。
+        #
+        # 🔴 实测教训（s42/s45/s47 三 seed × 1200 tick）：**中性基因也会被搭车**
+        #    （genetic hitchhiking）。g16 在关捕食后**无直接选择**（消费点全集只有
+        #    捕食两处，见 `Gene.AGGRESSION` grep），但它与强选择基因 g4（进食量缩放）
+        #    之间存在**由 seed 决定的初始抽样连锁不平衡 LD**：
+        #      s42 corr0=+0.171 ⇒ Δg4=+0.246 ⇒ **Δg16=+0.095**
+        #      s47 corr0=+0.056 ⇒ Δg4=+0.224 ⇒ Δg16=+0.029
+        #      s45 corr0=-0.115 ⇒ Δg4=+0.138 ⇒ Δg16=-0.000
+        #    实测 ≈ 2.2 × corr0 × Δg4 × (sd16/sd4)，三 seed 定量一致（符号/单调/比值）。
+        # ⇒ **没有 t=0 基线，就无法区分"该基因被选择"与"该基因被搭车"**；
+        #   ⇒ 推论：**单个 seed 的基因位移/分布不可跨批比较，必须同 seed 配对**。
+        # （只读、不消费 RNG ⇒ 不改变任何既有批的逐位行为。）
+        # R141：g16 初始投放（默认空 = 旧行为；非空 ⇒ 覆盖 g16 列，交错分配保证组大小相等）
+        _cl = str(getattr(config.genome, "init_g16_clusters", "") or "")
+        if _cl:
+            _vals = [float(x) for x in _cl.split(",") if x.strip()]
+            if _vals:
+                # ⚠️ 不消费 RNG（直接赋值）⇒ 只改初始条件，不改随机流结构
+                for _i, _v in enumerate(_vals):
+                    self._genes[_i::len(_vals), Gene.AGGRESSION] = _v
+        self._genome_t0 = _genome_summary(self._genes)
+        # R135 第 -1 步④：互捕结构量化累计器（5-bin，g16 ∈ [0,1]）
+        self._cannib_atk_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
+        self._cannib_prey_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
+        # R141 P0：分通道能量记账（5 通道 × 全球/三分箱）。见 `energy_channel_stats`。
+        self._ec_global = np.zeros(EC_N, dtype=np.float64)
+        self._ec_box = np.zeros((3, EC_N), dtype=np.float64)
+        self._ec_n = np.zeros(3, dtype=np.int64)
+        # R141 P0（派工单 §1.2）：**逐个体**当 tick 记账缓冲 + 逐 tick 统计时间序列
+        self._ec_pt = np.zeros((EC_N, 0), dtype=np.float64)
+        self._ec_ts: list[dict] = []
+        self._ec_prey_e_sum = 0.0     # Σ 被击杀瞬间的猎物能量（R141 解方程关键输入）
+        self._ec_prey_kill_n = 0
+        # R141/R138：真决斗三级拆分（键预置 ⇒ 输出稳定，不随是否有事件而缺列）
+        self._duel = Counter({k: 0 for k in DUEL_KEYS})
+
+    def cannibalism_stats(self) -> dict:
+        """互捕结构量化（R135 第 -1 步④；F「去互捕」的前置证据）。
+
+        `delta_g16 = mean(攻击者 g16) − mean(猎物 g16)`：
+        `> 0` ⇒ 鹰吃鸽有结构；`≈ 0` ⇒ 随机互捕。**n=0 时返回 n_a=None（不是 0）**——
+        （把"没测到"写成"测到 0"是本项目的老坑，见 E-023 的 `ratio` 教训）。
+        """
+        a, p = self._cannib_atk_hist, self._cannib_prey_hist
+        na, npr = int(a.sum()), int(p.sum())
+        centers = (np.arange(CANNIB_BINS) + 0.5) / CANNIB_BINS
+        ma = float((centers * a).sum() / na) if na else None
+        mp = float((centers * p).sum() / npr) if npr else None
+        # R141/R138：真决斗三级拆分（Python 路径才有；Rust 路径计数全 0 ⇒ 报 None）
+        duel = None
+        if not self._use_sim_core:
+            nominal = int(na)          # = len(attackers) 累计（与 n_attacks 同源）
+            real = int(self._duel["real_attempts"])
+            kills = int(self._duel["kills"])
+            duel = {
+                "nominal_attackers": nominal,
+                "skip_no_energy": int(self._duel["skip_no_energy"]),
+                "skip_no_prey": int(self._duel["skip_no_prey"]),
+                "skip_already_eaten": int(self._duel["skip_already_eaten"]),
+                "real_attempts": real,
+                # 🔴 两个成功率口径**必须分开报**：旧口径的低估是真实存在的
+                "success_rate_nominal": (round(kills / nominal, 4) if nominal else None),
+                "success_rate_real": (round(kills / real, 4) if real else None),
+                "note": "nominal=含未出手；real=真出手（排除能量不足/无猎物/已被吃）"
+                        "⇒ 旧口径 kills/nominal 会**低估**成功率",
+            }
+        return {
+            "duel": duel,
+            "bins": CANNIB_BINS,
+            "n_attacks": na if na else None,
+            "n_kills": npr if npr else None,
+            "attacker_g16_hist": a.tolist(),
+            "prey_g16_hist": p.tolist(),
+            "attacker_g16_mean": round(ma, 4) if ma is not None else None,
+            "prey_g16_mean": round(mp, 4) if mp is not None else None,
+            "delta_g16": (round(ma - mp, 4) if (ma is not None and mp is not None) else None),
+            "note": "g16 区间 [0,1] 均分 5 bin；n=None 表示本批没有该事件（不可读作 0）",
+        }
+
+    def _ec_ensure(self, n: int) -> None:
+        """确保逐个体记账缓冲够长（P 会随生死/繁殖变化）。"""
+        if self._ec_pt.shape[1] < n:
+            pad = np.zeros((EC_N, n - self._ec_pt.shape[1]), dtype=np.float64)
+            self._ec_pt = np.concatenate([self._ec_pt, pad], axis=1)
+
+    def _ec_add(self, k: int, idx, amount) -> None:
+        """逐个体记账（R141 P0；**写当 tick 缓冲**，tick 末由 `_ec_flush` 统计后清零）。
+
+        `idx=None` ⇒ 对**全体**当前存活者记账；否则按 `idx` 子集记账。
+        """
+        a = np.asarray(amount, dtype=np.float64)
+        if a.size == 0:
+            return
+        self._ec_ensure(a.size if idx is None else int(np.max(idx)) + 1)
+        if idx is None:
+            self._ec_pt[k, :a.size] += a
+        else:
+            # `np.add.at` 对重复索引安全（移动/捕食的 idx 理论上唯一，但不赌）
+            np.add.at(self._ec_pt[k], np.asarray(idx, dtype=np.int64), a)
+
+    def _ec_flush(self) -> None:
+        """tick 末：按 g16 三分箱统计净收入（n / mean / p50 / var）⇒ 时间序列；然后清零。
+
+        🔴 口径与列名由派工单锁定（`docs/tasks/派工-本地开发-P0能量记账与投放-20260921.md` §1.2/§1.3）：
+          `net = intake_forage + intake_pred − cost_meta − cost_move − cost_attack`
+          **不含光合**（光合是可选单列）；样本量 n=0 ⇒ 统计量写 **None 不写 0**。
+        ⚠️ 为什么要**逐 tick**统计而不是窗口合并：时间自相关 ⇒ 合并会伪重复（内评 01:16 §1.3③）。
+        """
+        # ⚠️ P 必须取**各数组的最小一致长度**：繁殖后 `_genes` 会比 `_id` 先扩容，
+        #    直接传 `len(self._id)` 会造成 `net[m]` 与 `box` 长度不匹配（IndexError，已踩）。
+        P = int(min(self._genes.shape[0], self._energy.shape[0],
+                    self._id.shape[0], self._ec_pt.shape[1]))
+        if self._use_sim_core or P <= 0:
+            return
+        pt = self._ec_pt[:, :P]
+        net = (pt[EC_FORAGE] + pt[EC_PRED]
+               - pt[EC_META] - pt[EC_MOVE] - pt[EC_ATTACK])
+        box = np.clip((self._genes[:P, Gene.AGGRESSION] * 3).astype(np.int64), 0, 2)
+        row: dict = {}
+        for b, name in enumerate(EC_BOX_NAMES):
+            m = box == b
+            n = int(m.sum())
+            row[f"g_{name}_n"] = n
+            if n == 0:
+                for k in ("net_mean", "net_p50", "net_var"):
+                    row[f"g_{name}_{k}"] = None
+                continue
+            v = net[m]
+            row[f"g_{name}_net_mean"] = float(v.mean())
+            row[f"g_{name}_net_p50"] = float(np.percentile(v, 50))
+            row[f"g_{name}_net_var"] = float(v.var(ddof=1)) if n > 1 else None
+            # 附：含光合的净收入（超出派工单规格的**附加**信息，供完整性核对用）
+            row[f"g_{name}_net_incl_photo"] = float((v + pt[EC_PHOTO][m]).mean())
+        row["forage_in_mean"] = float(pt[EC_FORAGE].sum() / P)
+        row["pred_in_mean"] = float(pt[EC_PRED].sum() / P)
+        row["photo_in_mean"] = float(pt[EC_PHOTO].sum() / P)
+        row["mean_energy"] = float(self._energy[:P].mean())
+        row["prey_energy_mean"] = (self._ec_prey_e_sum / self._ec_prey_kill_n
+                                   if self._ec_prey_kill_n else None)
+        self._ec_ts.append(row)
+        # 累计进 summary 用的累加器（窗口无关的全批口径）
+        self._ec_global[:] += pt.sum(axis=1)
+        for b in range(3):
+            m = box == b
+            if m.any():
+                self._ec_box[b, :] += pt[:, m].sum(axis=1)
+                self._ec_n[b] += int(m.sum())
+        self._ec_pt[:, :P] = 0.0
+
+    def ec_timeseries(self) -> list[dict]:
+        """逐 tick 的净收入统计序列（CSV 16 列的来源；派工单 §1.3 列名）。"""
+        return self._ec_ts
+
+    def energy_ledger(self) -> dict:
+        """`energy_ledger` 段（summary；派工单 §1.3 结构，**列名勿改**——`calib_solve.py` 按此消费）。
+
+        ⚠️ `use_sim_core=True` ⇒ `path="rust"` 且无数据（**未观测**，不是 0）。
+        """
+        if self._use_sim_core:
+            return {"path": "rust",
+                    "note": "Rust 路径不做 Python 侧记账 ⇒ 未观测（None，非 0）"}
+        g = {EC_NAMES[i] + "_sum": round(float(self._ec_global[i]), 3) for i in range(EC_N)}
+        groups = {}
+        for b, name in enumerate(EC_BOX_NAMES):
+            n = int(self._ec_n[b])
+            groups[name] = {
+                "n_sum": n,
+                **{EC_NAMES[i] + "_sum": round(float(self._ec_box[b, i]), 3)
+                   for i in range(EC_N)},
+            }
+            # 净收入（**按派工单口径，不含光合**）+ 含光合的附加量
+            groups[name]["net_sum"] = round(float(
+                self._ec_box[b, EC_FORAGE] + self._ec_box[b, EC_PRED]
+                - self._ec_box[b, EC_META] - self._ec_box[b, EC_MOVE]
+                - self._ec_box[b, EC_ATTACK]), 3)
+            groups[name]["net_incl_photo_sum"] = round(float(
+                groups[name]["net_sum"] + self._ec_box[b, EC_PHOTO]), 3)
+        return {
+            "path": "python",
+            "obs_count": int(self._ec_n.sum()),
+            "global": g,
+            "groups": groups,
+            "prey": {"kills": int(self._ec_prey_kill_n),
+                     "energy_sum": round(float(self._ec_prey_e_sum), 3)},
+            "attack": {"attempts": int(self._duel["real_attempts"])},
+            "note": "net = intake_forage + intake_pred − cost_meta − cost_move − cost_attack"
+                    "（**不含光合**，派工单 §1.2）；net_incl_photo_* 为附加口径",
+        }
+
+    def genome_t0_stats(self) -> dict:
+        """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
+
+        含 `corr_g16_g4`——**搭车诊断的关键量**：事后可直接解释每个 seed 的 g16 位移。
+        """
+        return dict(self._genome_t0)
 
     # ---- 只读状态（给观察者用） ------------------------------------------
 
@@ -533,6 +978,9 @@ class SphereEngine:
         self._run_born += stats.born
         self._run_died += stats.died
         self._run_deaths.update(stats.deaths_by_cause)
+        # R141 P0：tick 末结算分通道记账（派工单 §1.2：**逐 tick** 出 n/mean/p50/var
+        # ⇒ 避免"跨 tick 合并样本"造成的时间自相关伪重复，内评 01:16 §1.3③）
+        self._ec_flush()
         if self._history_limit > 0:
             overflow = len(self._history) - self._history_limit
             if overflow > 0:
@@ -621,11 +1069,13 @@ class SphereEngine:
             # 1) 光合收入（g8）：少量、随光照。
             #    收入 = 光照(所在格,当前tick) × g8 × photo_max。
             #    植物化增强（g19）在 stage1 之后统一补，确保双路径一致。
-            energy += (
+            _pho = (
                 self.light.illumination(self._flat, self._tick)
                 * genes[:, Gene.PHOTOSYNTHESIS]
                 * ocfg.photo_max
             )
+            energy += _pho
+            self._ec_add(EC_PHOTO, None, _pho)   # R141 P0：intake_photo 通道
 
             # 2) 代谢转化：胃 → 能量（总量不变，快慢受温度+基因影响）
             #    转化速率 = base_metabolism × metabolic_mult × eff_activity
@@ -634,7 +1084,13 @@ class SphereEngine:
             digest_rate = ocfg.base_metabolism * metab_mult * eff_activity
             # 每 tick 最多转化这么多；不得超出胃里有的
             digest = np.minimum(stomach, digest_rate)
-            energy += digest * ocfg.eat_efficiency  # 同样食物 → 同样能量
+            _dg = digest * ocfg.eat_efficiency      # 同样食物 → 同样能量
+            energy += _dg
+            # R141 P0：`intake_forage` = **真正进入能量的量**（已乘 `eat_efficiency`）。
+            # 🔴 口径坑（我第一版就踩了）：若记"进胃的原始食物量"（未乘 3.0），
+            #    `net = 收入 − 支出` 会**虚假为负**（实测 −0.23/人·tick，而个体显然活着）
+            #    ⇒ 必须与 `intake_pred`/`intake_photo`（都直接进能量）同口径。
+            self._ec_add(EC_FORAGE, None, _dg)
             stomach -= digest
 
             # 3) 基础维持消耗（体温/活动，必扣，与温度无关基础价）
@@ -648,18 +1104,25 @@ class SphereEngine:
             age_mult = np.ones(P, dtype=np.float64)
             age_mult[age_f < maturity_age] = ocfg.growth_mult
             age_mult[age_f >= senile_age] = ocfg.senile_mult
-            energy -= ocfg.base_metabolism * metab_mult * age_mult
+            _cm = ocfg.base_metabolism * metab_mult * age_mult
+            energy -= _cm
+            # R141 P0：cost_meta 通道（基础维持；恒温费下一行另计，合并进同一通道）
+            self._ec_add(EC_META, None, _cm)
             #    + 恒温维持费（g9）：恒温个体每 tick 另付 homeo_upkeep
-            energy -= ocfg.homeo_upkeep * homeo
+            _ch = ocfg.homeo_upkeep * homeo
+            energy -= _ch
+            self._ec_add(EC_META, None, _ch)   # R141：并入 cost_meta 通道
 
         # 3.5) 植物化光合增强（g19）：统一在 stage1 之后补，确保 Rust/Python 双路径一致
         #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
-        energy += (
+        _pho2 = (
             self.light.illumination(self._flat, self._tick)
             * genes[:, Gene.PHOTOSYNTHESIS]
             * genes[:, Gene.ROOTING]
             * ocfg.photo_max
         )
+        energy += _pho2
+        self._ec_add(EC_PHOTO, None, _pho2)   # R141 P0：植物化增强并入 intake_photo
 
         # 3.5) L10a 植物蓄力→结果（默认关闭；确定性数值管线，Rust 可下沉）
         if self.config.fruit.enabled:
@@ -680,8 +1143,21 @@ class SphereEngine:
         )
         if (stomach < stomach_cap).any():
             eaters = np.flatnonzero(stomach < stomach_cap)
+            # R135 第 3 步 A-连续（2026-09-20）：**凸 trade-off** `forage_mult = (1−g16)^k`。
+            #   k=0（默认）⇒ 下面的乘子恒 1 ⇒ **与旧版逐位一致**；
+            #   k>1 ⇒ g16 高的个体**吃斑块的能力加速下降**（中间态杂食者最吃亏）。
+            #   只动取食侧（捕猎侧在 Rust，按裁定不动）⇒ **无需改 Rust、无需重编**。
+            #   详见 `PredationConfig.forage_tradeoff_k` 的对照表与文献锚。
+            # ⚠️ 此处**不能**沿用 `pcfg` 简写：本函数里 `pcfg` 指向的是
+            # `config.pleasure`（:447），捕食段那份在 :1374 才定义 ⇒ 必须全路径取。
+            _tk = float(self.config.predation.forage_tradeoff_k)
+            if _tk > 0.0:
+                _g16 = np.clip(genes[eaters, Gene.AGGRESSION], 0.0, 1.0)
+                _forage = np.power(1.0 - _g16, _tk)
+            else:
+                _forage = 1.0
             want = np.minimum(
-                ocfg.eat_amount * eat_mult[eaters],
+                ocfg.eat_amount * eat_mult[eaters] * _forage,
                 stomach_cap[eaters] - stomach[eaters],
             )
             # 3.5：批量进食双路径（Rust consume_many 与 numpy consume_many 逐位等价）
@@ -727,9 +1203,12 @@ class SphereEngine:
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
         cur_flat = self._flat[:P]
+        # R121 §4.1：字面量 0.5 → 显式常量 `FOOD_RICH_LEVEL`（**只命名、不改数值**）。
+        # 注意比较符仍是 `>`（与改名前逐位一致）；该常量语义 = "多到值得记住"，
+        # 与 `CultureConfig.food_threshold`(0.3，"可食/值得付款") **不同**，见 config.py 注释。
         food_rich = (
             self.resources._grid[cur_flat]
-            > 0.5 * self.resources._capacity[cur_flat]
+            > FOOD_RICH_LEVEL * self.resources._capacity[cur_flat]
         )
         if food_rich.any():
             rich_idx = np.flatnonzero(food_rich)
@@ -754,7 +1233,10 @@ class SphereEngine:
         random_patterns = None
         if self.config.signal_mode == "random":
             rng_rand = np.random.default_rng(self.config.seed + 99991)  # 独立种子偏移
-            random_patterns = rng_rand.integers(1, 16, size=P, dtype=np.uint8)
+            # R113/R121：码域随档位（"16"⇒1–15；"4"⇒1–4）；形状与抽取数**不变**
+            random_patterns = rng_rand.integers(
+                1, self._alpha_code_max + 1, size=P, dtype=np.uint8
+            )
         if self._use_sim_core and random_patterns is None and not (
             self.config.info_structure.enabled and self.config.info_structure.arbitrary_codebook
         ):
@@ -777,23 +1259,31 @@ class SphereEngine:
                         # D1 random 模式：用独立 rng 预生成的随机模式
                         patterns = random_patterns[emitters]
                     else:
-                        # 模式编码：能量档(2位,bit3-2) + 食物(1位,bit1) + 邻居(1位,bit0)
-                        e_bin = np.clip(
-                            (energy[emitters] / max(1e-9, ocfg.max_energy) * 4).astype(np.int64), 0, 3
+                        # 状态编码（R113/R121）：抽为纯函数 ⇒ "冗余位是否确被删"可免插桩直测
+                        state, _code_offset = encode_signal_states(
+                            energy, self.resources._grid, self.resources._capacity,
+                            occ, e_flat, emitters, ocfg.max_energy, self._alpha,
+                            work_memory=self._work_memory,   # B③："8" 档的记忆位输入
                         )
-                        f_bit = (
-                            self.resources._grid[e_flat]
-                            > 0.5 * self.resources._capacity[e_flat]
-                        ).astype(np.int64)
-                        n_bit = (occ[e_flat] > 1).astype(np.int64)
-                        state = (e_bin * 4 + f_bit * 2 + n_bit).astype(np.int64)
+                        # 2026-09-19：`"8"` 档 `state = e_bin*2 + mem_bit` ⇒ `mem_bit = state & 1`
+                        # （纯观测；只在状态编码路径累计，random 模式不计入）
+                        if self._alpha == "8":
+                            self._mem_bit_on += int((state & 1).sum())
+                            self._mem_bit_n += int(state.size)
+                        # ⚠️ 本行曾被我 2026-09-18 的重写误删（UnboundLocalError 当场暴露）
                         ifcfg = self.config.info_structure
                         if ifcfg.enabled and ifcfg.arbitrary_codebook:
                             # D2-2 任意性：pattern = 个体码本[state]，映射可遗传可漂移
                             patterns = self._codebook[emitters, state].astype(np.uint8)
                         else:
-                            # 旧版：pattern = state（恒等映射，硬编码状态函数）
-                            patterns = state.astype(np.uint8)
+                            # 无码本：恒等映射（"16"⇒code=state；"4"⇒code=state+1，避开 0）
+                            patterns = (state + _code_offset).astype(np.uint8)
+                        # R121 §3.5 守卫（纯观测、零机时）：码 0 或越上限 ⇒ 计数。
+                        # "4" 下**必须恒为 0**（非 0 = 隐形发射/清除他人标记 或 接收端读到未学槽）
+                        if self._alpha != "16":
+                            _bad = (patterns == 0) | (patterns > self._alpha_code_max)
+                            if _bad.any():
+                                self._alpha_bad_code_n += int(_bad.sum())
                     self.signals.write_many(e_flat, patterns)
                     if self._oracle_on:
                         # D-8 归因记账：存 **_id** 而非槽位索引（死亡压缩会重排槽位，
@@ -849,6 +1339,10 @@ class SphereEngine:
                     0, 1_000_000, size=len(mi), dtype=np.int64
                 )
                 # Rust 移动决策（含移动扣费）
+                # A′：Rust 侧**不产**朝向梯度计数器（只做决策）⇒ 标记"计数不可用"，
+                #     `memory_gradient_stats()` 会按 n/a 报，**不**冒充 0（防假读数）。
+                self._mem_grad_counts_valid = False
+                _ifc_mg = self.config.info_structure
                 self._sim_core.step_movement(
                     self._flat[:P], energy, genes, self._trust[:P],
                     self._work_memory[:P].reshape(-1), self._interpret[:P],
@@ -856,6 +1350,9 @@ class SphereEngine:
                     self._nb_table.reshape(-1),
                     mi.astype(np.int64), rand_choice, move_cost_ind,
                     self.world.n_cells, self._nb_table.shape[1],
+                    int(self.world.cols),
+                    1 if _ifc_mg.memory_gradient == "orientation" else 0,
+                    float(_ifc_mg.memory_gradient_gain),
                 )
                 # 5.6) 信任学习：移动到有信号的格子后验证真假
                 target_cells = self._flat[mi]
@@ -916,6 +1413,11 @@ class SphereEngine:
                 d2_softmax = ifcfg3.enabled and ifcfg3.softmax_tau > 0
                 # B1：R2 声誉权重（0=关闭 → sig_weight 恒 0.5，与旧版逐位一致）
                 rep_w = ifcfg3.reputation_weight if ifcfg3.enabled else 0.0
+                # A′ 记忆朝向梯度（2026-09-19）：**不**受 `enabled` 门控 —— 与 ⑥ 探针同规格，
+                # 必须能**单独**开关，否则 A′ 会被学习瓶颈/码本/softmax 等一堆 D2 机制污染
+                # （⇒ 不再是单变量实验）。`none` 下走**原式**，逐位等价。
+                mem_grad_on = (ifcfg3.memory_gradient == "orientation")
+                mem_grad_gain = float(ifcfg3.memory_gradient_gain)
                 for i, idx in enumerate(mi):
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
                     # ⚠️ 禁用 nb[:4]：8 邻列序以 [上左,上,上右,左] 打头，取"前4个"
@@ -946,7 +1448,18 @@ class SphereEngine:
                         fr * 0.5 + sp * sig_weight
                     ) + soc * densities[nb]
                     valid_mem = self._work_memory[idx][self._work_memory[idx] >= 0]
-                    if len(valid_mem) > 0:
+                    if mem_grad_on:
+                        # A′：先记"测到了没有"，再加朝向梯度（可观测性优先，见 memory_gradient_stats）
+                        self._mem_grad_dec += 1
+                        if len(valid_mem) > 0:
+                            self._mem_grad_slots += 1
+                            g = self._memory_orientation_cos(
+                                int(self._flat[idx]), nb, valid_mem)
+                            if float(np.abs(g).max()) > 1e-9:
+                                self._mem_grad_trig += 1
+                            score = score + mem_grad_gain * perc * g
+                    elif len(valid_mem) > 0:
+                        # 原式（**严格不动**：`0.3` 字面量，保与旧版逐位一致）
                         mem_in_nb = np.isin(nb, valid_mem)
                         score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
                     nb_sigs = self.signals._marks[nb]
@@ -983,9 +1496,22 @@ class SphereEngine:
                                 )
                                 probs_wo = exp_w / exp_w.sum()
                                 self._resp_exposed += 1
-                                self._resp_delta_sum += float(
-                                    probs[chosen] - probs_wo[chosen]
+                                d_full = float(probs[chosen] - probs_wo[chosen])
+                                self._resp_delta_sum += d_full
+                                # R123/B②：**内容项单去**的反事实（保留存在性项）⇒ Δ_content。
+                                # `score` 此刻 = ... + 0.4*perc*interp，故减去该行即"无内容"。
+                                score_woc = score - 0.4 * perc * interp
+                                exp_c = np.exp(
+                                    (score_woc - score_woc.max()) / ifcfg3.softmax_tau
                                 )
+                                probs_woc = exp_c / exp_c.sum()
+                                d_content = float(probs[chosen] - probs_woc[chosen])
+                                self._resp_delta_content_sum += d_content
+                                # 逐个体 Δ（按 _id 键控；供付款闸读取）
+                                _iid = int(self._id[idx])
+                                self._delta_full_by_id[_iid] = d_full
+                                self._delta_content_by_id[_iid] = d_content
+                                self._delta_tick_by_id[_iid] = self._tick
                                 if int(np.argmax(score_wo)) != int(np.argmax(score)):
                                     self._resp_flip += 1
                     elif score.max() - score.min() < 1e-9:
@@ -994,6 +1520,8 @@ class SphereEngine:
                         targets[i] = nb[int(np.argmax(score))]
                 self._flat[mi] = targets
                 energy[mi] -= move_cost_ind[mi]
+                # R141 P0：cost_move 通道（只记 Python 路径；Rust 路径在 Rust 内扣费）
+                self._ec_add(EC_MOVE, mi, move_cost_ind[mi])
                 # 5.6) 信任学习
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
@@ -1007,6 +1535,13 @@ class SphereEngine:
                     # D-26a：①②③ 上游环节计数（纯观测，不改状态/随机流）
                     self._diag_had_sig += int(had_signal.sum())
                     self._diag_true_sig += int(true_sig.sum())
+                    # R121 §4.1 零机时 counter：true_sig 落点中 `food_ratio` 落在**阈值错位带**
+                    # `(food_threshold, FOOD_RICH_LEVEL]` 的计数（已被 has_food 过滤，此处只取上界）
+                    if true_sig.any():
+                        _fr_band = food_ratio[target_cells[true_sig]]
+                        self._diag_food_band_true_sig += int(np.count_nonzero(
+                            (_fr_band > ccfg.food_threshold) & (_fr_band <= FOOD_RICH_LEVEL)
+                        ))
                     # R102 条件 1（修正版）：守恒三账审计——**包住调用实测 Σenergy 变化**
                     # （独立核算，非把同一个数抄三遍；C-2 成立 ⇒ 应恒 0）
                     _e_before = float(energy.sum())
@@ -1045,11 +1580,19 @@ class SphereEngine:
         predation_mask = np.zeros(P, dtype=bool)
         pcfg = self.config.predation           # 隐式选择压参数化（A2）：捕食段参数
         attack_gene = genes[:, Gene.AGGRESSION]
-        hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
-        attack_prob = attack_gene * pcfg.attack_prob_coef * hunger
-        attackers = np.flatnonzero(
-            (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
-        )
+        if pcfg.enabled:
+            # PC-1 S2（R134）：`enabled=True`（默认）⇒ 原式逐位不动（RNG 消费 P 个 uniform）
+            hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
+            attack_prob = attack_gene * pcfg.attack_prob_coef * hunger
+            attackers = np.flatnonzero(
+                (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
+            )
+        else:
+            # S2 off（PC-1 单营养级构造）：**跳过攻击者选择**（连 RNG 抽取一起跳过 ⇒
+            # 新配置的 RNG 轨迹，与 enabled=True 的 run 不逐位可比——预期，非缺陷）。
+            # `predation_and_culture` 照常调用（文化学习/年龄推进共用该调用），
+            # 空 attackers ⇒ 捕食贡献恒 0（predation_mask 全 False）。
+            attackers = np.zeros(0, dtype=np.int64)
         # 文化学习需要的成熟年龄（年龄已在 stage2 推进，use_sim_core=True 时）
         age_f = self._age[:P].astype(np.float64)
         life_span = self._lifespan(genes[:, Gene.LIFE_GENE])
@@ -1106,18 +1649,31 @@ class SphereEngine:
             if len(attackers) > 0:
                 rand_prey = self.rng.integers(0, 1_000_000, size=len(attackers), dtype=np.int64)
                 rand_success = self.rng.random(len(attackers))
+                # R141 P0 + R138 §二：**真决斗三级拆分**（名义攻击者 / 有效出手 / 致死）
+                # 与**分通道记账**共用同一循环（零额外遍历）。
+                # 背景：`cannibalism_stats` 报的 5504 是**名义攻击者数**，其中含大量
+                # 根本没出手的 `continue`（能量不足 / 邻格无猎物 / 本 tick 已被吃）
+                # ⇒ 老工的 3.02% **低估**了真实出手成功率。这里把分母拆开。
+                _atk_i, _atk_amt = [], []
+                _pred_i, _pred_amt = [], []
                 for k, idx in enumerate(attackers):
                     if energy[idx] <= pcfg.attack_cost:
+                        self._duel["skip_no_energy"] += 1
                         continue
                     nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
                     nb_mask = np.isin(self._flat[:P], nb) & (np.arange(P) != idx)
                     prey_candidates = np.flatnonzero(nb_mask)
                     if len(prey_candidates) == 0:
+                        self._duel["skip_no_prey"] += 1
                         continue
                     prey = int(prey_candidates[int(rand_prey[k] % len(prey_candidates))])
                     if predation_mask[prey]:
+                        self._duel["skip_already_eaten"] += 1
                         continue
+                    self._duel["real_attempts"] += 1
                     energy[idx] -= pcfg.attack_cost
+                    _atk_i.append(idx)
+                    _atk_amt.append(float(pcfg.attack_cost))
                     success_rate = np.clip(
                         (energy[idx] / max(energy[idx] + energy[prey], 1e-9))
                         * (0.5 + attack_gene[idx] * pcfg.success_gene_gain),
@@ -1125,12 +1681,24 @@ class SphereEngine:
                     )
                     if rand_success[k] < success_rate:
                         predation_mask[prey] = True
-                        energy[idx] += energy[prey] * pcfg.transfer_ratio
+                        # R141：ΣE_prey（**击杀瞬间**的猎物能量）——解 `transfer*` 的关键输入
+                        self._ec_prey_e_sum += float(energy[prey])
+                        self._ec_prey_kill_n += 1
+                        _tr = float(energy[prey]) * pcfg.transfer_ratio
+                        energy[idx] += _tr
+                        _pred_i.append(idx)
+                        _pred_amt.append(_tr)
+                        self._duel["kills"] += 1
                         stomach[idx] = np.minimum(
                             stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
                             ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
                         )
                         stomach[prey] = 0.0
+                # R141 P0：捕食侧两条通道（出手成本 / 掠得能量）——循环外统一记账
+                if _atk_amt:
+                    self._ec_add(EC_ATTACK, _atk_i, _atk_amt)
+                if _pred_amt:
+                    self._ec_add(EC_PRED, _pred_i, _pred_amt)
             # ── Python 分步：年龄推进（Rust 路径已由 stage2 就地 +1）──
             self._age[:P] += 1
             age_f = self._age[:P].astype(np.float64)
@@ -1181,6 +1749,21 @@ class SphereEngine:
         deaths: Counter = Counter()
         n_starved = int(starved.sum())
         n_expired = int(expired.sum())
+        # ---- R135 第 -1 步④：**互捕结构量化**（F「去互捕」延后的前置；2026-09-20）----
+        # 只读 `predation_mask`（Python/Rust 两条路径的共同输出）+ `attackers`（Python 侧选出）
+        # ⇒ **双路径天然覆盖，无需改 Rust、无需重编**。
+        # 核心判据 = `Δ = mean(g16_attacker) − mean(g16_prey)`：
+        #   Δ > 0 ⇒ 「鹰吃鸽」有结构；Δ ≈ 0 ⇒ 随机互捕（不存在 g16 分层）。
+        # 同时留 5-bin 直方图（不只均值——双峰/分层信息在形状里，均值会抹平）。
+        if predation_mask.any():
+            _pm = np.flatnonzero(predation_mask)
+            self._cannib_prey_hist += np.bincount(
+                np.clip((attack_gene[_pm] * CANNIB_BINS).astype(np.int64), 0, CANNIB_BINS - 1),
+                minlength=CANNIB_BINS)[:CANNIB_BINS]
+        if attackers.size:
+            self._cannib_atk_hist += np.bincount(
+                np.clip((attack_gene[attackers] * CANNIB_BINS).astype(np.int64), 0, CANNIB_BINS - 1),
+                minlength=CANNIB_BINS)[:CANNIB_BINS]
         n_predation = int(predation_mask.sum())
         if n_starved:
             deaths[DeathCause.STARVATION] = n_starved
@@ -1203,6 +1786,18 @@ class SphereEngine:
             & (self._repro_cooldown[:P] <= 0.0)
             & (age_f >= maturity_age)   # 未到成熟年龄不生（长大后才能繁衍）
         )
+        # PC-1 S1 软顶（R134；冒烟后修订为**目标窗形式**，2026-09-20）：
+        #   p_soft = clamp((N* − N)/N*, 0, 1)，N* = soft_cap_target × max_count。
+        #   N*>0 ⇒ 出生率随 N 逼近 N* 线性归零 ⇒ N 稳态钉在 N* 附近（死亡≈出生的选择窗）。
+        #   🔴 首版线性 (1−N/K) 实测失败：无捕食世界死亡≈0 ⇒ N 顶满硬顶（12k 冒烟
+        #      N_eq=3240=K，稳态窗门不过）⇒ 补偿必须在 N* 处归零（修订已上板）。
+        # 仅 soft_cap_target>0 时消费额外 RNG（每 tick P 个 uniform）⇒ 变化限于新配置；
+        #   0（默认）⇒ 与旧版逐位一致。硬顶（下方的 K 截断）保留兜底。
+        _sct = float(self.config.population.soft_cap_target)
+        if _sct > 0.0:
+            _n_star = _sct * float(self.config.population.max_count)
+            p_soft = min(1.0, max(0.0, (_n_star - P) / max(_n_star, 1e-9)))
+            repro = repro & (self.rng.random(P) < p_soft)
         K = min(int(repro.sum()), self.config.population.max_count - P)
         born = 0
         if K > 0:
@@ -1229,8 +1824,8 @@ class SphereEngine:
                     0.0, pcfg.inheritance_noise, size=(K, 120)
                 )
                 interp_noise = self.rng.normal(0.0, 0.1, size=(K, 16))
-                # Rust 路径：D2 关闭时码本恒等映射（与旧版行为一致）
-                child_codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(K, axis=0).copy()
+                # Rust 路径：D2 关闭时码本恒等映射（按档位；"16" 下与旧版逐位一致）
+                child_codebook = codebook_init_rows(K, self._alpha)
                 child_genes = np.empty((K, gcfg.gene_count), dtype=np.float64)
                 child_energy = np.empty(K, dtype=np.float64)
                 child_stomach = np.empty(K, dtype=np.float64)
@@ -1293,11 +1888,15 @@ class SphereEngine:
                     cb_mut = self.rng.random((K, 16)) < ifcfg.codebook_mutation_rate
                     if cb_mut.any():
                         # 突变位映射到随机模式(1~15，0保留为无信号)
-                        cb_new = self.rng.integers(1, 16, size=(K, 16), dtype=np.uint8)
+                        # R113/R121：取值域随档位（"16"⇒1–15；"4"⇒1–4）；
+                        # 形状 `(K, 16)` 与抽取数**不变** ⇒ RNG 顺序不变（设计稿 §3.3）
+                        cb_new = self.rng.integers(
+                            1, self._alpha_code_max + 1, size=(K, 16), dtype=np.uint8
+                        )
                         child_codebook[cb_mut] = cb_new[cb_mut]
                 else:
-                    # D2 关闭：码本恒等映射（与旧版硬编码行为一致）
-                    child_codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(K, axis=0).copy()
+                    # D2 关闭：码本恒等映射（按档位；"16" 下与旧版逐位一致）
+                    child_codebook = codebook_init_rows(K, self._alpha)
 
             ids = np.arange(self._next_id, self._next_id + K, dtype=np.int64)
             self._next_id += K
@@ -1327,8 +1926,27 @@ class SphereEngine:
             self._baseline = np.concatenate([self._baseline, child_baseline])
             self._trust = np.concatenate([self._trust, child_trust])
             # 工作记忆：子代继承亲代的食物位置记忆（文化传递的一部分）
+            # R121 §4.2 零机时 counter：量化"生而知之"——继承记忆中"距出生格 > 感知半径"
+            # 的槽位占比（纯观测，不改状态/随机流）。距离口径 = **格距**（行差 + 经度环绕
+            # 列差，与邻居表 `_build_neighbor_cache` 同口径；**未做纬度余弦缩放** ⇒ 极区
+            # 高估距离，该读数应作**上界**理解）。
+            _mem_inh = self._work_memory[ri]
+            _br, _bc = self.world.flat_to_rc(self._flat[ri])
+            _mr, _mc = self.world.flat_to_rc(_mem_inh.ravel())
+            _K4 = int(_mem_inh.shape[1])
+            _valid_mem = _mem_inh.ravel() >= 0
+            _dr = (_mr - np.repeat(_br, _K4)).astype(np.float64)
+            _dc = (_mc - np.repeat(_bc, _K4)).astype(np.float64)
+            _cols_w = float(self.world.cols)
+            _dc = (_dc + _cols_w / 2.0) % _cols_w - _cols_w / 2.0
+            _dist = np.sqrt(_dr * _dr + _dc * _dc)
+            self._mem_inherit_n += int(_valid_mem.sum())
+            self._mem_inherit_far_n += int(np.count_nonzero(
+                _valid_mem
+                & (_dist > float(self.config.info_structure.perception_radius))
+            ))
             self._work_memory = np.concatenate(
-                [self._work_memory, self._work_memory[ri].copy()]
+                [self._work_memory, _mem_inh.copy()]
             )
             # 信号解读表：子代继承亲代 + 噪声（文化传递的核心载体，Rust 路径已算好）
             self._interpret = np.concatenate([self._interpret, child_interp])
@@ -1425,6 +2043,12 @@ class SphereEngine:
         self._rs_cohort = np.concatenate([self._rs_cohort, z(np.uint8)])
         self._emit_count = np.concatenate([self._emit_count, z(np.int32)])
         self._oracle_gain = np.concatenate([self._oracle_gain, z(np.float32)])
+        # R123/B②：门控臂逐个体 Δ（新个体两数组补零、tick 补 -1 ⇒ "本 tick 未参与决策"）
+        self._delta_full_by_id = np.concatenate([self._delta_full_by_id, z(np.float32)])
+        self._delta_content_by_id = np.concatenate(
+            [self._delta_content_by_id, z(np.float32)])
+        _nt = np.full(k, -1, dtype=np.int32)
+        self._delta_tick_by_id = np.concatenate([self._delta_tick_by_id, _nt])
 
     def _observe_selection_cohort(self) -> None:
         """D-17 ⑤：给"首次出现在某窗口的存活个体"记一行观测（预注册口径）。
@@ -1495,6 +2119,26 @@ class SphereEngine:
         self._diag_in_window += int((found & win).sum())
         self._diag_not_self += int((found & win & (s_ids != r_id)).sum())
         self._diag_budget_ok += int((found & win & (s_ids != r_id) & (budget > 0)).sum())
+        # ---- R123/B② 门控臂：只对"**选择确实被信号改变**"（Δ>0）的到达付款 ----
+        # 计数含义：`gate_pass` = 通过闸（可付款）；`gate_block` = 被拦 ⇒
+        #   **蹭归因占比 = block / arrivals**（"碰巧来/信标引路但内容无用"在全部到达中的份额）。
+        if self._gate_on:
+            _arr = found & win & (s_ids != r_id) & (budget > 0)
+            if _arr.any():
+                _rid = r_id[_arr]
+                _fresh = self._delta_tick_by_id[_rid] == self._tick
+                _df = np.where(_fresh, self._delta_full_by_id[_rid], 0.0)
+                _dc = np.where(_fresh, self._delta_content_by_id[_rid], 0.0)
+                self._gate_arrivals += int(_arr.sum())
+                self._gate_delta_full_sum += float(_df.sum())
+                self._gate_delta_content_sum += float(_dc.sum())
+                _sel_d = _dc if self._gate_delta == "content" else _df
+                _pass = _sel_d > 0.0
+                self._diag_gate_pass += int(_pass.sum())
+                self._diag_gate_block += int((~_pass).sum())
+                _g = np.zeros_like(ok)
+                _g[np.flatnonzero(_arr)] = _pass
+                ok = ok & _g
         if not ok.any():
             return
         led: dict = {}
@@ -1542,15 +2186,121 @@ class SphereEngine:
         exp_ = int(self._resp_exposed)
         a = (exp_ / dec) if dec else 0.0
         b = (self._resp_delta_sum / exp_) if exp_ else 0.0
+        b_content = (self._resp_delta_content_sum / exp_) if exp_ else 0.0
         return {
             "decisions": dec,
             "exposed": exp_,
             "resp_a_exposure": round(float(a), 6),
             "resp_b_delta": round(float(b), 6),
+            # R123/B②：**内容项单去**的 Δ（付款闸口径；`resp_b_delta` = 两项全去）
+            "resp_b_content_delta": round(float(b_content), 6),
             "resp_triple": round(float(a * b), 6),
             "argmax_flip_rate": round(
                 float(self._resp_flip / exp_) if exp_ else 0.0, 6
             ),
+        }
+
+    def inheritance_stats(self) -> dict:
+        """R121 §4.2：记忆继承卫生的**零机时观测**（"生而知之"量化）。
+
+        `mem_inherit_far_frac` = 出生时继承记忆中"距出生格 > 感知半径"的槽位占比。
+        距离口径 = **格距**（行差 + 经度环绕列差，与邻居表同口径），**未做纬度余弦缩放**
+        ⇒ 极区会高估 ⇒ 该值应读作**上界**。纯观测：不改状态、不消费随机流。
+        """
+        n = int(self._mem_inherit_n)
+        far = int(self._mem_inherit_far_n)
+        return {
+            "mem_inherit_n": n,
+            "mem_inherit_far_n": far,
+            "mem_inherit_far_frac": round(far / n, 6) if n else 0.0,
+            "distance_convention": "grid_ring(行差+经度环绕列差)，未做纬度余弦缩放（上界）",
+        }
+
+    # ------------------------------------------------ A′ 记忆**朝向梯度**（2026-09-19）
+    def _memory_orientation_cos(self, cur: int, nb: np.ndarray,
+                                valid_mem: np.ndarray) -> np.ndarray:
+        """A′：候选邻居格方向 vs **记忆点方向** 的 `max cos`（每格一个值）。
+
+        `cos ∈ [-1, 1]` ⇒ **背向邻居会被减分** —— 这才是"梯度"而非单纯吸引。
+        取 `max` 而非 `Σ`：只让**最对准的那个记忆点**说话（语义干净，槽位多不会放大）。
+
+        ⚠️ **双路径契约**：表达式与 Rust（`sim_core/src/movement.rs` 的 `orientation` 分支）
+        **逐字同式**，包括经度环绕（Rust `rem_euclid` ≡ Python `%`（正除数即 floor-mod））
+        ⇒ 保**逐位一致**；改任一侧必须同步改另一侧（F-R23 家族的正面预防）。
+        """
+        cols = int(self.world.cols)
+        half = cols / 2.0
+        cr, cc = divmod(int(cur), cols)
+        nr, nc = np.divmod(nb.astype(np.int64), cols)
+        dnr = nr.astype(np.float64) - float(cr)
+        dnc = ((nc.astype(np.float64) - float(cc)) + half) % cols - half
+        mr, mc = np.divmod(valid_mem.astype(np.int64), cols)
+        dmr = mr.astype(np.float64) - float(cr)
+        dmc = ((mc.astype(np.float64) - float(cc)) + half) % cols - half
+        un = np.sqrt(dnr * dnr + dnc * dnc)
+        mn = np.sqrt(dmr * dmr + dmc * dmc)
+        # 🔴 两处过滤，缺一即错（与 Rust 的 `mc < 0 { continue }` / `m == cur { continue }` 对应）：
+        #   ① `-1` 空槽**必须**过滤 —— `divmod(-1, cols)` 会得到 (-1, 119) 这种"合法"行列
+        #      ⇒ 不过滤就会把空槽当成真实记忆点（本测试正是这样抓出来的）
+        #   ② 记忆点 == 当前格 ⇒ 方向为零向量 ⇒ 跳过
+        ok = (valid_mem >= 0) & (mn > 0.0)
+        if not ok.any():
+            return np.zeros(len(nb), dtype=np.float64)
+        dmr, dmc, mn = dmr[ok], dmc[ok], mn[ok]
+        num = dnr[:, None] * dmr[None, :] + dnc[:, None] * dmc[None, :]
+        den = un[:, None] * mn[None, :]
+        return (num / den).max(axis=1)
+
+    def memory_gradient_stats(self) -> dict | None:
+        """A′ 的可观测性计数 —— **先证"测到了"，再判读结果**（E-022 缺口的直接对策）。
+
+        非 `orientation` 模式 ⇒ **None（未适用）**，**不是 0**（同 R120 的 ratio n/a 口径）。
+        """
+        ifcfg = self.config.info_structure
+        if str(ifcfg.memory_gradient) != "orientation":
+            return None
+        if not self._mem_grad_counts_valid:
+            # Rust（use_sim_core=True）侧只做决策、不产计数 ⇒ **报 n/a，不冒充 0**
+            return {
+                "mode": "orientation",
+                "gain": float(ifcfg.memory_gradient_gain),
+                "counters_available": False,
+                "note": "Rust 路径不产朝向梯度计数器（仅 Python 路径统计）⇒ 计数按 n/a 报",
+            }
+        d = int(self._mem_grad_dec)
+        slots = int(self._mem_grad_slots)
+        trig = int(self._mem_grad_trig)
+        return {
+            "mode": "orientation",
+            "gain": float(ifcfg.memory_gradient_gain),
+            "counters_available": True,
+            "decisions": d,
+            "with_slots": slots,
+            "triggered": trig,
+            "slots_frac": (round(slots / d, 6) if d else None),
+            "trigger_frac": (round(trig / d, 6) if d else None),
+        }
+
+    def alphabet_stats(self) -> dict:
+        """R113/R121 §3：字母表档位读数 + 码值域守卫（§3.5，纯观测）。
+
+        `bad_code_n` 在 `"4"`/`"8"` 档下**必须恒为 0**：非零即意味着
+        ① 码 0（"隐形发射" + **清除同格他人标记**，设计稿 §2.4）或
+        ② 码越上限（接收端读到**未学过的槽**）——两者都是**静默**的行为改变。
+        `"16"` 档下 0 是合法值 ⇒ `guard_expected_zero=False`（恒不累加）。
+        """
+        return {
+            "signal_alphabet": self._alpha,
+            "n_states": int(self._alpha_states),
+            "code_max": int(self._alpha_code_max),
+            "bad_code_n": int(self._alpha_bad_code_n),
+            "guard_expected_zero": bool(self._alpha != "16"),
+            # 2026-09-19：`mem_bit` 取值分布（闭合 E-022/E-023 记的可观测性缺口）
+            # 非 "8" 档 ⇒ frac = None（**未适用**，不是 0 —— 同 R120 的 ratio n/a 口径）
+            "mem_bit_on": int(self._mem_bit_on),
+            "mem_bit_n": int(self._mem_bit_n),
+            "mem_bit_frac": (round(self._mem_bit_on / self._mem_bit_n, 6)
+                             if self._mem_bit_n else None),
         }
 
     def oracle_stats(self) -> dict:
@@ -1576,6 +2326,37 @@ class SphereEngine:
             # 与 R100 条件 5（机器强制拒收依据 `is_calibration_arm`）。
             "gain_multiplier": float(self.config.oracle.gain_multiplier),
             "is_calibration_arm": bool(self.config.oracle.is_calibration_arm),
+            # R121 §4.1 零机时 counter：**阈值错位带** `(food_threshold, FOOD_RICH_LEVEL]`
+            # 在 `true_sig` 中的计数与占比 ⇒ **裁定点**：占比 >5% 再议是否对齐阈值
+            # （对齐属行为变更 ⇒ 须预注册，R121 明文）
+            "food_band_true_sig": {
+                "n": int(self._diag_food_band_true_sig),
+                "frac_of_true_sig": (
+                    round(self._diag_food_band_true_sig / self._diag_true_sig, 6)
+                    if self._diag_true_sig else 0.0
+                ),
+                "band": f"(food_threshold, {FOOD_RICH_LEVEL}]",
+            },
+            # R123/B② 门控臂读数（仪器段；gate off 时 mode="none" 且计数恒 0）
+            "gate": {
+                "mode": ("delta_positive" if self._gate_on else "none"),
+                "delta_metric": (self._gate_delta if self._gate_on else None),
+                "arrivals": int(self._gate_arrivals),
+                "pass": int(self._diag_gate_pass),
+                "block": int(self._diag_gate_block),
+                "block_frac": (
+                    round(self._diag_gate_block / self._gate_arrivals, 6)
+                    if self._gate_arrivals else 0.0
+                ),
+                "mean_delta_full_at_arrivals": (
+                    round(self._gate_delta_full_sum / self._gate_arrivals, 6)
+                    if self._gate_arrivals else 0.0
+                ),
+                "mean_delta_content_at_arrivals": (
+                    round(self._gate_delta_content_sum / self._gate_arrivals, 6)
+                    if self._gate_arrivals else 0.0
+                ),
+            },
         }
 
     def oracle_ledger(self) -> dict:
@@ -1678,6 +2459,9 @@ class SphereEngine:
             "attrib_found": self._diag_attrib_found,
             "in_window": self._diag_in_window,
             "not_self": self._diag_not_self,
+            # R123/B② 门控臂（gate off 时恒 0）：`gate_positive` = 闸门放行；`gate_block` = 被拦
+            "gate_positive": self._diag_gate_pass,
+            "gate_block": self._diag_gate_block,
             "budget_ok": self._diag_budget_ok,
             "applied": ap,
             "sel_to_applied": round(ap / self._diag_sel, 6) if self._diag_sel else 0.0,
@@ -1971,12 +2755,30 @@ class SphereEngine:
             data["rs_cohort"] = self._rs_cohort.copy()
             data["emit_count"] = self._emit_count.copy()
             data["oracle_gain"] = self._oracle_gain.copy()
+            # R123/B②：门控臂的逐个体 Δ 与计数（旧快照无此键 ⇒ 载入侧回退）
+            data["delta_full_by_id"] = self._delta_full_by_id.copy()
+            data["delta_content_by_id"] = self._delta_content_by_id.copy()
+            data["delta_tick_by_id"] = self._delta_tick_by_id.copy()
+            data["gate_counters"] = np.array(
+                [self._diag_gate_pass, self._diag_gate_block, self._gate_arrivals,
+                 self._gate_delta_full_sum, self._gate_delta_content_sum],
+                dtype=np.float64,
+            )
         # D-26a 四环节诊断计数（oracle off 时恒零，仍随快照走以保证续跑后累计不失真）
         data["diag_funnel"] = np.array(
             [
                 self._diag_had_sig, self._diag_true_sig, self._diag_sel,
                 self._diag_attrib_found, self._diag_in_window, self._diag_not_self,
                 self._diag_budget_ok, self._diag_applied,
+            ],
+            dtype=np.int64,
+        )
+        # R121 §3/§4 计数器（续跑后累计不失真；旧快照无此键 ⇒ 回退零值）
+        data["r121_counters"] = np.array(
+            [
+                self._diag_food_band_true_sig, self._mem_inherit_n,
+                self._mem_inherit_far_n, self._alpha_bad_code_n,
+                self._mem_bit_on, self._mem_bit_n,
             ],
             dtype=np.int64,
         )
@@ -2080,9 +2882,7 @@ class SphereEngine:
         if "codebook" in data:
             engine._codebook = data["codebook"].copy()
         else:
-            engine._codebook = np.arange(16, dtype=np.uint8)[np.newaxis, :].repeat(
-                len(engine._id), axis=0
-            ).copy()
+            engine._codebook = codebook_init_rows(len(engine._id), engine._alpha)
         if "learning_count" in data:
             engine._learning_count = data["learning_count"].copy()
         else:
@@ -2125,6 +2925,24 @@ class SphereEngine:
             (engine._diag_had_sig, engine._diag_true_sig, engine._diag_sel,
              engine._diag_attrib_found, engine._diag_in_window, engine._diag_not_self,
              engine._diag_budget_ok, engine._diag_applied) = (int(x) for x in _df)
+        if "r121_counters" in data:   # R121 §3/§4：旧快照回退零值（不报错，语义=未观测）
+            # 🔴 长度守卫（内评未闭合项 #7，2026-09-20 修）：
+            #   原写法是 **6 元元组解包** ⇒ 长度必须**严格相等**；旧快照（4 元）续跑到
+            #   新版会抛 ValueError 且**看不出是这个计数器**（只会看到 "not enough values"）。
+            #   改为：短 ⇒ 右侧补 0（语义 = 新增计数器未观测）；长 ⇒ 截断并**显式告警**
+            #   （多余的计数会被丢弃，这是信息丢失，不能静默）。
+            _rc = np.asarray(data["r121_counters"], dtype=np.int64).reshape(-1)
+            if _rc.size < 6:
+                _rc = np.concatenate([_rc, np.zeros(6 - _rc.size, dtype=np.int64)])
+            elif _rc.size > 6:
+                print(
+                    f"  [WARN] snapshot r121_counters has {_rc.size} entries but this "
+                    f"version reads 6 => the last {_rc.size - 6} counter(s) are dropped."
+                )
+                _rc = _rc[:6]
+            (engine._diag_food_band_true_sig, engine._mem_inherit_n,
+             engine._mem_inherit_far_n, engine._alpha_bad_code_n,
+             engine._mem_bit_on, engine._mem_bit_n) = (int(x) for x in _rc)
         if "rs_children" in data:
             engine._rs_children = data["rs_children"].copy()
             engine._rs_observed = data["rs_observed"].copy()
@@ -2135,6 +2953,26 @@ class SphereEngine:
             engine._rs_cohort = data["rs_cohort"].copy()
             engine._emit_count = data["emit_count"].copy()
             engine._oracle_gain = data["oracle_gain"].copy()
+            # R123/B②：门控臂状态（旧快照缺键 ⇒ 按零/未变处理，不静默错位）
+            for _k, _attr, _dt in (
+                ("delta_full_by_id", "_delta_full_by_id", np.float32),
+                ("delta_content_by_id", "_delta_content_by_id", np.float32),
+                ("delta_tick_by_id", "_delta_tick_by_id", np.int32),
+            ):
+                if _k in data:
+                    setattr(engine, _attr, data[_k].copy())
+                else:
+                    _arr = np.zeros(int(engine._next_id), dtype=_dt)
+                    if _dt is np.int32:
+                        _arr[:] = -1
+                    setattr(engine, _attr, _arr)
+            if "gate_counters" in data:
+                _gc = data["gate_counters"]
+                (engine._diag_gate_pass, engine._diag_gate_block, engine._gate_arrivals,
+                 engine._gate_delta_full_sum, engine._gate_delta_content_sum) = (
+                    int(_gc[0]), int(_gc[1]), int(_gc[2]), float(_gc[3]), float(_gc[4]))
+            engine._gate_on = bool(engine.config.oracle.gate_mode == "delta_positive")
+            engine._gate_delta = str(engine.config.oracle.gate_delta)
         else:
             # 旧快照（无探针数组）：_id 键控账本扩到 _next_id（全零 = 未观测/未发射）
             need = int(engine._next_id) - len(engine._rs_children)

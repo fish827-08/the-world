@@ -117,34 +117,12 @@ def sim_core_sha256() -> str | None:
 CODE_TREE_DIRS: tuple[str, ...] = ("simulation", "observatory", "world", "core", "experiments")
 
 
-def code_tree_sha256(
-    repo_root: str | os.PathLike | None = None,
-    dirs: tuple[str, ...] = CODE_TREE_DIRS,
-) -> str:
-    """对决定模拟语义的 `.py` 代码树做**确定性哈希**（与 git HEAD 解耦）。
+def _hash_py_files(root: Path, files: list[Path]) -> str:
+    """对给定 `.py` 文件集合做**确定性哈希**（按相对路径排序；`路径\0内容\0` 累加）。
 
-    为什么需要（D-24 实测暴露的仪器缺陷）
-    ------------------------------------
-    `git_commit` 记的是**浮动 HEAD**：批跑窗口横跨数小时，期间任何提交（哪怕只改
-    讨论板一行）都会推动 HEAD ⇒ 同一批 run 出现多个 commit 值，**形似"批内混版本"
-    实为噪音**（D-24 实测 15 run 出现 6 个 commit，逐条 diff 后代码逐字节相同）；
-    而 `sim_core_sha256` 在 Python 路径下恒为 `None` ⇒ **没有任何字段能证明
-    "两批用的是同一份代码"**。本函数补上这个缺失的**内容指纹**：
-
-    - 同内容 ⇒ 同哈希（**与提交历史、HEAD、时间戳无关**）；
-    - 任一受控 `.py` 改动 ⇒ 哈希变化（与 SHA-1 提交号不同，它不因无关提交漂移）。
-
-    口径：按相对路径排序遍历 `dirs` 下的 `.py`（跳过 `__pycache__`），
-    对每个文件写入 `相对路径\\0内容\\0` 后整体 SHA-256，取前 32 位十六进制。
+    单一实现：`code_tree_sha256`（合并全树）与 `code_subtree_sha256s`（逐子树）共用它，
+    避免两份算法漂移（本项目已付过"两处同病"的学费，见 F-R23）。
     """
-    root = Path(repo_root or ROOT)
-    files: list[Path] = []
-    for d in dirs:
-        base = root / d
-        if base.is_dir():
-            files.extend(
-                p for p in base.rglob("*.py") if "__pycache__" not in p.parts
-            )
     h = hashlib.sha256()
     for p in sorted(files, key=lambda q: q.relative_to(root).as_posix()):
         h.update(p.relative_to(root).as_posix().encode("utf-8"))
@@ -152,6 +130,60 @@ def code_tree_sha256(
         h.update(p.read_bytes())
         h.update(b"\0")
     return h.hexdigest()[:32]
+
+
+def _py_files_of(root: Path, d: str) -> list[Path]:
+    base = root / d
+    if not base.is_dir():
+        return []
+    return [q for q in base.rglob("*.py") if "__pycache__" not in q.parts]
+
+
+def code_subtree_sha256s(
+    repo_root: str | os.PathLike | None = None,
+    dirs: tuple[str, ...] = CODE_TREE_DIRS,
+) -> dict[str, str]:
+    """**逐子树**代码指纹（R122 移交余项 #6「manifest 引擎子树哈希」）。
+
+    为什么在 `code_tree_sha256` 之外还要它：
+    合并哈希只能回答"**代码变了吗**"，回答不了"**哪一层变了**"——
+    例如批跑期间若只有 `experiments/`（脚本层）变动、而 `simulation/observatory/world/core`
+    （**决定模拟语义**的层）逐字节未变，则判决应是"**引擎未变、非混版本**"。
+    逐子树哈希让这一判决**一眼可读**，无需再逐 commit 手 diff（D-24 做过一次，代价高）。
+
+    ⚠️ 口径：各子树**独立**哈希（**不**跨子树合并）⇒ 便于比较；目录缺失 ⇒ 空串。
+    """
+    root = Path(repo_root or ROOT)
+    out: dict[str, str] = {}
+    for d in dirs:
+        files = _py_files_of(root, d)
+        # 目录缺失 / 无 .py ⇒ **空串**（显式"缺席"；不用"空集的哈希"——那看起来像真实指纹）
+        out[d] = _hash_py_files(root, files) if files else ""
+    return out
+
+
+def changed_subtrees(prev: dict, cur: dict) -> list[str]:
+    """比较两次 `code_subtree_sha256s`（或两批 manifest 的 `code_subtrees`），列出**变化的子树**。
+
+    用法（批内自检）：`changed_subtrees(a["code_subtrees"], b["code_subtrees"])`
+    ⇒ 空列表 = 两批**同一份引擎代码**（可直接宣称"非混版本"）。
+    """
+    a = (prev or {}).get("code_subtrees", prev) if isinstance(prev, dict) else {}
+    b = (cur or {}).get("code_subtrees", cur) if isinstance(cur, dict) else {}
+    keys = sorted(set(a) | set(b))
+    return [k for k in keys if a.get(k) != b.get(k)]
+
+
+def code_tree_sha256(
+    repo_root: str | os.PathLike | None = None,
+    dirs: tuple[str, ...] = CODE_TREE_DIRS,
+) -> str:
+    """（原 docstring 见 git 历史；**语义未改动**）合并全树指纹 —— 复用 `_hash_py_files`。"""
+    root = Path(repo_root or ROOT)
+    files: list[Path] = []
+    for d in dirs:
+        files.extend(_py_files_of(root, d))
+    return _hash_py_files(root, files)
 
 
 def collect(config, repo_root: str | os.PathLike | None = None,
@@ -166,6 +198,8 @@ def collect(config, repo_root: str | os.PathLike | None = None,
         # D-19+：代码树内容指纹（与浮动 HEAD 解耦；Python 路径下 sim_core_sha256
         # 恒 None，此前**没有任何代码指纹字段**）
         "code_tree_sha256": code_tree_sha256(repo_root),
+        # R122 #6：逐子树指纹 ⇒ 可直接回答"哪一层代码变了"（合并哈希回答不了）
+        "code_subtrees": code_subtree_sha256s(repo_root),
         "config_fingerprint": config.fingerprint(),
     }
     if rng_draws is not None:

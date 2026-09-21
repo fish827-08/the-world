@@ -1,7 +1,7 @@
 # AGENTS.md — the-world 项目代理指南（工程口径）
 
 > 供 AI 代理/协作者快速了解**代码约束、构建命令和关键流程**。
-> 详细模块说明见 `MODULES.md`。
+> 详细模块说明以代码为准（旧版 `MODULES.md` 手册已归档至 `_archive/2026-09-17-瘦身/`；项目全景见 `HISTORY.md`）。
 >
 > ⚠️ **别与 `AGENT.md` 混**：本文件（**复数**）= 工程指南（"代码怎么写"）；
 > `AGENT.md`（**单数**）= 团队协作章程（"团队怎么合作"：交流规则、评审红线、分支与仓库纪律）。
@@ -47,20 +47,20 @@ cd .. && python3 -m pytest tests/ -q --ignore=tests/test_broker.py
 
 ## 加基因五步曲（C3 G1）
 
-新增基因位必须按顺序执行（详见 `MODULES.md` 模块五）：
+新增基因位必须按顺序执行（详见 `simulation/genes.py` 注册表与 `tests/test_genes_registry.py`；旧版 `MODULES.md` 模块五手册已归档）：
 
 1. Python `Gene` 枚举末尾追加 + `GENE_SEMANTICS` + `GENE_META` + `GENE_WIRED`
 2. Rust `sim_core/src/genes.rs` 追加同名常量
 3. `lib.rs` 的 `validate_gene_wiring` 中 `rust_all` 追加
 4. 引擎用 `Gene.NEW_TRAIT` 消费（Rust 侧用 `crate::genes::G_NEW_TRAIT`）
-5. 跑 `tests/test_genes_registry.py` + 全量测试 + 更新 PROGRESS.md
+5. 跑 `tests/test_genes_registry.py` + 全量测试
 
 **禁止**：改已有基因索引、在枚举中间插入、只改 Python 不改 Rust。
 
 ## 预留位接管规则（C3 G4）
 
 6 个预留位（g17/g18/g20/g21/g22/g23）优先复用，耗尽前不扩 gene_count。
-扩位时触发存档格式升级提示。详见 `MODULES.md` 模块五 G4。
+扩位时触发存档格式升级提示（细节见代码注释；旧版手册已归档）。
 
 ## D2 信息结构开发约定（2026-09-09）
 
@@ -85,7 +85,11 @@ D2 是语言涌现的核心重构，分支 `feat/info-structure`。四大机制�
 
 - 禁止在 D2 启用时调用 Rust 路径的 `step_movement`/`signal_emit`/`reproduce_batch`（会忽略码本/学习瓶颈）。
 - 禁止把码本当浮点数组做 EWMA（uint8 离散映射，用概率替换）。
-- 禁止修改 `perception_radius` 为非 4/6/8 的值（邻居索引逻辑只支持这三档）。
+- 🔴 禁止把 `perception_radius` 改成 4/8 以外的值（`config.py:316` 硬断言只许 `(4,8)`，**传 6 会 F1 硬失败**）。
+  ⚠️ 语义澄清（内评 09-19 更正，原文档写"4/6/8 三档"**已过期**）：**`perception_radius` 是"邻居个数"不是"距离"**
+  —— `4 = Von Neumann（上下左右 4 格）`、`8 = Moore（含对角 8 格）`；**两者感知范围都是 1 格**。
+  另：球面拓扑下"方形窗口"不良定义（极点处 `neighbors(0)` 返回 120 格）⇒ 若要扩大感知，
+  须改用**球面距离阈值**，不能直译 9×9（详见 `docs/设计文档/设计-多位编码v0-20260919.md`）。
 
 ## 条件表 C1–C5（项目纪律；R2 采纳，替代原"语言涌现五要素"）
 

@@ -354,7 +354,358 @@ PRESETS = {
                "gain-multiplier=1.3", "calibration-arm", "signal-mode=random"],
         template="_rerun_logs/cstep2rand/rand_m1.3_s{seed}.csv",
     ),
+    # α（R121 步骤 2 → 步 4）：**4 码纪元基线 + 同批 16/4 对照**（纪元纪律）
+    # ------------------------------------------------------------------
+    # 🔴 为什么 16 与 4 必须**同批**：内评 09-17 §三.3 —— 字母表是**纪元变更**，
+    #    跨批的 ratio/codebook_conv **不可直接比较** ⇒ 因果结论只能在同批内用可逆开关取。
+    # 🔴 为什么是 **8k 快批**而非 60k：内评 09-18 §三 建议 —— 先过"方向门槛"再上 60k 确认批。
+    #    本项目的最大时间黑洞一直是"用旗舰批做筛选"（R97→R100→R107→R120）。
+    #    成本：main 臂 ≈570 tick/min/run ⇒ 8k 约 **15 min**（12 run 并发）。
+    # ⚠️ `donation` 不得进 `fixed`（非 oracle 臂收到 oracle 专属参数 ⇒ a4 **硬失败**，
+    #    2026-09-16 C1a 首跑实测：18 run 只起了 12 个）——本预设 arm=main，故不写 donation。
+    "cstep3alpha": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap3"],
+        variants=[
+            dict(name="a16", args=["signal-alphabet=16"],
+                 template="_rerun_logs/cstep3alpha/a16_s{seed}.csv"),
+            dict(name="a4", args=["signal-alphabet=4"],
+                 template="_rerun_logs/cstep3alpha/a4_s{seed}.csv"),
+        ],
+    ),
+    # R123/B② 门控臂对照批（**待令启动**）：现状付款 vs 门控付款（Δ_content）同批、同 seed。
+    #   目的：直接测度"蹭归因占比"（= gate_block / arrivals），并给"只计真通信时是否仍有阳性"
+    #   留数据。⚠️ 门控臂是**仪器** ⇒ `--calibration-arm` 必带（R100 条件 5）。
+    "cstep3gate": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "ticks=12000", "max-count=3240",
+               "snapshot-every=2000", "snapshot-dir=_rerun_logs/cstep_snap3"],
+        variants=[
+            dict(name="ungated",
+                 args=["arm=oracle", "donation=1.0", "gain-multiplier=1.3",
+                       "calibration-arm", "gate-mode=none"],
+                 template="_rerun_logs/cstep3gate/ungated_s{seed}.csv"),
+            dict(name="gated",
+                 args=["arm=oracle", "donation=1.0", "gain-multiplier=1.3",
+                       "calibration-arm", "gate-mode=delta_positive",
+                       "gate-delta=content"],
+                 template="_rerun_logs/cstep3gate/gated_s{seed}.csv"),
+        ],
+    ),
+    # β（`"8"` 档 B③ 记忆位）：**信号里第一次携带接收者读不到的信息** ⇒ 是否出现方向性选择压？
+    # ------------------------------------------------------------------
+    # 🔴 科学问题（R125 / 内评）：`"8"` 档 `state = e_bin*2 + mem_bit`，其中 `mem_bit`
+    #    标记「发送者**当前格**在它自己的 `_work_memory` 里」—— 而记忆可含**半径 4 之外**的格位
+    #    ⇒ 这是**唯一**接收者无法直读、也不与直读冗余的信号内容（`n_bit`/`f_bit` 均为冗余）。
+    # 🔴 为什么与 `"4"` 同批：字母表是**纪元变更**（R113/R121：跨批 `ratio`/`codebook_conv` 不可比）
+    #    ⇒ 因果结论只能在**同批内**用可逆开关取；`"4"` = α 批后的**新纪元基线**。
+    # 🔴 为什么 **12k**（不是 α 的 8k）：α 批实测 **8k 区制不可分**（饱和度重叠），
+    #    ρ 判读需终态 N 可分层 ⇒ 12k（`N`: SAT≥2715 vs PRED≤1522，09-18 实测分离）。
+    # 🔴 为什么 **main 臂**（非 oracle）：本批问的是**科学臂**里记忆位有没有用；
+    #    oracle 通道与 `"8"` 档的因果问题正交，且 oracle 臂慢 2.4×（成本）。
+    # ⚠️ 臂名用 `b4`/`b8` + 独立快照目录 `cstep_snap8`：**防止与 α/gate 批的快照名冲突**
+    #    （`cstep_snap3` 已有 48 个快照：a16/a4/gated/ungated × 12；快照名 = `<臂名>_s<seed>`）。
+    # ⚠️ `donation` 不得进 `fixed`（非 oracle 臂收到 oracle 专属参数 ⇒ a4 硬失败；C1a 首跑实测）。
+    # 成本：α 批实测 12 run × 8k = 26.4 min（main 臂）⇒ 12k 外推 ≈ **40 min**（35–55 区间）。
+    "cstep3alpha8": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap8"],
+        variants=[
+            dict(name="b4", args=["signal-alphabet=4"],
+                 template="_rerun_logs/cstep3alpha8/b4_s{seed}.csv"),
+            dict(name="b8", args=["signal-alphabet=8"],
+                 template="_rerun_logs/cstep3alpha8/a8_s{seed}.csv"),
+        ],
+    ),
+    # γ（R127/C8）：**在"信息有价值"的世界里重测信号内容效应** —— patchy 侧（2×2 的另一格）
+    # ------------------------------------------------------------------
+    # 🔴 为什么必须跑这一批：`[实测]` 冒烟（2026-09-19 02:3x）证明
+    #    **uniform 世界下「纬度」100% 解释了容量（R²=1.000）** ⇒ 位置完全可预测 ⇒ **信息价值 = 0**
+    #    ⇒ C1a/C1b/C2/α/gate/α8 全部跑在"测信息价值 = 0"的世界里（R127 C8 首例事故）
+    #    而 **patchy 下纬度只解释 31.7%**（不可解释 68.3%）⇒ 经度方向有真信息 ⇒ 前提成立。
+    # 🔴 为什么是 2×2 的另一格：本批用 `distribution=patchy` × {`"4"`,`"8"`}，
+    #    与 **α8（uniform × {`"4"`,`"8"`}，12k，已完成）** 同 tick / 同 seed / 同臂
+    #    ⇒ 直接构成 `distribution × alphabet` 的 **2×2**，**α8 的数据不必重跑**（省一半机时）。
+    # ⚠️ 臂名 `p4`/`p8` + 独立快照目录 `cstep_snap9`：防与 a16/a4/gated/ungated/b4/a8 快照名冲突。
+    # ⚠️ 已过前提冒烟（R127 §12.2.1）：C4 读回 ✓ / C8 前提 ✓ / 200 tick 生态存活 ✓（N=82）。
+    # 成本：α8 实测 12 run × 12k = 35.6 min；patchy 生态可能更脆（早崩更快）⇒ 估 **30–45 min**。
+    "cstep3patchy": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap9",
+               "distribution=patchy"],
+        variants=[
+            dict(name="p4", args=["signal-alphabet=4"],
+                 template="_rerun_logs/cstep3patchy/p4_s{seed}.csv"),
+            dict(name="p8", args=["signal-alphabet=8"],
+                 template="_rerun_logs/cstep3patchy/p8_s{seed}.csv"),
+        ],
+    ),
+    # R128（2026-09-19）：`mem_bit` 语义修正版验证批 —— **"非冗余通道首次上桌"**
+    #   臂：仅需 `p8f`（修正版 "8" 档）× 6 seed × 12k；**对照复用 E-023 的 `p4`**
+    #   （前提已由 C7 逐位对拍证明"修正只影响 8 档、4 档逐位不变"）
+    #   口径预注册见板上 R128 §三（诚实预告：修正只消冗余、不创造位置信息 ⇒ 主指标仍可能 null）
+    "cstep3membit8": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap10",
+               "distribution=patchy"],
+        variants=[
+            dict(name="p8f", args=["signal-alphabet=8"],
+                 template="_rerun_logs/cstep3membit8/p8f_s{seed}.csv"),
+        ],
+    ),
+    # A′（2026-09-19，`设计-A档记忆朝向梯度-20260919.md` §七）：记忆**朝向梯度**正式批
+    #   问题：个体**自己**记住的富食格位置会不会改变它往哪走？（零新通道、改决策语义）
+    #   臂：`mg`（orientation，朝向梯度 on）vs `mn`（none，**原式**）⇒ **同批同 seed**
+    #   🔴 对照**不可复用** E-023/E-024 的 `p4`（那是旧语义的批次）
+    #   档位固定 `"4"`（最小，避免字母表变量混入）；世界 patchy（C8 lat_r2=0.317 ✓）
+    #   预计 12 run × 12k ≈ **32–36 min**（参照 E-023 实测 36.0 min）
+    "cstep3memgrad": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap11",
+               "distribution=patchy", "signal-alphabet=4"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad/mn_s{seed}.csv"),
+        ],
+    ),
+    # R132（2026-09-19 所有者批准）：**A′ 复测批（确证性）** —— 把 E-025 的探索性成簇信号
+    #   （pred_frac 0/6 正 + 区制 4/6 单向翻转）转成可判读结论。
+    #   🔴 预注册（所有者 18:45 复核 ①–④，跑前锁定）：
+    #     主读数 = `pred_frac` 同向性（n=20 双侧符号检验，**判显著 ≥15/20**（p=0.0414）；
+    #       功效前提 = 真实同向率 ≥0.80（0.80⇒0.804）；"20/20 p≈1.9e-6" 是事实**不是判据**）
+    #     落点三档：**≥15/20 = 复现**｜**13–14/20 = 未复现**｜**≤12/20 = 方向反**
+    #     副读数 = 区制方向比（二项 vs 0.5，**≥80% 单向**才算；**n_flips < 6 ⇒ undecidable**）
+    #     其余指标（N/ρ/codebook_conv/resp_* 等）**只报不判**（确证性批的多重比较纪律）
+    #   🔴 seed 用 **48–67（全 fresh）**：R132 原建议 42–61，但 42–47 已在 E-025 跑过
+    #      （引擎确定性 ⇒ 重跑 = 逐位重复），且把它们计入"≥15/20"会**重复使用**
+    #      产生假设的那 6 个数据点（正是所有者 ② 说的"被选中的极端值"问题）⇒ 偏离已上板说明
+    #   配置：δ（E-026）无健康窗 ⇒ 按 R132 §二 跑**原配置 max_count=3240**（所有者 18:45 §四.3 ✓）
+    # 🔴 **4 码闭合候选批**（内评 21:5x 帖方案 (a)；原 `cstep3memgrad20` 预检版，因同名相撞
+    #    改名避让——E-027 实跑的是上面的 16 码版）。内评判定"4 码问题未闭合"：
+    #    字母表改变基线区制（s46/s47 在 4 码崩、16 码活）⇒ 16 码复测**不能**证伪 4 码假设。
+    #    seed 48–67（**全 fresh**，不与产生假设的 42–47 重叠——内评复测纪律 ②）。
+    #    ⏳ 是否跑 = 内评给的 (a)/(b) 二选一（(b) = 定向检验"无条件崩塌 seed 救助"），
+    #    由所有者/fish 裁；本 preset 备好待命。
+    "cstep3memgrad20a4": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap12",
+               "distribution=patchy", "signal-alphabet=4"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad20a4/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad20a4/mn_s{seed}.csv"),
+        ],
+    ),
+    # R132 ⑤（所有者 18:45 建议，可选 +1h）：**uniform 判别臂** —— 排掉最大解释风险
+    #   （"pred_frac 差异来自移动统计被改，而非记忆有用"）。
+    #   机制预测：uniform 世界容量由纬度决定（lat_r2≈1.0）⇒ 位置可预测 ⇒ 记忆**不增值**
+    #   ⇒ 预注册读法：uniform 下 `pred_frac` Δ 应**无成簇同向**（若 patchy 的 6/6 式下降
+    #     在 uniform 复现 ⇒ "记忆有用"解释死，效应归"移动统计"）。
+    #   ⚠️ n=10 对 ⇒ 判别力有限，只作方向性判别（不作显著性确证）
+    "cstep3memgrad20u": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=48,49,50,51,52,53,54,55,56,57"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap13",
+               "distribution=uniform", "signal-alphabet=4"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad20u/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad20u/mn_s{seed}.csv"),
+        ],
+    ),
+    # R134（2026-09-20 所有者批准立项）：**PC-1 极简正对照生态** —— 仪器校准，非科学实验
+    #   设计稿：`docs/设计文档/设计-PC1极简正对照-实现侧-20260919.md`（实现侧=老工；
+    #   文献侧=[外鉴] 题1 `0bb4a7d`）。定位/红线（照稿）：
+    #   阳性只可写「**该构造下仪器链可检出**」；禁写「涌现/语言/记忆有用」。
+    #   构造：S2 关捕食（单营养级）+ S1 软顶（**目标窗式** `p=clamp((N*−N)/N*,0,1)`，冒烟后修订；
+    #         线性 (1−N/K) 实测把 N 推到硬顶 ⇒ 窗门不过）+ patchy +
+    #         `reputation_weight=1.0`（**接收侧存在性项放大**，见下方更正）+ 字母表 "16"（R134 §二）
+    #   🔴 判据更正（R135 §二.5，2026-09-20；内评 §二 #1）：
+    #      ① **主判据 = `Δ_content` + `conv×H(发射码分布)`**——**禁止**用 `Δ_full` 或裸 `codebook_conv`
+    #         （rep_w=1.0 使存在性项最大 = 1.5，是食物项 3 倍；裸 conv 有 U1 假阳性盲区）
+    #      ② `rep_w=1.0` 的语义改称「**接收侧存在性项放大**」，**不是 C3** ⇒ **C3 行标「❌ 未接线」**
+    #      ③ C3 的代理实现 = **oracle 校准臂**（外鉴 §〇 认错 + 内评选项 (b)）
+    #      ④ 任何「信号有价值 / C3 已接线」的表述仍**禁止**（R134 措辞红线）
+    #   三臂：主臂（全开）/ 零模型臂（码本+瓶颈关）/ 禁用臂（信号常关）
+    #   ⏳ 待裁（未自作主张加）：是否再加 `rep_w=0/1.0` 的 6 run 配对臂作**操作检查**
+    #      （裁定 §二.5 要求；加上后 18 → 24 run）——需 fish 令
+    #   预注册判据（设计稿 §四 + 上述更正）：主阳性 = `Δ_content` 配对超额 CI 不含 0 或
+    #         `conv×H` 显著；⑥b_content 同向 ≥5/6 且超可检出阈；
+    #         阴性结案 = 三臂不可区分 ⇒ 构念层复审；其余指标只报不判
+    #   冒烟门（R127 + 稳态窗）：1 run × 12k 主臂，N_eq（末 2k 均值）∈ [0.2K, 0.95K] = [648, 3078]
+    # R141/R142 能量校准预实验（`[所有者]` 派工单 §一/§二；工具 `tools/calib_solve.py` 按 §1.3 列名消费）。
+    #   目的：测**净收入结构**（三腿：g16 三分箱 lo/mid/hi），为 C 档参数**解析标定**提供输入——
+    #   不做网格试错（内评 §2.4：×45 全因子不可归因，降级为备选）。
+    #   两臂**并用**（R141 §二）：
+    #     `calA` = 案 A：自然 g16 分布（零新开关）
+    #     `calB` = 案 B：`init_g16_clusters="0.05,0.5,0.9"`（**仪器性质**，非自然分布 ⇒ 不进科学判读）
+    #   🔴 预注册判据（内评 01:16 §2.1–2.3 复核版）：
+    #     主 = `|净收入(hi) − 净收入(lo)| / 净收入(lo) ≤ 20%`（**窗口 4k–8k，逐 tick 统计量取中位**）
+    #     ⚠️ 20% 是否可检 ⇒ **本批兼作功效预跑**（用 seed 间离散算可检出阈，跑完必报）
+    #     ⚠️ **通道外溢检查**（内评 §2.1）：同类相食的收益含"竞争削减"（吃掉同类 ⇒ 幸存者食草收入升）
+    #        ⇒ 这笔账记在**食草腿** ⇒ 通道记账会**低估**捕食策略总适应度 ⇒ 须同时报两腿并声明
+    #     副① = 净收入(mid) < min(lo, hi)
+    #     副② = **稳健风险量**（IQR / 5–95 分位差）而非裸方差（内评 §2.2：方差被少数击杀支配）
+    #     ⚠️ 跨腿比较必须**同 run 内配对**（逐 seed 一个 Δ），禁跨腿独立 t
+    #   ⚠️ 本批 = **仪器性质**（判读归 `[所有者]/[内评]`）；跑起来后本线不得再改代码（F-R9）
+    "calib1": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=0",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="calA", args=[],
+                 template="_rerun_logs/calib1/calA_s{seed}.csv"),
+            dict(name="calB", args=["init-g16-clusters=0.05,0.5,0.9"],
+                 template="_rerun_logs/calib1/calB_s{seed}.csv"),
+        ],
+    ),
+    # R135 第 3 步 **A-连续**（2026-09-20；fish 21:56 已下跑批令）：营养级专化的**凸 trade-off**。
+    #   文献锚：Geritz et al. 1998 *Evol. Ecol.* 12:35（**凸权衡 + 频率依赖 ⇒ 进化分支**）。
+    #   被测机制**只有一项**：取食倍率 `forage_mult(g16) = (1 − g16) ** k`（R135 §二.1「只动曲率」）。
+    #      k=0 ⇒ 恒 1（**与旧版逐位一致**，C7 digest 钉死：`tests/test_a_continuous.py`）
+    #      k=2 ⇒ 凸/加速下降（云端 §三陡峭表最接近 k≈1.74；取 2.0 以保证凸度足够）
+    #      对照（g16 → 倍率）：表 1.00/0.80/0.30/0.05/0.00 ↔ k=2 的 1.00/0.64/0.25/0.04/0.00
+    #   ⚠️ 只动**取食侧**；捕猎成功率侧（`energy_ratio ×(0.5+g16×0.5)`）在 Rust ⇒ 不动、不重编。
+    # 🔴 相对"现构造基线"的一处**故意偏离**：两臂**同加** `soft-cap-target=0.6`。
+    #    理由：无软顶时该构造 N≈19–78（崩溃态）⇒ g16 样本量**远低于**双峰判据的下限
+    #    （内评 §一.4i 要求样本量下限 + 功效）。软顶两臂同加 ⇒ **曲率仍是唯一变量**。
+    # 🔴 判据（预注册，R135 §二.8）：主 = **BC 系数 + 同方差 shuffle 置换零分布**；
+    #    副 = 均值稳定性 + 时序振荡。**样本量下限**：末 tick N ≥ 200（否则该 seed 判为不可判）。
+    #    ⚠️ 冒烟已示警：BC **单用会误判**——k=0 臂 skew=+2.56 把 BC 抬到 0.896（>0.555），
+    #    那是**右偏拖尾**不是真双峰 ⇒ **置换零分布是必需项，不是可选项**。
+    # 🔴 批角色 = **机制探索**（非科学集）⇒ 不得被科学侧 judge 计入（内评 21:45 结论 10）。
+    #    判读红线：即使出现双峰，也只能写"g16 分布分化"，**禁止**写"涌现/专化/语言"。
+    "cstep3acont": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=0",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6"],
+        variants=[
+            dict(name="ak2", args=["forage-tradeoff-k=2.0"],
+                 template="_rerun_logs/cstep3acont/ak2_s{seed}.csv"),
+            dict(name="ak0", args=["forage-tradeoff-k=0.0"],
+                 template="_rerun_logs/cstep3acont/ak0_s{seed}.csv"),
+        ],
+    ),
+    "pc1": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap_pc1",
+               "distribution=patchy", "signal-alphabet=16",
+               "predation-enabled=false", "soft-cap-target=0.6",
+               "reputation-weight=1.0"],
+        variants=[
+            dict(name="pcmain", args=["codebook=1", "learning-bottleneck=true"],
+                 template="_rerun_logs/pc1/pcmain_s{seed}.csv"),
+            dict(name="pczero", args=["codebook=0", "learning-bottleneck=false"],
+                 template="_rerun_logs/pc1/pczero_s{seed}.csv"),
+            dict(name="pcsigoff", args=["signal-disabled=true"],
+                 template="_rerun_logs/pc1/pcsigoff_s{seed}.csv"),
+        ],
+    ),
+    # δ（R129 批准）：**区制图** —— 测绘「SAT:PRED 比例」随 max_count 的曲线（找可观测选择窗）
+    # ------------------------------------------------------------------
+    # 🔴 一维杠杆选 max_count：SAT 判据（N >= 0.9*max_count）由它**定义** ⇒ 唯一确定的杠杆
+    # 🔴 5 点（1200/1800/2400/4200/5400）+ **复用 E-023 p4 作 3240 点**（30 run 而非 36，R129 §二）
+    # 🔴 variants 的 max-count 在 fixed 之后 ⇒ argparse 后者覆盖（dry-run 已逐 run 核）
+    # ⚠️ 预注册（设计稿 §四，跑前锁定）：SAT = N>=0.9*max_count；主读数 = 每点 SAT 比例 k/6；
+    #    判定 = **极值两点**（1200 vs 5400）Fisher 精确 p<0.05 ⇒ 杠杆；全点 ∈[1/6,5/6] ⇒ 非杠杆；
+    #    ⚠️ Fisher 6v6 最小可分辨 = **5:1 vs 1:5**（4:2 vs 2:4 检不出）⇒ "非杠杆"≠设计失败，是功效天花板
+    # ⚠️ 快照独立目录 cstep_snap_delta（防与历史批同名静默续跑）
+    "cstep3delta": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap_delta",
+               "distribution=patchy"],
+        variants=[
+            dict(name="d1200", args=["max-count=1200"],
+                 template="_rerun_logs/cstep3delta/d1200_s{seed}.csv"),
+            dict(name="d1800", args=["max-count=1800"],
+                 template="_rerun_logs/cstep3delta/d1800_s{seed}.csv"),
+            dict(name="d2400", args=["max-count=2400"],
+                 template="_rerun_logs/cstep3delta/d2400_s{seed}.csv"),
+            dict(name="d4200", args=["max-count=4200"],
+                 template="_rerun_logs/cstep3delta/d4200_s{seed}.csv"),
+            dict(name="d5400", args=["max-count=5400"],
+                 template="_rerun_logs/cstep3delta/d5400_s{seed}.csv"),
+        ],
+    ),
+    # A′ 复测批（R132 fish 批准）：**20 seed 双臂**验证 E-025 的成簇信号（pred 6/6 同向 + 区制单向翻转）
+    # ------------------------------------------------------------------
+    # 🔴 δ（E-026）结论：max_count **非杠杆**（6 点全部 4:2 或同构；崩塌 seed 与承载力无关，
+    #    s42/s44 在所有点崩塌到完全相同的 N=489/194）⇒ **无健康窗** ⇒ 按 R132 预注册规则：
+    #    复测批走**原配置 max_count=3240**，主读数 = pred_frac 同向性与区制翻转方向（rho 如实报、不可判）
+    # 🔴 20 seed 连续（42–61）：n=20 双侧符号检验全同向 p≈1.9e-6，可判读；功效口径收尾时算
+    # ⚠️ 独立快照目录 cstep_snap_mg20；判读预注册：pred_frac 同向性（双侧符号检验）+ 区制翻转方向
+    #    （单向比 = 翻转中朝 SAT 的比例，二项检验 vs 0.5）
+    # 🔴 **E-027 实跑版**（保留供复现）：16 码（未显式传 signal-alphabet ⇒ 默认 16）、
+    #    s42–61、快照 `cstep_snap_mg20`。⚠️ 与 19:05 预检广告的 4码/48-67 版**同名相撞**、
+    #    文件序靠后者生效 ⇒ E-027 实跑 16 码（内评发现；4 码问题未闭合，闭合候选见
+    #    `cstep3memgrad20a4`）。**本条不得改名/删除**——它就是 E-027 的配置凭证。
+    "cstep3memgrad20": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/cstep_snap_mg20",
+               "distribution=patchy"],
+        variants=[
+            dict(name="mg", args=["memory-gradient=orientation"],
+                 template="_rerun_logs/cstep3memgrad20/mg_s{seed}.csv"),
+            dict(name="mn", args=["memory-gradient=none"],
+                 template="_rerun_logs/cstep3memgrad20/mn_s{seed}.csv"),
+        ],
+    ),
 }
+
+# ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
+# 事故：两个会话先后登记了同名 `cstep3memgrad20`（内容不同：4码/48-67 vs 16码/42-61），
+# 启动时生效的是**文件序靠后**的那个 ⇒ 实跑配置（16码）≠ 预检广告的配置（4码）⇒ E-027 跑错配置。
+# dict 字面量的重复键在**编译期**合并、运行时无从查起 ⇒ 只能扫本文件源码兜底（fail-closed）。
+import re as _re_dup
+
+_src = Path(__file__).read_text(encoding="utf-8")
+_blk = _src[_src.index("PRESETS = {"):_src.index("\n}", _src.index("PRESETS = {"))]
+_preset_names = _re_dup.findall(r'^    "([a-z0-9_]+)": dict\(', _blk, _re_dup.M)
+_dupes = sorted({n for n in _preset_names if _preset_names.count(n) > 1})
+if _dupes:
+    raise RuntimeError(
+        f"PRESETS 存在同名定义（后者静默覆盖前者，F-R32）：{_dupes} —— "
+        "请先删除重复条目再运行（每个 preset 名全局唯一）")
 
 
 # ---------------------------------------------------------------- 单实例锁
@@ -494,6 +845,18 @@ def run_batch(runs: list[Run], conc: int, retries: int, python: str, workdir: Pa
     running: list[Run] = []
     t_start = time.time()
     guard_hits = 0
+
+    # ---- 🔴 F-R32 配套：**启动即落盘"解析后的完整命令行"**（resolved runlist）----
+    # 让"这次跑的到底是什么"在 launch 时刻就有据可查（summary 的 switches 属事后对账；
+    # E-027 的 16 码事故若有此文件，launch 后 1 分钟就能发现配置与预注册不符）。
+    if runs:
+        _rl = Path(runs[0].log).parent / "_resolved_runlist.txt"
+        with open(_rl, "w", encoding="utf-8") as _f:
+            _f.write(f"# resolved runlist —— {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            _f.write(f"# 共 {len(runs)} run；python = {python}\n")
+            for r in runs:
+                _f.write(f"{r.name}\t{r.status}\t{python} {' '.join(r.cmd)}\n")
+        print(f"  📋 resolved runlist → {_rl}")
 
     while pending or running:
         # 内存守卫：不足则不再拉起新 run（只排队，绝不杀已有进程）

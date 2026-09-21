@@ -343,6 +343,39 @@ def run_matrix(arms: list[str], seeds: list[int], ticks: int, max_count: int,
                   f"{time.time() - t0:.0f}s")
 
 
+def c8_report(preset: str) -> tuple[bool, list[str]]:
+    """**R127 C8**：前提对账 —— 「脚本意图 = 科学问题所需的前提吗」。
+
+    读 `experiments/prerequisites.json`（preset → prerequisites），按 `kind` 逐条验：
+      · `preset_arg_equals`   —— 该 preset 参数确实取到所需值（可带 `default` 兜底历史批）
+      · `capacity_lat_r2_max` —— 复算容量图「纬度 R²」（越低 ⇒ 位置越不可预测 ⇒ 信息越有价值）
+    返回 `(是否通过, 报告行)`；`retrospective` preset 的未过项**不计入**判定（历史证据）。
+    """
+    from experiments import batch_runner as br
+    from experiments.c8_prereq_check import eval_item, load_prerequisites, preset_args
+
+    decl = load_prerequisites()
+    if preset not in decl:
+        return False, [f"  ❌ {preset} 未在 prerequisites.json 中声明前提"
+                       f"（R127 要求每批声明，机器可读）"]
+    d = decl[preset]
+    retro = bool(d.get("retrospective"))
+    argv = preset_args([br.PRESETS[preset]]) if preset in br.PRESETS else {}
+    lines = [f"  科学问题：{d.get('science_question', '（未写）')}"]
+    ok = True
+    for item in d.get("items", []):
+        dist = (item.get("distribution") or argv.get("distribution")
+                or item.get("default") or "uniform")
+        r = eval_item(item, argv, dist)
+        mark = "✅" if r["ok"] else ("❌" if r["ok"] is False else "⚠️")
+        lines.append(f"  {mark} [{r['id']}] got={r['got']}  want={r['want']} {r['note']}")
+        if r["ok"] is False and not retro:
+            ok = False
+    if retro:
+        lines.append("  ℹ️ 该 preset 为**事后登记** ⇒ 未过项作为历史证据，不计入 Pre-Flight 判定")
+    return ok, lines
+
+
 def main() -> int:
     # ⚠️ 2026-09-15 实跑发现：Windows 默认 GBK 控制台下 print("✅"/"❌") 会抛
     #    UnicodeEncodeError ⇒ **检查工具自己崩掉**，扫描行（含 C5 结论）一条都打不出来
@@ -369,6 +402,10 @@ def main() -> int:
     ap.add_argument("--python", default=None)
     ap.add_argument("--readback-only", action="store_true",
                     help="不跑模拟，只对既有 summary 做开关读回核对（如对 D-24 批次）")
+    ap.add_argument("--c8", metavar="PRESET", default=None,
+                    help="R127 **C8 前提对账**：读 `experiments/prerequisites.json` 里该 preset 的 "
+                         "`prerequisites` 并逐条验（如「容量不可由纬度预测」）；**不过 ⇒ Pre-Flight "
+                         "不通过**（与 C1–C7 同级）。事后登记（retrospective）preset 的未过项不计入判定")
     args = ap.parse_args()
 
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
@@ -503,6 +540,16 @@ def main() -> int:
                 print(f"  ✅ 臂漂移守卫：runner 声明 {sorted(declared)} 与预期表一致")
 
     # ---- 结论 ----
+    # ---- C8（R127）：前提对账 —— 「脚本意图 = 科学问题所需的前提吗」 ----
+    if args.c8:
+        c8_ok, c8_lines = c8_report(args.c8)
+        print(f"\n⑧ C8 前提对账（R127，preset=`{args.c8}`）：")
+        for ln in c8_lines:
+            print(ln)
+        if not c8_ok:
+            failures.append(f"C8 preset={args.c8}：存在未过前提 ⇒ 按 R127 **不得开跑**"
+                            "（补前提 / 改设计后再走 Pre-Flight）")
+
     ok_all = not failures
     print("\n" + "=" * 70)
     print("✅ Pre-Flight 全部通过 ⇒ 可启动实验" if ok_all

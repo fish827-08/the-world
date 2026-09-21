@@ -1,0 +1,244 @@
+{
+  "_doc": "C8 前提对账声明（R127，2026-09-19）。键 = preset 名。items[].kind ∈ {preset_arg_equals, capacity_lat_r2_max, summary_switches_equals}。retrospective=true ⇒ 事后登记（用于验证『C8 本可拦住历史批次』），其 FAIL 不影响退出码但在报告中标红。",
+  "cstep3patchy": {
+    "science_question": "patchy 世界（食物成斑块）下，信号内容（含 \"8\" 档 mem_bit）是否有方向性效应 —— 即『信息是否有价值』这一前提本身是否成立",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "本批问的正是 patchy 世界；若实际跑 uniform ⇒ 信息价值≈0 ⇒ 前提不成立（= C1a/C1b/C2/α/gate/α8 的原事故）"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "容量若几乎全由纬度解释 ⇒ 食物位置可预测 ⇒『知道』不比『看到』多 ⇒ 信息价值≈0 ⇒ 一切『信息价值』类判读前提不成立"
+      }
+    ]
+  },
+  "cstep3alpha8": {
+    "science_question": "uniform 世界下 \"8\" 档（记忆位）是否有方向性效应",
+    "retrospective": true,
+    "items": [
+      {
+        "id": "dist_is_uniform",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "uniform",
+        "default": "uniform",
+        "why": "该批实际口径（当时 distribution 在 a4 里硬编码为 uniform，无 CLI）—— 用于固定历史事实"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "distribution": "uniform",
+        "why": "**事后登记**：该批跑在 uniform（lat_r2 = 1.000）⇒ 本项 FAIL ⇒ 这就是『为何所有信息价值类读数都是 null』的前提性原因（C8 本可拦住）"
+      }
+    ]
+  },
+  "cstep3gate": {
+    "science_question": "付款闸（Δ_content）能否把『蹭归因』从阳性里剥离（仪器构念问题，非信息价值）",
+    "items": [
+      {
+        "id": "gate_is_on_for_gated_arm",
+        "kind": "preset_arg_equals",
+        "key": "gate-mode",
+        "value": "delta_positive",
+        "why": "门控臂必须真开门；否则该臂 = 对照臂（构念未改动）"
+      }
+    ]
+  },
+  "cstep3membit8": {
+    "science_question": "**`mem_bit` 语义修正版**（记忆含**非当前格** ⇒ 接收者不可直读）在 patchy 世界是否有方向性效应 —— 即『非冗余的 1 bit 是否可行动』（R128：修正只消冗余、不创造位置信息）",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "本批问的是『信息有价值』的世界；若实际跑 uniform ⇒ 前提不成立（= C1a/C1b/C2/α/gate/α8 的原事故）"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "容量若几乎全由纬度解释 ⇒ 食物位置可预测 ⇒『知道』不比『看到』多 ⇒ 信息价值≈0 ⇒ 判读前提不成立"
+      }
+    ]
+  },
+  "cstep3memgrad": {
+    "science_question": "A′：个体**自己**记住的富食格位置是否改变它的移动方向（朝向梯度 vs 原式）—— 这是『把位置传给别人』之前必须先立的前提",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "本批问的是『记住的位置有没有用』；uniform 世界里食物位置可由纬度预测 ⇒ 记忆/信息本就不值钱 ⇒ null 不可解读"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "容量若几乎全由纬度解释 ⇒ 富食格长期固定且可预测 ⇒ 记忆不提供额外信息 ⇒ 前提不成立"
+      }
+    ]
+  },
+  "cstep3memgrad20": {
+    "science_question": "R132 4码闭合候选（内评方案a）：E-025 的信号在 **4 码 + fresh seeds 48-67** 上是否复现（16 码复测不能证伪 4 码假设——字母表改变基线区制）",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "复测对象是 patchy 世界里的信号；若实际跑 uniform ⇒ 与 E-025 不同前提，复测无效"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "同 E-025：信息价值前提（δ 判无健康窗 ⇒ max_count 维持 3240）"
+      }
+    ]
+  },
+  "cstep3memgrad20u": {
+    "science_question": "R132 ⑤ 判别臂：uniform 世界（位置可由纬度预测 ⇒ 信息本不值钱）下预测**无效应** —— 若 patchy 的成簇下降在 uniform 复现 ⇒ 『记忆有用』解释死，效应归『移动统计被改』",
+    "items": [
+      {
+        "id": "dist_is_uniform",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "uniform",
+        "why": "判别臂的前提就是 uniform（信息不值钱的世界）；若误跑 patchy ⇒ 判别失效"
+      }
+    ]
+  },
+  "cstep3memgrad20a4": {
+    "science_question": "R132 4码闭合候选（内评方案a）：E-025 的信号在 **4 码 + fresh seeds 48-67** 上是否复现（16 码复测不能证伪 4 码假设——字母表改变基线区制）",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "复测对象是 patchy 世界里的信号；若实际跑 uniform ⇒ 与 E-025 不同前提，复测无效"
+      },
+      {
+        "id": "capacity_not_latitude_predictable",
+        "kind": "capacity_lat_r2_max",
+        "value": 0.9,
+        "why": "同 E-025：信息价值前提（δ 判无健康窗 ⇒ max_count 维持 3240）"
+      }
+    ]
+  },
+  "pc1": {
+    "science_question": "PC-1 仪器校准（正对照，非科学实验）：在「文献先验上必然出阳性」的极简构造（关捕食+软顶+C3 拉满+patchy+16 码）下，仪器链（codebook_conv/⑥b/ρ）能否检出信号效应",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "C4 最小在场：patchy 是正对照构造的一部分；误跑 uniform ⇒ 构造错误"
+      },
+      {
+        "id": "predation_disabled",
+        "kind": "preset_arg_equals",
+        "key": "predation-enabled",
+        "value": "false",
+        "why": "S2 单营养级：捕食不关 ⇒ 50k 内战振荡与区制抽签全部回来（所有者 00:53/01:02 帖）"
+      },
+      {
+        "id": "soft_cap_on",
+        "kind": "preset_arg_equals",
+        "key": "soft-cap-target",
+        "value": "0.6",
+        "why": "S1 软顶（目标窗形式，冒烟后修订）：N*=0.6K ⇒ 稳态窗 [0.2K,0.95K] 可达；误关 ⇒ 退回硬顶无窗构造"
+      },
+      {
+        "id": "alphabet_16",
+        "kind": "preset_arg_equals",
+        "key": "signal-alphabet",
+        "value": "16",
+        "why": "构念级裁定（R134）：\"4\" 档无食物维 ⇒ 参照任务不成立"
+      },
+      {
+        "id": "reputation_weight_1",
+        "kind": "preset_arg_equals",
+        "key": "reputation-weight",
+        "value": "1.0",
+        "why": "C3 人为拉满 = 本构造的被测件（R134 裁定 1.0）"
+      }
+    ]
+  },
+  "cstep3acont": {
+    "science_question": "A-连续：取食侧的**凸 trade-off** (1-g16)^k 是否让 g16 分布发生进化分支（双峰）——这是「营养级分化」的最小充分条件测试（R135 §二.1 只动曲率）",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "uniform 下食物位置可由纬度预测 ⇒ 取食效率不构成生态位维度 ⇒ trade-off 无从谈起"
+      },
+      {
+        "id": "curvature_armed",
+        "kind": "variant_arg_equals",
+        "key": "forage-tradeoff-k",
+        "value": "2.0",
+        "why": "C4 最小在场：曲率是本批**唯一**被测机制；若读到 0.0 ⇒ 跑成了对照臂，整批作废"
+      },
+      {
+        "id": "soft_cap_window",
+        "kind": "preset_arg_equals",
+        "key": "soft-cap-target",
+        "value": "0.6",
+        "why": "无软顶时该构造 N≈19-78（崩溃）⇒ g16 样本量低于双峰判据下限；软顶给出可判窗（两臂同加，不引入变量）"
+      },
+      {
+        "id": "alphabet_16",
+        "kind": "preset_arg_equals",
+        "key": "signal-alphabet",
+        "value": "16",
+        "why": "与本纪元其余批一致；字母表差异会改基线区制，不可混入"
+      }
+    ]
+  },
+  "calib1": {
+    "science_question": "能量校准预实验（仪器性质）：测三腿（g16 三分箱）净收入结构，为 C 档参数**解析标定**提供输入；并兼作 20% 阈值的**功效预跑**",
+    "items": [
+      {
+        "id": "dist_is_patchy",
+        "kind": "preset_arg_equals",
+        "key": "distribution",
+        "value": "patchy",
+        "why": "校准的是正式构造；uniform 下取食收益结构不同 ⇒ 标定值不可移植"
+      },
+      {
+        "id": "soft_cap_window",
+        "kind": "preset_arg_equals",
+        "key": "soft-cap-target",
+        "value": "0.6",
+        "why": "无软顶时 N 崩溃(≈19-78) ⇒ 三腿样本量不足 ⇒ 中位数不可估"
+      },
+      {
+        "id": "curvature_off",
+        "kind": "preset_arg_equals",
+        "key": "forage-tradeoff-k",
+        "value": "0.0",
+        "why": "校准的是**现状**收支结构（C 档实施前的基线）；开曲率会把标定值污染成\"C 档后的值\""
+      },
+      {
+        "id": "cluster_arm_present",
+        "kind": "variant_arg_equals",
+        "key": "init-g16-clusters",
+        "value": "0.05,0.5,0.9",
+        "why": "案 B（三簇投放）必须真在场：它保证三腿 n 足够；若读到空 ⇒ 该臂退化为案 A，重复跑无信息"
+      }
+    ]
+  }
+}

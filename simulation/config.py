@@ -126,6 +126,12 @@ class GenomeConfig:
     mutation_rate: float = 0.05     # 每个基因发生变异的概率
     mutation_sigma: float = 0.05    # 变异震荡幅度（相对基因区间宽度）
 
+    # R141（2026-09-21）：**g16 初始投放**（能量校准预实验用）。
+    #   空串（默认）⇒ 旧行为（uniform 抽样）。给 `"0.05,0.5,0.9"` ⇒ 初始个体**均分**到
+    #   这些 g16 值上（交错分配保证各组 n 尽量相等）⇒ **保证三组的样本量都够**。
+    # ⚠️ 这**不是**自然分布 ⇒ 相应批次必须标为**仪器性质**（不进科学判读）。
+    init_g16_clusters: str = ""
+
     def __post_init__(self) -> None:
         assert self.gene_max > self.gene_min, "上限要大于下限"
         assert 0.0 <= self.mutation_rate <= 1.0, "变异率在 0~1"
@@ -138,9 +144,19 @@ class PopulationConfig:
     initial_count: int = 200        # 初始个体数量
     max_count: int = 5000           # 种群硬上限（防失控）
 
+    # PC-1（R134，2026-09-20）：**S1 软顶**（δ/E-026 诊断"硬顶⇒无亚顶平衡态⇒ρ 无窗"的最小修改）。
+    # 形态（冒烟后修订，见板帖）：**目标窗形式**——繁殖候选通过率
+    #     p_soft = clamp((N* − N)/N*, 0, 1)，N* = soft_cap_target × max_count。
+    # N*>0 ⇒ N 稳态钉在 N* 附近（出生≈死亡的选择窗）；N* = 0（默认）⇒ 与旧版**逐位一致**。
+    # 硬顶保留为兜底。⚠️ True 消费额外 RNG（每 tick P 个 uniform）⇒ 新配置。
+    # 🔴 修订原因（首版线性 (1−N/K) 实测失败）：无捕食世界死亡≈0 ⇒ 任何 p_soft>0 的尾部
+    #    都把 N 推到硬顶（12k 冒烟 N_eq=3240=K，稳态窗门不过）⇒ 补偿必须**在 N* 处归零**。
+    soft_cap_target: float = 0.0
+
     def __post_init__(self) -> None:
         assert self.initial_count >= 1, "至少一个个体"
         assert self.max_count >= self.initial_count, "上限不小于初始"
+        assert 0.0 <= self.soft_cap_target < 1.0, "软顶目标须 ∈ [0,1)（0=关闭；1 等于没顶）"
 
 
 @dataclass
@@ -198,6 +214,11 @@ class PredationConfig:
     攻击概率系数/门槛为[隐含]（→ A2 收编，默认值保持旧行为逐位一致）。
     """
 
+    # PC-1（R134，2026-09-20）：**总开关**。True（默认）⇒ 与旧版**逐位一致**（C7 digest 钉死）；
+    # False ⇒ **跳过整个捕食相**（同类相食 G16 不发动；pred_frac 恒 0）——PC-1 单营养级构造件。
+    # ⚠️ False 是**新配置**（RNG 消费随之改变），不是"旧行为的变体"；两开关都经 to_dict 进指纹。
+    enabled: bool = True
+
     attack_cost: float = 0.1           # 每次攻击的能耗（无论成败）
     attack_prob_coef: float = 0.2      # 攻击概率 ≈ g16 × 系数 × 饥饿度
     attack_gene_gate: float = 0.3      # g16 低于该值不发动攻击
@@ -207,12 +228,46 @@ class PredationConfig:
     transfer_ratio: float = 0.4        # 捕食成功：猎物能量转移比例
     stomach_transfer: float = 0.4      # 猎物胃粮转移比例
 
+    # ------------------------------------------------------------------
+    # R135 第 3 步 **A-连续**（2026-09-20）：营养级专化的**凸 trade-off**。
+    #
+    # 取食倍率 `forage_mult(g16) = (1 − g16) ** k`：
+    #   k = 0（默认）⇒ 恒 1 ⇒ **与旧版逐位一致**（C7 digest 钉死）
+    #   k = 1     ⇒ 线性权衡（g16=0.5 仍能吃 50%）
+    #   k > 1     ⇒ **凸（加速下降）**：g16=0.5 只吃 (0.5)^k ⇒ k=2 时仅 25%
+    #      ⇒ 中间态"杂食者"两边都不精 ⇒ 这是文献里唯一经检验能产生**进化分支**
+    #        （g16 分布双峰）的路径：Geritz et al. 1998, *Evol. Ecol.* 12:35（凸权衡 + 频率依赖）。
+    #   与云端开发者 §三"陡峭表"的对照（k=1.74 最接近该表；本批取 **k=2.0** 以保证凸度足够）：
+    #      g16:    0.0    0.2    0.5    0.8    1.0
+    #      表:    1.00   0.80   0.30   0.05   0.00
+    #      k=2:   1.00   0.64   0.25   0.04   0.00
+    # ⚠️ 只动**取食侧**。捕猎成功率侧保持原式 `energy_ratio × (0.5 + g16×0.5)`
+    #    （其在 Rust `predation.rs:99`，改它要重编；且 R135 裁定"一次只动曲率"）。
+    forage_tradeoff_k: float = 0.0
+
     def __post_init__(self) -> None:
         assert self.attack_cost > 0
         assert 0 <= self.success_floor < self.success_ceil <= 1.0
         assert 0.0 <= self.transfer_ratio <= 1.0
         assert 0.0 <= self.stomach_transfer <= 1.0
         assert 0.0 <= self.attack_gene_gate <= 1.0
+        assert self.forage_tradeoff_k >= 0.0, "凸度非负（0 = 关闭 = 旧行为）"
+
+
+# ---------------------------------------------------------------- "丰盛"阈值（R121 §4.1：**命名 + 度量**）
+# 🔴 2026-09-18 立（R121 核阅 §4.1 批准；内评 09-17 §七.2 派工）：
+#    此前"食物 >= 0.5x容量"这个判定在**多处各自硬编码**（信号 `f_bit`、工作记忆写入），
+#    而付款/信任/学习另用 `CultureConfig.food_threshold = 0.3` ⇒ 同源概念多值声明，
+#    且两处**语义并不相同**。本次**只命名、不改数值**——改数值属**行为变更**，
+#    与在产批次（C1a/C1b/C2）不可比，且须预注册（R121 明文）。
+#    两者务必分清：
+#      · `FOOD_RICH_LEVEL`            = "此地食物多到**值得记住**"（工作记忆写入 `:730`；
+#                                        信号 `f_bit` 已随 R113 的 "4" 档删除）
+#      · `CultureConfig.food_threshold` = "此地有**足够食物可食 / 值得付款**"（付款/信任/学习）
+#    边界带 `(food_threshold, FOOD_RICH_LEVEL] = (0.3, 0.5]` 上的错位（系统判该付款、
+#    信号却宣告"无食物"）由 `oracle_stats()["food_band_true_sig"]` 的**零机时 counter** 量化。
+#    ⇒ **裁定点**：该占比 >5% 时再决定"对齐到 0.3"还是"对齐到 0.5"（R121 §4.1）。
+FOOD_RICH_LEVEL: float = 0.5
 
 
 @dataclass
@@ -223,7 +278,7 @@ class CultureConfig:
     → A2 收编。默认值保持旧行为（真 +0.05 / 假 −0.1）。
     """
 
-    food_threshold: float = 0.3        # "邻格有粮"判定阈值（信号验证用）
+    food_threshold: float = 0.3        # "邻格有粮"判定阈值（**可食/值得付款**；与模块级 `FOOD_RICH_LEVEL`=0.5"值得记住"**语义不同**，见其注释）
     trust_true: float = 0.05           # 信号验证为真 → 信任上升幅度
     trust_false: float = 0.1           # 信号验证为假 → 信任下降幅度（注意取负前传）
 
@@ -291,6 +346,18 @@ class InfoStructureConfig:
     alignment_step: float = 0.15          # 对齐步长（解读表向对方收敛的比例）
     alignment_noise: float = 0.02         # 对齐时附加噪声σ
 
+    # ---- 机制3.6：A′ 记忆**朝向梯度**（设计稿 `docs/设计文档/设计-A档记忆朝向梯度-20260919.md`）----
+    # 🔴 **不**受 `enabled` 门控（与 ⑥ 探针同规格）：A′ 必须能**单独**开关，否则测试会被
+    #    学习瓶颈/任意性码本/softmax 等一堆 D2 机制污染 ⇒ 不再是单变量。
+    # 现状问题：原记忆加分只在「记忆格 **恰好等于** 某个邻居格」时生效，而那格**本来就能直读**
+    #    （`food_ratio[nbc]` 在同一次决策里已被读到）⇒ **按构造就是冗余奖励**。
+    # "orientation"：改为朝向梯度 —— 记忆格（可远在感知之外）按其**方向**给对应邻居加分：
+    #    `gain(c) = memory_gradient_gain · perc · max_m cos(方向(cur→c), 方向(cur→m))`
+    #    🔴 `cos` **允许为负** ⇒ 背向邻居被减分 ⇒ 这才是"梯度"（不是单纯吸引）。
+    # "none" = 原式（**默认** ⇒ 与旧版逐位一致，可对拍/回退/当同批对照臂）。
+    memory_gradient: str = "none"
+    memory_gradient_gain: float = 0.3
+
     # ---- D-18 ⑥ 探针（R43：信号响应率三联报）----
     # 纯观测（零 RNG、零行为改变——有测试断言逐位一致）；只增每 tick 一点算术开销。
     # False = 关闭（默认；完全无开销）。⑥a 暴露率 / ⑥b Δ_i / ⑥=⑥a×⑥b + argmax 翻转率辅助。
@@ -305,6 +372,9 @@ class InfoStructureConfig:
         assert self.perception_noise >= 0
         assert self.softmax_tau >= 0
         assert self.reputation_weight >= 0, "声誉权重非负（0=关闭）"
+        assert self.memory_gradient in ("none", "orientation"), \
+            "memory_gradient 只支持 none（原式）或 orientation（朝向梯度）"
+        assert self.memory_gradient_gain >= 0, "记忆朝向梯度增益非负"
         assert 0.0 <= self.alignment_rate <= 1.0
         assert 0.0 <= self.alignment_step <= 1.0
         assert self.alignment_noise >= 0
@@ -339,6 +409,19 @@ class OracleConfig:
     # 校准臂登记（R100 条件 5「机器强制拒收」+ R103 §二.2）。
     # 未登记而 `m ≠ 1` ⇒ **硬失败**；标了旗而 `m == 1` 亦报错（m=1 属科学臂，防登记口径漂移）。
     is_calibration_arm: bool = False
+    # ---- R123/B② 门控臂（2026-09-18 实施；R122 移交清单 #3）----
+    # 动机（内评交叉核验 §一 判定 `[云端开发]` 质疑**成立**）：现付款条件 `sel = true_sig`
+    # **不引用**"接收者的选择是否被信号改变" ⇒ 阳性可能是"食物占位"（谁站在猎物旁谁收款）。
+    # 本档把 D-18 ⑥ 探针**已算**的反事实 Δ_i 接成付款闸：`ok = ... & (Δ_i > 0)`。
+    #   · `gate_delta="content"`（**默认、付款闸口径**）= 只去**内容项** `0.4*perc*interp`、
+    #     **保留存在性项** `sp*sig_weight` ⇒ 闸门问的是"**内容**是否有用"。若用 `full`，
+    #     闸门会被"信标"穿透（存在性单独就够引路）⇒ 重演本要修的问题（本板 23:37 帖 §三）。
+    #   · `gate_delta="full"` = 去掉存在性 + 内容（现探针口径）⇒ 并列报告用。
+    # ⚠️ 门控臂是**仪器**（改付款规则、不改机制语义）⇒ 必须 `is_calibration_arm=True`（R100 条件 5），
+    #    且必须同时开 `measure_signal_response` + 信息不对称路径（否则 Δ≡0 ⇒ **付款全消失**，
+    #    看起来像"信号无用"的**假结论**——比没有数据更坏）。三处齐发硬失败（config/引擎/a4）。
+    gate_mode: str = "none"            # "none"（默认=现状）/ "delta_positive"（门控臂）
+    gate_delta: str = "content"        # "content"（付款闸推荐）/ "full"
 
     def __post_init__(self) -> None:
         assert self.donation >= 0, "donation 非负"
@@ -346,6 +429,18 @@ class OracleConfig:
         assert self.gain_multiplier >= 1.0, (
             f"gain_multiplier({self.gain_multiplier}) 不得 < 1.0：增益档只**放宽上限**，不收紧"
         )
+        # ---- R123/B② 门控臂：字段自洽（跨字段检查在 SimConfig 侧 + 引擎入口 + a4）----
+        assert self.gate_mode in ("none", "delta_positive"), (
+            f"gate_mode 非法：{self.gate_mode!r}（只支持 none / delta_positive）"
+        )
+        assert self.gate_delta in ("content", "full"), (
+            f"gate_delta 非法：{self.gate_delta!r}（只支持 content / full）"
+        )
+        if self.gate_mode == "delta_positive":
+            assert self.is_calibration_arm, (
+                "门控臂是仪器（改付款规则、不改机制语义）⇒ 必须登记 "
+                "is_calibration_arm=True（R100 条件 5：校准臂不进科学判定）"
+            )
         # ---- C5 v2 规格自洽（增益档版；2026-09-16）----
         # 三态：① 科学臂（m=1）保持原语义；② 校准臂（m>1）必须登记且 m 落在区间内；
         #      ③ 未登记而 m≠1 / 标旗而 m=1 ⇒ 一律硬失败（防"校准档静默混入科学判读"）。
@@ -421,6 +516,28 @@ class FruitConfig:
         assert self.max_seed_carried >= 0
 
 
+# ---------------------------------------------------------------- 信号字母表（R113 / R121）
+# 🔴 2026-09-18 立（R113 所有者 09-17 22:30 裁定；R121 09-18 核阅批准实现形态）：
+#    档位（**共用同一可逆开关**）：
+#      · `"16"` = 现状 4 位（能量2 + 食物1 + 邻居1），state 0–15、码域 **1–15**（0 保留=无信号）
+#      · `"4"`  = R113 基线 2 位（**仅能量**）：`state = e_bin`、`code = e_bin + 1` ⇒ 码域 **1–4**
+#                顺手消灭 `state=0` 的"隐形发射 + 清除他人标记"后果（设计稿 §2.4）
+#      · `"8"`  = B③ 载体 3 位（能量2 + 记忆1）：`code = e_bin*2 + mem_bit + 1` ⇒ 码域 **1–8**
+#                **R121 §五.2 已批准，但按设计稿 §六 排在下一步：本版**未实施**（fail-loud）
+#    ⚠️ `signal_alphabet` 进 `to_dict()`/`config_fingerprint()` ⇒ **跨档续跑硬报错**。
+#       这是**特性不是缺陷**：防"16 码快照被 4 码批静默续跑"这类混口径事故（设计稿 §3.1）。
+#    ⚠️ **纪元纪律**（内评 09-17 §三.3）：`"4"` 批次与 `"16"` 批次（C1a/C1b/C2）的
+#       `ratio` / `codebook_conv` **不可直接比较**；报告必须标注 `signal_alphabet`。
+#    ⚠️ RNG 契约（设计稿 §3.3）：切档**不改变任何 RNG 抽取值与形状** ⇒ 同 seed 下轨迹差异
+#       只能来自码语义，不来自随机流错位（便于 C7 逐位对拍）。
+SIGNAL_ALPHABET_STATES: dict[str, int] = {"16": 16, "4": 4, "8": 8}
+SIGNAL_ALPHABET_CODE_MAX: dict[str, int] = {"16": 15, "4": 4, "8": 8}
+# 已落地实现的档位；其余在 config 构造/引擎初始化时**硬失败**（不静默降级，教训 2）
+# 已落地实现的档位；其余在 config 构造/引擎初始化时**硬失败**（不静默降级，教训 2）
+#   `"8"`（B③ 记忆位，R123 2026-09-18 实施）：`code = e_bin*2 + mem_bit + 1` ⇒ 码域 **1–8**
+SIGNAL_ALPHABET_IMPLEMENTED: tuple[str, ...] = ("16", "4", "8")
+
+
 @dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
@@ -443,6 +560,7 @@ class SimConfig:
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
     signal_disabled: bool = False        # 不发信号：发射概率恒0，接收/解读照常
     signal_mode: str = "state"           # 信号编码：state(现状)/random(独立rng随机)/evolved(D2码本暂未接线)
+    signal_alphabet: str = "16"          # 信号字母表（R113/R121）："16"(现状,4位)/"4"(2位,仅能量)/"8"(B③,未实施)——见模块顶部常量族
 
     # ---- V-1 oracle 正向对照（R39 / D-8）；旧存档缺失回退默认关闭 ----
     oracle: OracleConfig = field(default_factory=OracleConfig)
@@ -512,6 +630,8 @@ class SimConfig:
             neutral_genes=data.get("neutral_genes", False),
             signal_disabled=data.get("signal_disabled", False),
             signal_mode=data.get("signal_mode", "state"),
+            # R113/R121 信号字母表；旧存档回退 "16"（= 旧行为，逐位兼容）
+            signal_alphabet=data.get("signal_alphabet", "16"),
         )
 
     def fingerprint(self) -> str:

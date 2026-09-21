@@ -284,3 +284,32 @@ def test_report_does_not_name_removed_constant():
     assert not hasattr(j, "N_TRANSITION")
     assert hasattr(j, "N_TRANSITION_LO") and hasattr(j, "N_DOMAIN_RATIO")
     j.report(_good_batch())          # 不得抛 NameError
+
+
+# ------------------------------------------------------------ F-R23（2026-09-17 内评抽核）
+def test_f_r23_sign_test_uses_actual_positive_count_not_n_pairs():
+    """🔴 回归：`P(X≥k|n)` 的 `k` 必须是**实际为正的配对数**，不是 `n_pairs`。
+
+    原缺陷（F-R23）：调用点写 `sign_test_pvalue(n_pairs, n_pairs)` ⇒ k 恒等 n
+    ⇒ 检验退化为"全正假设"下的**常数**（n=6 恒 0.0156，与数据里几个为正**无关**）。
+    `[实测]` 真实数据（C1a）是 5/6 为正 ⇒ 正确值 = P(X≥5|6) = 7/64 = **0.1094**（不显著）。
+    """
+    rows: dict[str, dict] = {}
+    seeds = (42, 43, 44, 45, 46, 47)
+    for s in seeds:
+        rows[f"m1.0_s{s}"] = _row(s, 1.0, 0.50, 3240, 0.30)
+        # 5 个为正、1 个（s46）为负
+        rows[f"m1.3_s{s}"] = _row(s, 1.3, 1.25 if s != 46 else 0.40, 3240, 0.30)
+    res = j.report(rows)[1]
+    pv = res["sign_test"]["1.3"]
+    assert pv == pytest.approx(0.109375), "F-R23：5/6 为正时应为 P(X>=5|6)=0.1094"
+    assert pv != pytest.approx(0.015625), "仍在使用全正假设常数（F-R23 未修）"
+
+
+def test_f_r23_sign_test_still_all_positive_when_six_of_six():
+    """对照：真全正（6/6）时仍应得 0.0156 —— 修复不得把正确情形改坏。"""
+    rows: dict[str, dict] = {}
+    for s in (42, 43, 44, 45, 46, 47):
+        rows[f"m1.0_s{s}"] = _row(s, 1.0, 0.50, 3240, 0.30)
+        rows[f"m1.3_s{s}"] = _row(s, 1.3, 1.25, 3240, 0.30)
+    assert j.report(rows)[1]["sign_test"]["1.3"] == pytest.approx(0.015625)

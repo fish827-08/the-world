@@ -615,8 +615,22 @@ fn step_movement(
     move_cost_ind: PyReadonlyArray1<'_, f64>,
     n_cells: usize,
     nb_stride: usize,
+    // A′ 记忆朝向梯度（2026-09-19）：mode 0=none（原式）/ 1=orientation（朝向梯度）
+    n_cols: usize,
+    mem_grad_mode: u8,
+    mem_grad_gain: f64,
 ) -> PyResult<()> {
     let n = unsafe { flat.as_array().len() };
+    if n_cols == 0 || n_cells % n_cols != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n_cols={n_cols} 与 n_cells={n_cells} 不自洽（需整除且非零）"
+        )));
+    }
+    if mem_grad_mode > 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "mem_grad_mode={mem_grad_mode} 非法（0=none / 1=orientation）"
+        )));
+    }
     require_len("energy", unsafe { energy.as_array().len() }, n)?;
     require_len("trust", trust.as_array().len(), n)?;
     require_len("work_memory", work_memory.as_array().len(), n * 4)?;
@@ -671,6 +685,7 @@ fn step_movement(
         move_inds.as_slice()?, rand_choice.as_slice()?,
         move_cost_ind.as_slice()?,
         n_cells, nb_stride, gene_count,
+        n_cols, mem_grad_mode, mem_grad_gain,
     );
     Ok(())
 }

@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from simulation.config import SimConfig  # noqa: E402
 from simulation.provenance import (  # noqa: E402
-    CountingRNG, code_tree_sha256, collect, git_commit, validate,
+    CODE_TREE_DIRS, CountingRNG, changed_subtrees, code_subtree_sha256s,
+    code_tree_sha256, collect, git_commit, validate,
 )
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
@@ -154,3 +155,65 @@ def test_collect_and_validate_require_code_tree_hash():
     validate(prov)
     with pytest.raises(RuntimeError, match="code_tree_sha256"):
         validate({k: v for k, v in prov.items() if k != "code_tree_sha256"})
+
+
+# ---- R122 #6：引擎**子树**哈希（定位"哪一层变了"） ----
+
+def test_subtree_hashes_cover_all_code_tree_dirs(tmp_path):
+    """返回键 = 全部受控目录（含不存在者 ⇒ 空串），且逐子树哈希长度 32。"""
+    r = _fake_tree(tmp_path)
+    hs = code_subtree_sha256s(r)
+    assert set(hs) == set(CODE_TREE_DIRS)
+    assert len(hs["simulation"]) == 32 and len(hs["observatory"]) == 32
+    assert hs["world"] == "" and hs["core"] == "" and hs["experiments"] == ""
+
+
+def test_subtree_hash_localizes_change(tmp_path):
+    """🔴 核心价值：**改一个子树 ⇒ 只有该子树哈希变**（合并哈希做不到这点）。"""
+    r = _fake_tree(tmp_path)
+    before = code_subtree_sha256s(r)
+    assert changed_subtrees(before, code_subtree_sha256s(r)) == []
+    (r / "observatory" / "c.py").write_text("z = 4\n", encoding="utf-8")
+    after = code_subtree_sha256s(r)
+    assert changed_subtrees(before, after) == ["observatory"]
+    assert after["simulation"] == before["simulation"]      # 未动的子树不变
+    assert code_tree_sha256(r) == code_tree_sha256(r)   # 合并哈希自身仍确定
+
+
+def test_subtree_hash_is_deterministic(tmp_path):
+    r = _fake_tree(tmp_path)
+    assert code_subtree_sha256s(r) == code_subtree_sha256s(r)
+
+
+def test_changed_subtrees_accepts_manifest_dicts():
+    """可直接吃两批 manifest：`changed_subtrees(manifest_a, manifest_b)`。"""
+    a = {"code_subtrees": {"simulation": "aa", "world": "bb"}}
+    b = {"code_subtrees": {"simulation": "aa", "world": "cc"}}
+    assert changed_subtrees(a, b) == ["world"]
+    # 缺键/空值不得抛异常（旧批无该字段 ⇒ 全部记为"变"或"缺"，由调用方解释）
+    assert changed_subtrees({}, b) == ["simulation", "world"]
+    assert changed_subtrees({"code_subtrees": {}}, {"code_subtrees": {}}) == []
+
+
+def test_collect_includes_code_subtrees():
+    """`collect()` 必须带上逐子树指纹（否则批跑产物里查不到"哪层变了"）。"""
+    prov = collect(SimConfig(seed=1))
+    st = prov["code_subtrees"]
+    assert set(st) == set(CODE_TREE_DIRS)
+    # 真实仓库里 simulation/observatory/world/core/experiments 都存在 ⇒ 都非空
+    for d in CODE_TREE_DIRS:
+        assert st[d], f"{d} 的子树哈希为空 —— 受控目录应存在"
+    validate(prov)
+
+
+def test_merged_hash_derives_from_same_file_set(tmp_path):
+    """口径自洽：合并哈希 = 同一文件集 ⇒ 逐子树**全同**时合并哈希也同（防两套算法漂移）。"""
+    r = _fake_tree(tmp_path)
+    h1 = code_tree_sha256(r)
+    sub = code_subtree_sha256s(r)
+    # 复制一份同内容树 ⇒ 合并哈希与各子树哈希逐位相同
+    import shutil
+    r2 = tmp_path.parent / (tmp_path.name + "_copy")
+    shutil.copytree(r, r2)
+    assert code_tree_sha256(r2) == h1
+    assert code_subtree_sha256s(r2) == sub

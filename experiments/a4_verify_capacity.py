@@ -42,7 +42,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from simulation.config import CALIBRATION_M_RANGE, InfoStructureConfig, SimConfig  # noqa: E402
+from simulation.config import (  # noqa: E402
+    CALIBRATION_M_RANGE,
+    SIGNAL_ALPHABET_IMPLEMENTED,
+    SIGNAL_ALPHABET_STATES,
+    InfoStructureConfig,
+    PredationConfig,
+    SimConfig,
+)
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
 
@@ -54,6 +61,59 @@ from observatory.statistics import (  # D-16：单一口径实现
 from observatory.statistics import selection_gradient  # D-17：⑤ 单一口径
 
 
+# R139/R140：g16 直方图的箱数（值域 [0,1] 均分）。**改动它等于改判据口径** ⇒ 单一真源。
+G16_BINS = 10
+
+
+def _hist10(x) -> list[int]:
+    """g16 的 10-bin 直方图（值域 [0,1]，右开区间；越界值夹到两端）。"""
+    a = np.asarray(x, dtype=np.float64)
+    if a.size == 0:
+        return [0] * G16_BINS
+    idx = np.clip((a * G16_BINS).astype(np.int64), 0, G16_BINS - 1)
+    return np.bincount(idx, minlength=G16_BINS)[:G16_BINS].tolist()
+
+
+# R141 P0 派工单 §1.3 锁定的列名（🔴 勿改名——`tools/calib_solve.py` 按此消费）
+EC_CSV_COLS = ("g_lo_n", "g_lo_net_mean", "g_lo_net_p50", "g_lo_net_var",
+               "g_mid_n", "g_mid_net_mean", "g_mid_net_p50", "g_mid_net_var",
+               "g_hi_n", "g_hi_net_mean", "g_hi_net_p50", "g_hi_net_var",
+               "forage_in_mean", "pred_in_mean", "prey_energy_mean")
+
+
+def _ec_csv_row(e) -> dict:
+    """把 `_ec_flush` 刚写的那一行净收入统计摊平成 CSV 列（None ⇒ 空串，R120 口径）。"""
+    ts = e.ec_timeseries()
+    row = ts[-1] if ts else {}
+    out = {}
+    for k in EC_CSV_COLS:
+        v = row.get(k)
+        out[k] = "" if v is None else (int(v) if k.endswith("_n") else round(float(v), 6))
+    return out
+
+
+def _moments(x) -> tuple[float, float, float]:
+    """样本标准差 / 偏度 / **超额**峰度（矩法）—— BC 双峰系数的输入（R135 第 -1 步①）。
+
+    BC = (skew² + 1) / (kurt + 3(n-1)²/((n-2)(n-3)))，BC > 5/9 提示双峰。
+    ⚠️ 调用方须先保证 **n ≥ 3**：峰度是四阶矩，样本过小时方差极大（可有可无的天文数字）。
+    """
+    a = np.asarray(x, dtype=np.float64)
+    n = int(a.size)
+    if n < 3:
+        return 0.0, 0.0, 0.0
+    d = a - a.mean()
+    m2 = float((d ** 2).mean())
+    m3 = float((d ** 3).mean())
+    m4 = float((d ** 4).mean())
+    if m2 <= 1e-300:          # 退化分布（所有值相同）
+        return 0.0, 0.0, 0.0
+    std = float(np.sqrt(m2 * n / (n - 1)))          # ddof=1
+    skew = m3 / (m2 ** 1.5)
+    kurt = m4 / (m2 ** 2) - 3.0                     # 超额峰度（正态 = 0）
+    return round(std, 4), round(skew, 4), round(kurt, 4)
+
+
 def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           max_count: int = 5000, neutral: bool = False,
           sig_disabled: bool = False, oracle: bool = False,
@@ -61,16 +121,51 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           oracle_persistence: int | None = None,
           gain_multiplier: float | None = None,
           calibration_arm: bool = False,
-          signal_mode: str | None = None) -> SphereEngine:
+          signal_mode: str | None = None,
+          signal_alphabet: str | None = None,
+          gate_mode: str | None = None, gate_delta: str | None = None,
+          distribution: str | None = None,
+          # A′ 记忆朝向梯度（2026-09-19）：`orientation` 才启用；默认 `none` = 原式（逐位等价）
+          memory_gradient: str = "none",
+          memory_gradient_gain: float = 0.3,
+          # PC-1（R134，2026-09-20）：S2 关捕食 / S1 软顶 / 零模型臂的瓶颈开关
+          predation_enabled: bool = True,
+          soft_cap_target: float = 0.0,
+          learning_bottleneck: bool = True,
+          reputation_weight: float = 0.0,
+          # R135 第3步 A-连续（2026-09-20）：凸 trade-off 取食倍率 (1−g16)^k
+          forage_tradeoff_k: float = 0.0,
+          # R141 P0-2（派工单 §二）：g16 初始投放（"" = 旧行为；"0.05,0.5,0.9" = 校准批）
+          init_g16_clusters: str = "") -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
     c.simulation.history_limit = 100           # 环形缓冲，限内存（不改变语义）
     c.population.initial_count = 200           # R4 manifest 真实口径
     c.population.max_count = max_count         # R41：标杆批口径 3240（⑤ 不饱和前提）
-    c.resources.distribution = "uniform"       # R4 manifest 真实口径
-    d2 = InfoStructureConfig(enabled=True)
-    d2.learning_bottleneck = True
+    # PC-1（R134）：S1 软顶（目标窗形式，冒烟后修订）/ S2 关捕食（默认 = 旧行为）
+    c.population.soft_cap_target = float(soft_cap_target)
+    # ⚠️ 这里是**整体替换** PredationConfig ⇒ **必须**把 k 一并传进去，
+    #    否则 A-连续的凸度会被静默重置为 0（F1 同型：传了开关却没生效）。
+    c.predation = PredationConfig(
+        enabled=bool(predation_enabled),
+        forage_tradeoff_k=float(forage_tradeoff_k),
+    )
+    c.genome.init_g16_clusters = str(init_g16_clusters or "")   # R141 P0-2
+    # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
+    # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
+    # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
+    # C4 对账"开关 vs 设计"时两边都是 uniform ⇒ 判通过。⇒ 见 R127 的 **C8 前提对账**。
+    # 现改为**可配**：默认仍 "uniform"（与历史批可比）；"patchy" 须**显式指定**且**先过前提冒烟**。
+    c.resources.distribution = str(distribution) if distribution else "uniform"
+    # A′ 走向构造参数（而非构造后赋值）：`__post_init__` 只在构造时跑 ⇒ 赋值不会校验（F1 同型教训）
+    d2 = InfoStructureConfig(
+        enabled=True,
+        learning_bottleneck=bool(learning_bottleneck),
+        memory_gradient=str(memory_gradient),
+        memory_gradient_gain=float(memory_gradient_gain),
+        reputation_weight=float(reputation_weight),   # PC-1：C3 人为拉满（R134 裁定 1.0）
+    )
     d2.learning_rate = 0.05
     d2.arbitrary_codebook = codebook           # R19/V12：4 机制=True，3 机制对照=False
     d2.steels_alignment = True
@@ -111,7 +206,38 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     # ⇒ 若 ratio/ρ 同样上升，即实证「增益不依赖信号内容」（V-1 C-4 的可执行检验）。
     if signal_mode is not None:
         c.signal_mode = str(signal_mode)
+    # R113/R121 信号字母表（默认 "16" = 现状；"4" = 仅能量 2 位）
+    # R123/B② 门控臂（付款闸；仪器 ⇒ 必须登记校准臂）
+    if gate_mode is not None:
+        c.oracle.gate_mode = str(gate_mode)
+    if gate_delta is not None:
+        c.oracle.gate_delta = str(gate_delta)
+    if c.oracle.gate_mode == "delta_positive" and not c.oracle.is_calibration_arm:
+        raise SystemExit(
+            "门控臂是仪器（改付款规则）⇒ 必须同时给 --calibration-arm（R100 条件 5）"
+        )
+    if c.oracle.gate_mode == "delta_positive" and not c.info_structure.measure_signal_response:
+        raise SystemExit(
+            "门控臂需要 measure_signal_response=True（否则 Δ≡0 ⇒ 付款全消失 = 假结论源）"
+        )
+    if signal_alphabet is not None:
+        _sa = str(signal_alphabet)
+        if _sa not in SIGNAL_ALPHABET_IMPLEMENTED:
+            raise SystemExit(
+                f"signal_alphabet={_sa!r} 尚未实施（已实现：{SIGNAL_ALPHABET_IMPLEMENTED}）"
+                "—— 不静默降级（教训 2）"
+            )
+        c.signal_alphabet = _sa
     return SphereEngine(c)
+
+
+def _mg_frac(e, key: str) -> str:
+    """A′ 朝向梯度计数占比；未适用/不可用 ⇒ **空串**（不是 0，同 R120 n/a 口径）。"""
+    st = e.memory_gradient_stats()
+    if not st or not st.get("counters_available"):
+        return ""
+    v = st.get(key)
+    return "" if v is None else str(v)
 
 
 def main() -> None:
@@ -164,6 +290,54 @@ def main() -> None:
                     choices=["state", "random", "evolved"],
                     help="覆盖 signal_mode；`random` = 信号与个体状态无关（**无信息**）"
                          "⇒ 供 R100 条件 7「随机信号自检」用")
+    ap.add_argument("--gate-mode", dest="gate_mode", default=None,
+                    choices=["none", "delta_positive"],
+                    help="R123/B② 门控臂：付款闸 = 只对 Δ_i>0 的到达付款（**仪器**，"
+                         "须与 --calibration-arm 同用）")
+    ap.add_argument("--gate-delta", dest="gate_delta", default=None,
+                    choices=["content", "full"],
+                    help="Δ 口径：content=只去**内容项**（保留存在性项，**付款闸推荐**）；"
+                         "full=去两项（现探针口径）")
+    # A′ 记忆朝向梯度：默认 none（原式 ⇒ 与历史批逐位可比）
+    ap.add_argument("--memory-gradient", dest="memory_gradient", default="none",
+                    choices=("none", "orientation"),
+                    help="A′：none=原式（记忆格==邻居格才加分）；orientation=朝向梯度（cos 允许为负）")
+    ap.add_argument("--memory-gradient-gain", dest="memory_gradient_gain",
+                    type=float, default=0.3,
+                    help="A′：朝向梯度增益（默认 0.3，与原式同量级）")
+    # PC-1（R134）：S2 关捕食 / S1 软顶 / 零模型臂瓶颈开关（值式 flag ⇒ preset 可用 key=value）
+    ap.add_argument("--predation-enabled", dest="predation_enabled", default="true",
+                    choices=("true", "false"),
+                    help="PC-1 S2：false=关捕食（单营养级）；默认 true=原式")
+    ap.add_argument("--soft-cap-target", dest="soft_cap_target", type=float, default=0.0,
+                    help="PC-1 S1（目标窗形式）：N* = target×max_count，出生率在 N* 处线性归零；"
+                         "0=关（默认=原式）。R134 PC-1 拟 0.6（窗 [0.2K,0.95K] 的中位）")
+    ap.add_argument("--init-g16-clusters", dest="init_g16_clusters", default="",
+                    help="R141 P0-2：g16 初始投放（逗号分隔，按簇等分人口）；"
+                         "空=旧行为。校准批用 \"0.05,0.5,0.9\"")
+    ap.add_argument("--forage-tradeoff-k", dest="forage_tradeoff_k", type=float, default=0.0,
+                    help="R135 第3步 A-连续：取食倍率 (1−g16)^k（凸 trade-off）；"
+                         "0=关（默认，与旧版逐位一致）；本批取 2.0（凸/加速下降 ⇒ 中间态杂食者吃亏）")
+    ap.add_argument("--learning-bottleneck", dest="learning_bottleneck", default="true",
+                    choices=("true", "false"),
+                    help="PC-1 零模型臂：false=关学习瓶颈（配码本关=零模型）；默认 true")
+    # PC-1：C3 人为拉满（R134 裁定 reputation_weight=1.0）；signal-disabled 值式 flag
+    # （--arm sigoff 的语义照旧，两者取或——禁用臂用哪个都行，preset 统一走值式）
+    ap.add_argument("--reputation-weight", dest="reputation_weight",
+                    type=float, default=0.0,
+                    help="R2 声誉权重（C3 人为拉满用；R134 PC-1 裁定 1.0）")
+    ap.add_argument("--signal-disabled", dest="signal_disabled_flag", default="false",
+                    choices=("true", "false"),
+                    help="true=信号常关（PC-1 禁用臂）；与 --arm sigoff 取或")
+    ap.add_argument("--signal-alphabet", dest="signal_alphabet", default=None,
+                    choices=list(SIGNAL_ALPHABET_IMPLEMENTED),
+                    help='信号字母表档位（R113/R121）："16"=现状 4 位（默认）；'
+                         '"4"=仅能量 2 位（code=e_bin+1∈{1..4}，删 f_bit/n_bit）。'
+                         '⚠️ 与 "16" 批次（C1a/C1b/C2）的 ratio/codebook_conv 不可直接比较')
+    ap.add_argument("--distribution", dest="distribution", default=None,
+                    choices=("uniform", "patchy"),
+                    help="食物分布（R127/C8 前提开关）：uniform=默认（与历史批可比）；"
+                         "patchy=空间斑块（**须先过前提冒烟**：容量空间异质性）")
     ap.add_argument("--calibration-arm", action="store_true",
                     help="登记本臂为**校准臂**（`is_calibration_arm=True`）；"
                          "R100 条件 5：未登记而 m≠1 ⇒ 硬失败")
@@ -171,7 +345,7 @@ def main() -> None:
 
     arm = args.arm
     neutral = arm == "zero"
-    sig_disabled = arm == "sigoff"
+    sig_disabled = arm == "sigoff" or (args.signal_disabled_flag == "true")
     oracle_on = arm == "oracle"
     # R59/F-R9：control = 3 机制对照 ⇒ 关码本（arm 语义优先于 --codebook 默认值 1）。
     # 若无此行，batch grid 只传 arm 时 control 会与 main 同配置同轨迹（2026-09-13 D-24 实测复现）。
@@ -223,16 +397,82 @@ def main() -> None:
                   oracle_persistence=args.oracle_persistence,
                   gain_multiplier=args.gain_multiplier,
                   calibration_arm=bool(args.calibration_arm),
-                  signal_mode=args.signal_mode)
+                  signal_mode=args.signal_mode,
+                  signal_alphabet=args.signal_alphabet,
+                  gate_mode=args.gate_mode, gate_delta=args.gate_delta,
+                  distribution=args.distribution,
+                  memory_gradient=args.memory_gradient,
+                  memory_gradient_gain=args.memory_gradient_gain,
+                  predation_enabled=(args.predation_enabled == "true"),
+                  soft_cap_target=args.soft_cap_target,
+                  learning_bottleneck=(args.learning_bottleneck == "true"),
+                  reputation_weight=args.reputation_weight,
+                  forage_tradeoff_k=args.forage_tradeoff_k,
+                  init_g16_clusters=args.init_g16_clusters)
         start_tick = 0
+    # 🔴 内评未闭合项 #6（2026-09-20 修）：**provenance 必须在跑之前采集**。
+    #   收尾时采集记的是"跑完之后的代码树"——长批期间若有人推提交（E-027 就发生过），
+    #   manifest 会把**后人的代码**记成这批的产物 ⇒ 既不可复现，也会把排障带向错误方向。
+    #   `rng_draws` 例外：它只有收尾才准 ⇒ 在 summary 组装处单独回填。
+    prov_start = prov_collect(e.config, python_info=True)
     if resumed:
         print(f"  ↻ 从快照续跑：tick {start_tick} → {args.ticks}")
+        # R121 §3.1 + C4 读回：续跑时配置**由快照自带** ⇒ 命令行若另给档位而快照不同，
+        # 必须**硬失败**而非静默忽略（F-R21/C5 同族：传了开关却没生效）
+        if (args.gate_mode is not None or args.gate_delta is not None) and arm != "oracle":
+            raise SystemExit(
+                f"--gate-mode/--gate-delta 仅在 --arm oracle 下生效（当前 arm={arm!r}）"
+                "——请勿静默传参"
+            )
+        if args.signal_alphabet is not None and (
+            str(args.signal_alphabet) != str(e.config.signal_alphabet)
+        ):
+            raise SystemExit(
+                f"signal_alphabet 冲突：命令行 {args.signal_alphabet!r} vs "
+                f"快照 {e.config.signal_alphabet!r} —— 跨档不得续跑（R121 §3.1，特性非缺陷）"
+            )
+        # R127/C8：distribution 是**前提开关** ⇒ 续跑时必须与快照一致（否则前提被静默换掉）
+        if args.distribution is not None and (
+            str(args.distribution) != str(e.config.resources.distribution)
+        ):
+            raise SystemExit(
+                f"distribution 冲突：命令行 {args.distribution!r} vs "
+                f"快照 {e.config.resources.distribution!r} —— 前提开关不得跨批混用（R127 C8）"
+            )
+    # R121 §3.4：**指标口径必须随档位走**（"16"⇒16、"4"⇒4）。
+    # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
+    _n_alpha = SIGNAL_ALPHABET_STATES[str(e.config.signal_alphabet)]
 
-    fields = ["tick", "N", "g14", "g15", "trust",
+    fields = ["tick", "N", "g14", "g15", "g16", "trust",
+              # R135 第 -1 步①（2026-09-20）：g16 **分布矩**——
+              # 此前只有均值 ⇒ **判不了双峰**（双峰与单峰可同均值）。
+              # BC 双峰系数 = (skew²+1)/(kurt+3(n-1)²/((n-2)(n-3)))，故输出 std/skew/kurt/n。
+              # ⚠️ `g4` 是**搭车诊断列**：g16 与 g4（进食量倍率，强选择）的初始 LD 会把
+              #    g16 捎带上漂（实测 s42 Δg16=+0.095 全由此而来）⇒ 没有 g4 就无法区分
+              #    "g16 被选择" 与 "g16 被搭车"。详见 `sphere_engine._genome_summary`。
+              "g16_std", "g16_skew", "g16_kurt", "g4",
+              # R139/R140 派工 **P0 观测列**（2026-09-21）：
+              # ① `g16_h0..h9` = g16 的 **10-bin 直方图**（值域 [0,1] 均分）——
+              #    ⚠️ 没有它，**置换零分布无从下手** ⇒ 双峰永远不可判（E-030 的教训：
+              #    只存矩 ⇒ shuffle/重算全落空；且 BC 单用已证明是误判机器）。
+              # ② `mean_energy` —— E_prey 推算的最大不确定源（R140 §四），优先级最高。
+              # ③ 死因**时间序列**（累计值，差分可得区间）：看死因结构随相位怎么变。
+              # ④ `g3` 寿命基因均值 —— 验证"长寿命是否被选择"（maturity ∝ lifespan ⇒ 应有晚熟代价）。
+              *[f"g16_h{i}" for i in range(G16_BINS)],
+              "mean_energy", "d_starv", "d_pred", "d_old", "g3",
+              # R141 P0 派工单 §1.3（🔴 **列名锁定**——`tools/calib_solve.py` 按此消费，勿改名）
+              # 三腿 = g16 三分箱 lo/mid/hi；net = forage + pred − meta − move − attack（不含光合）
+              "g_lo_n", "g_lo_net_mean", "g_lo_net_p50", "g_lo_net_var",
+              "g_mid_n", "g_mid_net_mean", "g_mid_net_p50", "g_mid_net_var",
+              "g_hi_n", "g_hi_net_mean", "g_hi_net_p50", "g_hi_net_var",
+              "forage_in_mean", "pred_in_mean", "prey_energy_mean",
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
-              "resp_a", "resp_b", "oracle_ratio"]   # D-18⑥/D-8（累计口径）
+              "resp_a", "resp_b", "oracle_ratio",   # D-18⑥/D-8（累计口径）
+              "mem_bit_frac",   # R128 §五 步骤 0：mem_bit 取值分布的**时间序列**（累计口径）
+              # A′（2026-09-19）：**先证"测到了"**再判读 ⇒ 两个可观测性占比（累计口径）
+              "mem_grad_slots_frac", "mem_grad_trig_frac"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -259,22 +499,54 @@ def main() -> None:
         if t % args.log_interval == 0 or e.extinct:
             P = len(e._id)
             r = (e._flat[:P] // 120) if P else np.zeros(0)
+            # R140 P0：死因**时间序列**（累计口径，差分可得区间值）。
+            # 键名按 `DeathCause` 成员名归一化（枚举 str() 形如 "DeathCause.STARVATION"）。
+            _dct = {str(k).split(".")[-1].upper(): int(v)
+                    for k, v in e.death_cause_totals().items()}
             w.writerow({
                 "tick": t, "N": P,
                 "g14": round(float(e._genes[:P, 14].mean()), 4) if P else "",
                 "g15": round(float(e._genes[:P, 15].mean()), 4) if P else "",
+                # g16 AGGRESSION 均值（所有者 09-20 01:02 派工：测"攻击基因固化"假说，
+                # 捕食态内战振荡的基因层证据——此前 g16 从未入 CSV）
+                "g16": round(float(e._genes[:P, 16].mean()), 4) if P else "",
+                **({} if P < 3 else dict(zip(
+                    ("g16_std", "g16_skew", "g16_kurt"), _moments(e._genes[:P, 16])))),
+                "g4": round(float(e._genes[:P, 4].mean()), 4) if P else "",
+                **({} if P == 0 else dict(zip(
+                    (f"g16_h{i}" for i in range(G16_BINS)), _hist10(e._genes[:P, 16])))),
+                "mean_energy": round(float(e._energy[:P].mean()), 4) if P else "",
+                "d_starv": _dct.get("STARVATION", 0),
+                "d_pred": _dct.get("PREDATION", 0),
+                "d_old": _dct.get("OLD_AGE", 0),
+                "g3": round(float(e._genes[:P, 3].mean()), 4) if P else "",
+                # R141 P0：逐 tick 净收入统计（`_ec_flush` 每 tick 追加一行；n=0 ⇒ None ⇒ 写空）
+                **_ec_csv_row(e),
                 "trust": round(float(e._trust[:P].mean()), 4) if P else "",
                 "max_gen": int(e._max_generation),          # R77：历史高水位（不回落）
                 "max_gen_cur": max_generation_current(e),   # R77：当刻最深（只看存活）
                 "mean_row": round(float(r.mean()), 3) if P else "",
                 "polar_frac": round(float(((r <= 5) | (r >= 54)).mean()), 4) if P else "",
                 # D-16：
-                "codebook_conv": round(codebook_convergence(e._codebook[:P]), 4) if P else "",
+                # R121 §3.4：n_states 随 signal_alphabet（CSV 列口径）
+                "codebook_conv": (
+                    round(codebook_convergence(e._codebook[:P], n_states=_n_alpha), 4)
+                    if P else ""
+                ),
                 "pred_frac": round(predation_fraction(e.death_cause_totals()), 4),
                 # D-18⑥/D-8（累计口径；未开探针时恒 0）
                 "resp_a": e.signal_response_stats()["resp_a_exposure"],
                 "resp_b": e.signal_response_stats()["resp_b_delta"],
                 "oracle_ratio": e.oracle_stats()["oracle_return_ratio"],
+                # R128 §五 步骤 0：`mem_bit` 取值分布（累计占比 = mem_bit=1 的发射 / 状态编码发射）
+                # 非 "8" 档 ⇒ 空串（**未适用**，不是 0；同 R120 的 ratio n/a 口径）
+                # A′：朝向梯度的**可观测性**（非 orientation 模式 ⇒ 空串 = 未适用，不是 0）
+                "mem_grad_slots_frac": _mg_frac(e, "slots_frac"),
+                "mem_grad_trig_frac": _mg_frac(e, "trigger_frac"),
+                "mem_bit_frac": (
+                    e.alphabet_stats()["mem_bit_frac"]
+                    if e.alphabet_stats()["mem_bit_frac"] is not None else ""
+                ),
             })
             fh.flush()
             last = t
@@ -296,7 +568,17 @@ def main() -> None:
     reached = last >= args.ticks
     stable50k = bool(tail) and all(int(r["N"]) > 0 for r in tail) and last >= 10000
     dc = {str(k): int(v) for k, v in e.death_cause_totals().items()}
-    prov = prov_collect(e.config, rng_draws=int(e.rng_draws))
+    t0 = e.genome_t0_stats()          # R135 第 -1 步③：t=0 基线（搭车诊断）
+    # provenance（**启动采集值**为准；仅 rng_draws 用收尾值）
+    prov = dict(prov_start)
+    prov["rng_draws"] = int(e.rng_draws)
+    prov["collected_at"] = "run_start"
+    # 漂移自检：跑的过程中若有人推提交 ⇒ 记录双方，供事后归因（不失败，因为产物仍有效）
+    prov_end = prov_collect(e.config, python_info=False)
+    if prov_end.get("code_tree_sha256") != prov.get("code_tree_sha256"):
+        prov["code_tree_drift"] = True
+        prov["code_tree_at_finish"] = prov_end.get("code_tree_sha256")
+        prov["code_subtrees_at_finish"] = prov_end.get("code_subtrees")
     prov_validate(prov, require_sim_core=bool(e.config.simulation.use_sim_core))
     summary = {
         "manifest": {
@@ -319,6 +601,28 @@ def main() -> None:
             "learning_bottleneck": bool(e.config.info_structure.learning_bottleneck),
             "steels_alignment": bool(e.config.info_structure.steels_alignment),
             "reputation_weight": float(e.config.info_structure.reputation_weight),
+            # A′（2026-09-19）：开关**必须可读回**（C4）—— 冒烟时实测它曾缺席 ⇒
+            # 无法回答"跑的到底是哪个档"，与 R127 的 C8 前提对账同型缺陷。
+            "memory_gradient": str(e.config.info_structure.memory_gradient),
+            "memory_gradient_gain": float(e.config.info_structure.memory_gradient_gain),
+            # R135 第 -1 步③：**t=0 基线**（跨批可比 + 搭车诊断）
+            # 没有它，同一个 g16 读数在 A 批是"选择"、在 B 批是"搭车"，无法分辨。
+            "g16_t0_mean": round(t0["g16_mean"], 4),
+            "g16_t0_std": round(t0["g16_std"], 4),
+            "g4_t0_mean": round(t0["g4_mean"], 4),
+            "corr_g16_g4_t0": (round(t0["corr_g16_g4"], 4)
+                               if t0.get("corr_g16_g4") is not None else None),
+            # PC-1（R134）：S1/S2 开关必须可读回（C4——E-027 的 16 码事故同型预防）
+            "predation_enabled": bool(e.config.predation.enabled),
+            "soft_cap_target": float(e.config.population.soft_cap_target),
+            # R135 第3步 A-连续：凸度必须可读回（C4）
+            "forage_tradeoff_k": float(e.config.predation.forage_tradeoff_k),
+            # R141 P0-2：初始投放必须可读回（C4）
+            "init_g16_clusters": str(e.config.genome.init_g16_clusters),
+            # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
+            #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
+            "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),
+            "learning_bottleneck": bool(e.config.info_structure.learning_bottleneck),
             "use_sim_core": bool(e.config.simulation.use_sim_core),
             "distribution": e.config.resources.distribution,
             "initial_count": int(e.config.population.initial_count),
@@ -329,6 +633,11 @@ def main() -> None:
             "oracle_gain_multiplier": float(e.config.oracle.gain_multiplier),
             "is_calibration_arm": bool(e.config.oracle.is_calibration_arm),
             "signal_mode": str(e.config.signal_mode),
+            # R113/R121 C4 读回：字母表档位（必须与命令行/预注册一致；跨档不可比）
+            "signal_alphabet": str(e.config.signal_alphabet),
+            # R123/B② C4 读回：门控臂档位（仪器参数必须可核对，防"传了没生效"）
+            "oracle_gate_mode": str(e.config.oracle.gate_mode),
+            "oracle_gate_delta": str(e.config.oracle.gate_delta),
         },
         "result": {
             # ⚠️ 必须用引擎真实 tick，不能用 last（=最后一次【采样】的 tick）：
@@ -346,7 +655,12 @@ def main() -> None:
             "deaths_by_cause": dc,
             # D-16：终局判据值（区制分层用：饱和封顶 vs 捕食主导）
             "final_codebook_conv": (
-                round(codebook_convergence(e._codebook[: len(e._id)]), 4)
+                round(
+                    codebook_convergence(
+                        e._codebook[: len(e._id)], n_states=_n_alpha
+                    ),
+                    4,
+                )
                 if len(e._id) else 0.0
             ),
             "final_pred_frac": round(predation_fraction(dc), 4),
@@ -359,7 +673,20 @@ def main() -> None:
             # D-18 ⑥（R43）：三联报
             "signal_response": e.signal_response_stats(),
             # D-8 oracle（O-4/O-7）：manifest 必录 return_ratio
+            # （内含 R121 §4.1 的 food_band_true_sig 零机时 counter）
             "oracle": e.oracle_stats(),
+            # R121 §3：字母表档位 + §3.5 码值域守卫（bad_code_n 在 "4" 下必须恒 0）
+            "alphabet": e.alphabet_stats(),
+            # A′（2026-09-19）：记忆朝向梯度的可观测性计数（非 orientation ⇒ **None 未适用**）
+            "memory_gradient": e.memory_gradient_stats(),
+            # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图 + Δ + 真决斗三级拆分）
+            "cannibalism": e.cannibalism_stats(),
+            # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
+            "energy_ledger": e.energy_ledger(),
+            # R135 第 -1 步③：t=0 基因组基线（搭车诊断）
+            "genome_t0": {k: v for k, v in t0.items() if k != "gene_means"},
+            # R121 §4.2：记忆继承卫生（"生而知之"量化；纯观测）
+            "inheritance": e.inheritance_stats(),
         },
     }
     out.with_suffix(".summary.json").write_text(
