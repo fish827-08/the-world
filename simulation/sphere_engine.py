@@ -344,6 +344,10 @@ class SphereEngine:
         # R146/R149 L1 感知追击（本段 = [所有者·天平] 线 = B1）：两项逐候选 + 反退化计数
         "_seek_term_sum", "_seek_term_n", "_seek_flat_n", "_seek_zero_n",
         "_fear_term_sum", "_fear_term_n", "_fear_flat_n", "_fear_ind_n", "_l1_dec_n",
+        # S1 骨架（设计稿 §5.2 项 1/9）：尸体格数组 + 个体血条数组 + 空壳读数计数器
+        # ⚠️ __slots__ 是硬约束：新属性必须在此登记，否则运行期 AttributeError
+        "_corpse_energy", "_corpse_age", "_health",
+        "_corpse_eaten_n", "_wound_n", "_contest_n",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -502,6 +506,19 @@ class SphereEngine:
             raise NotImplementedError(
                 "L1/L2 尚未下沉 Rust：use_sim_core=True 时开启 l1_seek/l1_fear/l2_dash 会"
                 "**静默走旧路径**（= dash PR 的翻车形态）⇒ 硬报错。请设 use_sim_core=False。"
+            )
+        # ── H3（设计稿 §5.1 / §2.5）：尸体—食腐 + 血条开关开启时必须 **fail-loud** ────
+        # 本任务全程 Python 路径（§14.7：新机制/非确定性 ⇒ 强制 Python，不动 Rust）⇒
+        # use_sim_core=True 时开启 corpse/wound/contest 会**静默走旧路径**（开关开了
+        # 行为却不变 = 静默 no-op 的同族形态）⇒ 构造期硬报错，禁止静默忽略。
+        _cwc = getattr(config, "corpse_wound", None)
+        _cw_any = bool(getattr(_cwc, "corpse_enabled", False)) or bool(
+            getattr(_cwc, "wound_enabled", False)) or bool(getattr(_cwc, "contest_enabled", False))
+        if _scfg0.use_sim_core and _cw_any:
+            raise NotImplementedError(
+                "尸体—食腐/血条尚未下沉 Rust（本任务全程 Python 路径，设计稿 §5.1）⇒ "
+                "use_sim_core=True 时开启 corpse_enabled/wound_enabled/contest_enabled 会"
+                "**静默走旧路径** ⇒ 硬报错。请设 use_sim_core=False。"
             )
 
         n = config.population.initial_count
@@ -760,6 +777,19 @@ class SphereEngine:
         self._over_cap_seen = 0
         # R141/R138：真决斗三级拆分（键预置 ⇒ 输出稳定，不随是否有事件而缺列）
         self._duel = Counter({k: 0 for k in DUEL_KEYS})
+
+        # ---- S1 骨架（设计稿 §5.2 项 1）：尸体格数组 + 个体血条数组 ----
+        # 🔴 机制一律**不接线**（S2/S3 才接线）：本段只建数据结构 + 空壳读数，
+        #    默认全关 ⇒ 与旧行为逐位一致（C7 digest 钉死 (573985, 8171.692943)）。
+        # 格数组：corpse_energy = 每格尸体能量（初值 0）；corpse_age = 每格尸体存续 tick。
+        self._corpse_energy = np.zeros(self.world.n_cells, dtype=np.float64)
+        self._corpse_age = np.zeros(self.world.n_cells, dtype=np.int64)
+        # 个体数组：health ∈ [0,1]，初值 1.0（H1）；随生死扩容/压缩（与 _energy 同节拍）。
+        self._health = np.ones(n, dtype=np.float64)
+        # S1 空壳读数计数器（设计稿 §5.2 项 9；值可为 0 —— S2/S3 接线后才累加）
+        self._corpse_eaten_n = 0
+        self._wound_n = 0
+        self._contest_n = 0
 
     def cannibalism_stats(self) -> dict:
         """互捕结构量化（R135 第 -1 步④；F「去互捕」的前置证据）。
@@ -1078,6 +1108,59 @@ class SphereEngine:
                     "（扣分）。seek_flat_frac 分母 = 求值个体数 dec_n；fear_flat_frac 分母 = "
                     "danger 非空的个体数（fear_applied_ind_frac 即其占比）。flat = 该项对该个体"
                     "跨候选取同值 ⇒ **逐位 no-op**（R148-1 形态）。",
+        }
+
+    def corpse_probe(self) -> dict:
+        """尸体—食腐层读数（S1 骨架；设计稿 §5.2 项 9）。
+
+        🔴 **S1 阶段 = 空壳**（值可为 0，与 L1/L2 的 None 口径不同 —— 设计稿 §5.2 明写
+        "S1 先建空壳，值可为 0"）。`corpse_enabled=False` 时 corpse_total 恒 0（格数组
+        恒零），**不代表"测出 0"而是"未接线"** —— S2 接线后才有真实读数。
+        """
+        cwc = getattr(self.config, "corpse_wound", None)
+        return {
+            "corpse_enabled": bool(getattr(cwc, "corpse_enabled", False)),
+            "corpse_energy_frac": float(getattr(cwc, "corpse_energy_frac", 0.9)),
+            "corpse_decay_ticks": int(getattr(cwc, "corpse_decay_ticks", 600)),
+            "corpse_to_plant_frac": float(getattr(cwc, "corpse_to_plant_frac", 0.5)),
+            "corpse_patch_boost": float(getattr(cwc, "corpse_patch_boost", 0.5)),
+            "corpse_cap_per_cell": int(getattr(cwc, "corpse_cap_per_cell", 3)),
+            "scav_gate": float(getattr(cwc, "scav_gate", 0.5)),
+            "scav_s": float(getattr(cwc, "scav_s", 2.0)),
+            "corpse_total": round(float(self._corpse_energy.sum()), 6),
+            "corpse_eaten": int(self._corpse_eaten_n),
+            "corpse_age_max": (int(self._corpse_age.max())
+                               if self._corpse_age.size else 0),
+            "note": "S1 空壳：机制未接线 ⇒ corpse_total/eaten 恒 0；S2 接线后才有读数"
+                    "（设计稿 §5.2 项 9 允许值可为 0）",
+        }
+
+    def wound_probe(self) -> dict:
+        """血条—受伤层读数（S1 骨架；设计稿 §5.2 项 9）。
+
+        🔴 **S1 阶段 = 空壳**（值可为 0）：`wound_enabled=False` ⇒ wound_n/contest_n 恒 0；
+        health_mean 恒 1.0（初值，未接线）。S2/S3 接线后才有真实读数。
+        """
+        cwc = getattr(self.config, "corpse_wound", None)
+        P = len(self._id)
+        h = self._health[:P]
+        return {
+            "wound_enabled": bool(getattr(cwc, "wound_enabled", False)),
+            "contest_enabled": bool(getattr(cwc, "contest_enabled", False)),
+            "wound_base": float(getattr(cwc, "wound_base", 0.35)),
+            "wound_heal_rate": float(getattr(cwc, "wound_heal_rate", 0.001)),
+            "wound_heal_energy_cost": float(getattr(cwc, "wound_heal_energy_cost", 0.05)),
+            "holder_adv": float(getattr(cwc, "holder_adv", 0.3)),
+            "escalation_gap": float(getattr(cwc, "escalation_gap", 0.25)),
+            "contest_cost_energy": float(getattr(cwc, "contest_cost_energy", 0.5)),
+            "w_fear_health": float(getattr(cwc, "w_fear_health", 0.5)),
+            "need_aggression_k": float(getattr(cwc, "need_aggression_k", 0.5)),
+            "health_mean": (round(float(h.mean()), 6) if P else None),
+            "health_low_frac": (round(float(np.mean(h < 0.5)), 6) if P else None),
+            "wound_n": int(self._wound_n),
+            "contest_n": int(self._contest_n),
+            "note": "S1 空壳：机制未接线 ⇒ wound_n/contest_n 恒 0、health_mean 恒 1.0；"
+                    "S2/S3 接线后才有真实读数（设计稿 §5.2 项 9 允许值可为 0）",
         }
 
     def genome_t0_stats(self) -> dict:
@@ -2291,6 +2374,8 @@ class SphereEngine:
             self._flat = np.concatenate([self._flat, self._flat[ri]])
             self._energy = np.concatenate([self._energy, child_energy])
             self._stomach = np.concatenate([self._stomach, child_stomach])
+            # S1 骨架：血条随子代扩容（初值 1.0，H1）；机制不接线，仅保数组同长
+            self._health = np.concatenate([self._health, np.ones(K, dtype=np.float64)])
             self._genes = np.concatenate([self._genes, child_genes])
             self._age = np.concatenate([self._age, np.zeros(K, dtype=np.int64)])
             self._repro_cooldown = np.concatenate(
@@ -2360,6 +2445,10 @@ class SphereEngine:
             )
             self._stomach = np.concatenate(
                 [self._stomach[:P][keep], self._stomach[P:]]
+            )
+            # S1 骨架：血条随死亡压缩（与 _energy 同节拍）；机制不接线，仅保数组同长
+            self._health = np.concatenate(
+                [self._health[:P][keep], self._health[P:]]
             )
             self._genes = np.concatenate([self._genes[:P][keep], self._genes[P:]])
             self._age = np.concatenate([self._age[:P][keep], self._age[P:]])
@@ -3099,6 +3188,14 @@ class SphereEngine:
         data["fruit_charge"] = self._fruit_charge[:P].copy()
         data["seed_carried"] = self._seed_carried[:P].copy()
 
+        # --- 3.6 S1 骨架：尸体格数组 + 个体血条数组（v3 追加键；旧快照加载时回退零值/初值）---
+        data["corpse_energy"] = self._corpse_energy.copy()  # (n_cells,)
+        data["corpse_age"] = self._corpse_age.copy()        # (n_cells,)
+        data["health"] = self._health[:P].copy()            # (P,)
+        data["corpse_eaten_n"] = np.array(self._corpse_eaten_n)
+        data["wound_n"] = np.array(self._wound_n)
+        data["contest_n"] = np.array(self._contest_n)
+
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
         data["resource_capacity"] = self.resources._capacity.copy()
@@ -3275,6 +3372,27 @@ class SphereEngine:
         engine._fruit_grid = data["fruit_grid"].copy()
         engine._fruit_charge = data["fruit_charge"].copy()
         engine._seed_carried = data["seed_carried"].copy()
+
+        # --- 7.6 恢复 S1 骨架数组（旧快照缺键 ⇒ 回退零值/初值，不报错）---
+        # 格数组恒 (n_cells,)；health 恒 (P,)，P = len(_id)（恢复后 _id 已就位）。
+        engine._corpse_energy = (
+            data["corpse_energy"].copy()
+            if "corpse_energy" in data
+            else np.zeros(engine.world.n_cells, dtype=np.float64)
+        )
+        engine._corpse_age = (
+            data["corpse_age"].copy()
+            if "corpse_age" in data
+            else np.zeros(engine.world.n_cells, dtype=np.int64)
+        )
+        engine._health = (
+            data["health"].copy()
+            if "health" in data
+            else np.ones(len(engine._id), dtype=np.float64)
+        )
+        engine._corpse_eaten_n = int(data["corpse_eaten_n"]) if "corpse_eaten_n" in data else 0
+        engine._wound_n = int(data["wound_n"]) if "wound_n" in data else 0
+        engine._contest_n = int(data["contest_n"]) if "contest_n" in data else 0
 
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()
