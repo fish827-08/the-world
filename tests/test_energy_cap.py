@@ -112,11 +112,15 @@ def test_cap_on_enforces_energy_bound():
 
 
 def test_cap_on_probe_is_zero():
-    """R145 补丁②的**活体探针**：钳制后统计的越限占比应恒 0。"""
+    """R145 补丁②的**活体探针**：钳制后统计的越限占比应恒 0。
+
+    R147 §二 发现 2：该字段已改名 `cap_residual_frac`（**仪器**口径）——
+    与新方法 `over_cap_frac()`（**现象**口径）**语义正交**，勿混读。
+    """
     e = _engine(cap=True, ticks=300)
     pr = e.energy_cap_probe()
     assert pr["enabled"] is True
-    assert pr["frac_max"] == 0.0 and pr["over_cap_seen"] == 0
+    assert pr["cap_residual_frac"] == 0.0 and pr["over_cap_seen"] == 0
 
 
 def test_cap_off_probe_reports_disabled():
@@ -126,15 +130,48 @@ def test_cap_off_probe_reports_disabled():
 
 
 def test_state_bounds_check_clean():
-    """边界自检（R145 补丁③）：正常运行时三类违例都应为 0。"""
+    """边界自检（R145 补丁③）：开档时仪器口径应无残差。"""
     b = _engine(cap=True, ticks=300).state_bounds_check()
     assert b["n"] > 0
-    assert b["energy_over_cap"] == 0
+    assert b["cap_residual_n"] == 0
+    assert b["energy_checked"] is True
     assert b["age_negative"] == 0
     # ⚠️ `stomach_over_cap` **不保证 0**：进食与捕食两条路径的胃容量口径不同
     #    （后者是前者的约 1.6 倍）⇒ 捕食后可能超过"进食口径"的上限。这是**既有行为**，
     #    自检如实报两个口径；此处只锚定"捕食口径必须无越限"。
     assert b["stomach_over_cap_pred"] == 0, "捕食口径的胃容量都被突破了 ⇒ 真异常"
+
+
+def test_bounds_cap_off_reports_none_not_zero():
+    """🔴 R147 §二 发现 1：关档 ⇒ **None（未检查）**，绝不可报 0。
+
+    事故形态：关档时 `cap_residual_n` 若报 0，读者会读成"能量没问题"，
+    而同一 run 的 CSV 写着 88.7% 个体超限 ⇒ 两个数字被当成一个意思。
+    """
+    b = _engine(cap=False, ticks=300).state_bounds_check()
+    assert b["energy_checked"] is False
+    assert b["cap_residual_n"] is None, (
+        f"关档报了 {b['cap_residual_n']!r} ⇒ 把'没测'写成了'测出零'（R147 §二 违规）")
+    assert b["energy_cap_enabled"] is False
+    # 其余三项与开关无关，仍应是可用的整数（不是 None）
+    assert isinstance(b["stomach_over_cap"], int) and isinstance(b["age_negative"], int)
+
+
+def test_over_cap_frac_is_orthogonal_to_cap_residual():
+    """🔴 R147 §二 发现 2：**现象**与**仪器**两个口径必须能同时读到不同值。
+
+    关档（无钳制）⇒ 囤积普遍（`over_cap_frac` 高），而仪器未检查（`cap_residual_n=None`）；
+    开档 ⇒ 仪器无残差（0），现象也应为 0。若两者被人读成同一个数就会误判。
+    """
+    off = _engine(cap=False, ticks=300)
+    b_off, f_off = off.state_bounds_check(), off.over_cap_frac()
+    assert b_off["cap_residual_n"] is None
+    assert f_off is not None and 0.0 <= f_off <= 1.0
+
+    on = _engine(cap=True, ticks=300)
+    b_on, f_on = on.state_bounds_check(), on.over_cap_frac()
+    assert b_on["cap_residual_n"] == 0
+    assert f_on == 0.0, "开档仍有个体超限 ⇒ 钳制失效"
 
 
 # ---------------------------------------------------------------- ③ 指纹/纪元

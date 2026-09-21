@@ -481,8 +481,9 @@ def main() -> None:
               "g_mid_n", "g_mid_net_mean", "g_mid_net_p50", "g_mid_net_var",
               "g_hi_n", "g_hi_net_mean", "g_hi_net_p50", "g_hi_net_var",
               "forage_in_mean", "pred_in_mean", "prey_energy_mean",
-              # R145 补丁②：封顶活体探针（逐 tick 越限占比，正常恒 0）
-              "frac_over_cap",
+              # R145 补丁②：囤积**现象**占比（R147 §二 发现 2 改名为 over_cap_frac，
+              # 以区别于**仪器**口径 cap_residual_frac —— 两者正交，勿混读）
+              "over_cap_frac",
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
@@ -537,8 +538,8 @@ def main() -> None:
                 "d_pred": _dct.get("PREDATION", 0),
                 "d_old": _dct.get("OLD_AGE", 0),
                 "g3": round(float(e._genes[:P, 3].mean()), 4) if P else "",
-                "frac_over_cap": (round(float(np.count_nonzero(e._energy[:P] > e.config.organisms.max_energy) / P), 8)
-                                  if P else ""),
+                # 囤积**现象**占比（单一出处 = 引擎 `over_cap_frac()`；P=0 ⇒ None ⇒ 写空）
+                "over_cap_frac": ("" if e.over_cap_frac() is None else e.over_cap_frac()),
                 # R141 P0：逐 tick 净收入统计（`_ec_flush` 每 tick 追加一行；n=0 ⇒ None ⇒ 写空）
                 **_ec_csv_row(e),
                 "trust": round(float(e._trust[:P].mean()), 4) if P else "",

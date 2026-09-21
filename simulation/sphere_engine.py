@@ -844,17 +844,33 @@ class SphereEngine:
     def state_bounds_check(self) -> dict:
         """状态量边界自检（R145 制度补丁③：Pre-Flight 增"状态量边界检查"）。
 
-        覆盖 `energy ≤ max_energy`（**仅封顶开时**）/ `stomach ≤ 胃容量` / `age ≥ 0`。
-        返回违例计数（**全 0 = 健康**）；供 a4 每 tick 或收尾调用。
+        🔴 **R147 §二 发现 1 修正（2026-09-21 22:10 裁定）**：关档时**不得报 0**。
+            钳制关闭 ⇒ `energy ≤ max_energy` 这条不变量**根本不存在** ⇒ 检查**未执行**
+            ⇒ 必须报 **`None`（"没测"）**，不是 `0`（"测出零"）。否则有人只读
+            `cap_residual_n = 0` 会得出"能量没问题"，而同一 run 的 CSV 明写
+            **88.7% 个体超限** —— 这正是 R120 纪律的同族
+            （`mem_bit_frac` 非 `"8"` 档返回 `None` 而非 0 的先例）。
+            同时给出 `energy_checked` 布尔，让"未检查"是**显式**的而不是靠推断。
+
+        ⚠️ **命名纪律（R147 §二 发现 2）**：本函数的 `cap_residual_n` 查的是**仪器**
+            （钳制后仍越限？= 钳制失效报警），CSV 的 `over_cap_frac` 查的是**现象**
+            （囤积规模）。两者**正交**，故名字必须区分（旧名 `energy_over_cap` 与
+            `frac_over_cap` 会被读成同一个东西）。
         """
         P = len(self._id)
         ocfg = self.config.organisms
-        out = {"n": int(P), "energy_over_cap": 0, "stomach_over_cap": 0, "age_negative": 0,
-               "energy_cap_enabled": bool(ocfg.energy_cap_enabled)}
+        cap_on = bool(ocfg.energy_cap_enabled)
+        out = {"n": int(P),
+               "cap_residual_n": None,        # 关档 ⇒ None（**未检查**，非 0）
+               "energy_checked": cap_on,
+               "stomach_over_cap": 0, "stomach_over_cap_pred": 0, "age_negative": 0,
+               "energy_cap_enabled": cap_on}
         if P == 0:
+            out["note"] = "P=0：无可检个体"
             return out
-        if ocfg.energy_cap_enabled:
-            out["energy_over_cap"] = int(np.count_nonzero(self._energy[:P] > ocfg.max_energy))
+        if cap_on:
+            out["cap_residual_n"] = int(
+                np.count_nonzero(self._energy[:P] > ocfg.max_energy))
         # 🔴 自检第一个战果（2026-09-21，`state_bounds_check` 首跑即抓到）：
         #    **胃容量在两个路径上口径不同且从未对齐** ——
         #      进食路径（:859）        `max_energy/eat_eff × 0.5 × cap_mult`（均值 ≈62.5）
@@ -869,17 +885,44 @@ class SphereEngine:
         out["stomach_over_cap_pred"] = int(
             np.count_nonzero(self._stomach[:P] > stomach_cap_pred + 1e-9))
         out["age_negative"] = int(np.count_nonzero(self._age[:P] < 0))
-        out["note"] = ("stomach_over_cap 用**进食**口径（×0.5×cap_mult）；"
-                       "stomach_over_cap_pred 用**捕食**口径（max_energy/eat_eff）——"
-                       "两口径不同是既有行为，不代表双路径漂移")
+        out["note"] = (
+            "cap_residual_n = **仪器**（钳制后仍越限 ⇒ 失效报警；关档为 None=未检查）；"
+            "囤积规模见 `over_cap_frac()`（**现象**，两者正交）。"
+            "stomach_over_cap 用**进食**口径（×0.5×cap_mult）；"
+            "stomach_over_cap_pred 用**捕食**口径（max_energy/eat_eff）——"
+            "两口径不同是既有行为，不代表双路径漂移")
         return out
 
     def energy_cap_probe(self) -> dict:
-        """能量封顶的活体探针读数（R145 补丁②）：`frac_max` **应恒 0**（开时）。"""
+        """能量封顶的活体探针读数（R145 补丁②）。
+
+        `cap_residual_frac` **应恒 0**（开档时）。⚠️ 它是**仪器**健康度
+        （钳制后仍越限的比例），**不是**囤积规模 —— 后者见 `over_cap_frac()`
+        （R147 §二 发现 2：两个"over_cap"语义正交，名字必须区分）。
+        """
         return {"enabled": bool(self.config.organisms.energy_cap_enabled),
-                "frac_max": round(float(self._frac_over_cap_max), 8),
+                "cap_residual_frac": round(float(self._frac_over_cap_max), 8),
                 "over_cap_seen": int(self._over_cap_seen),
-                "note": "钳制**之后**统计 ⇒ 开时正常恒 0；非 0 即钳制失效（报警）"}
+                "note": "仪器口径：钳制**之后**统计 ⇒ 开档正常恒 0；非 0 即钳制失效（报警）。"
+                        "囤积**现象**规模（含关档时的 0.8873 那类读数）见 over_cap_frac()"}
+
+    def over_cap_frac(self) -> float | None:
+        """囤积**现象**：当前个体中 `energy > max_energy` 的占比（R147 §二 发现 2）。
+
+        与 `energy_cap_probe().cap_residual_frac`（**仪器**）正交：
+          · 本方法 = "囤积有多普遍"（关档时即 88.7% 那类读数）
+          · 那个   = "钳制有没有生效"（关档时无意义）
+        与 `state_bounds_check().cap_residual_n` 的关系：两者分子同源（超限个体数），
+          但**分母/时点不同** —— 本方法按**当刻** P 归一，且**不**随开关变语义。
+        `P=0` ⇒ **None**（未观测，非 0）。
+        """
+        P = len(self._id)
+        if P == 0:
+            return None
+        n_over = int(np.count_nonzero(
+            self._energy[:P] > self.config.organisms.max_energy))
+        return round(n_over / P, 8)
+
 
     def genome_t0_stats(self) -> dict:
         """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
