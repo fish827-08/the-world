@@ -504,6 +504,8 @@ class SphereEngine:
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
+        # 能量封顶（修复囤积 bug：之前没有钳制，个体可无限囤积能量，稀释选择压力）
+        self._energy = np.minimum(self._energy, self.config.organisms.max_energy)
         # D-17 ⑤：每 tick 末给"首次进入窗口"的存活个体记观测（含死亡个体靠 _id 账本留存）
         if self._measure_resp:
             self._observe_selection_cohort()
