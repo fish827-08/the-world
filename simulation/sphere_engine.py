@@ -341,6 +341,9 @@ class SphereEngine:
         "_run_mover_n", "_run_dash_n", "_mover_n_by_box", "_dash_n_by_box",
         "_mob_sum", "_mob_sq_sum", "_mob_n", "_agef_sum",
         "_inelig_pop_n", "_pop_n", "_g16_le_gate_n",
+        # R146/R149 L1 感知追击（本段 = [所有者·天平] 线 = B1）：两项逐候选 + 反退化计数
+        "_seek_term_sum", "_seek_term_n", "_seek_flat_n", "_seek_zero_n",
+        "_fear_term_sum", "_fear_term_n", "_fear_flat_n", "_fear_ind_n", "_l1_dec_n",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -730,6 +733,19 @@ class SphereEngine:
         self._inelig_pop_n = 0                # Σ（处于不可冲刺格的人口）——**人口**口径
         self._pop_n = 0                       # Σ 人口（同时用于 frac(g16≤gate)）
         self._g16_le_gate_n = 0               # Σ 1[g16 ≤ attack_gene_gate]
+        # R146/R149 L1 读数（B4；本段 = [所有者·天平] 线 = B1）。**l1_seek/l1_fear 全关时
+        #   全部不累加** ⇒ `l1_probe()` 返回 None（"未适用"），不是 0（R120/§五.12 口径铁律）。
+        #   ⚠️ `*_flat_n` 是**反退化计数**：某项对某个体**所有候选取同值** ⇒ 该项对该个体是
+        #     逐位 no-op（R148-1 的形态）⇒ 段一必报"跨候选反退化占比"。
+        self._seek_term_sum = 0.0             # Σ L1a 项（按候选）
+        self._seek_term_n = 0                 # L1a 候选数（分母）
+        self._seek_flat_n = 0                 # 其中"跨候选取同值"的个体数
+        self._seek_zero_n = 0                 # 其中"项恒为 0"的个体数（= **自熄**：邻域无猎物代理）
+        self._fear_term_sum = 0.0             # Σ L1b 项（按候选；**符号为负** = 扣分）
+        self._fear_term_n = 0                 # L1b 候选数（分母）
+        self._fear_flat_n = 0                 # 其中"跨候选取同值"的个体数（含 danger=nb 全占）
+        self._fear_ind_n = 0                  # L1b 真正施加的个体数（danger 非空）
+        self._l1_dec_n = 0                    # L1 求值的个体数（分母；len(nb)==1 已提前 continue）
         # R141 P0：分通道能量记账（5 通道 × 全球/三分箱）。见 `energy_channel_stats`。
         self._ec_global = np.zeros(EC_N, dtype=np.float64)
         self._ec_box = np.zeros((3, EC_N), dtype=np.float64)
@@ -1022,6 +1038,46 @@ class SphereEngine:
                     "mob_eff = g18(DEFENSE→MOBILITY) × age_factor；"
                     "nondash_cell_pop_frac = Σ(处于不可冲刺格的人口)/Σ人口；"
                     "frac_g16_le_gate = Σ1[g16 ≤ attack_gene_gate]/Σ人口（**判读前置门**用）",
+        }
+
+    def l1_probe(self) -> dict | None:
+        """L1 感知追击层读数（R150 B4；本段 = [所有者·天平] 线 = B1）。
+
+        🔴 `l1_seek`/`l1_fear` **全关** ⇒ **None（未适用）**，**不是 0**
+        （R120 / §五.12 口径铁律："没测" ≠ "测出零"）。
+
+        两个**反退化**占比是段一必报项（R148-1 的形态检查）：
+        `*_flat_frac` = "某项对该个体**所有候选取同值**"的个体占比 —— 逐位 no-op 的比例。
+        ⇒ ≈1.0 意味着该项其实一行行为都没改；≈0 表示逐候选真的在起作用。
+        """
+        sim0 = self.config.simulation
+        l1_seek_on, l1_fear_on = bool(sim0.l1_seek), bool(sim0.l1_fear)
+        if not (l1_seek_on or l1_fear_on):
+            return None
+        dec_n = int(self._l1_dec_n)
+        seek_n, fear_n = int(self._seek_term_n), int(self._fear_term_n)
+        fear_ind = int(self._fear_ind_n)
+        return {
+            "l1_seek": l1_seek_on,
+            "l1_fear": l1_fear_on,
+            "w_seek_max": float(sim0.w_seek_max),
+            "w_fear": float(sim0.w_fear),
+            "l1_prey_mode": str(sim0.l1_prey_mode),
+            "seek_term_mean": (round(self._seek_term_sum / seek_n, 6) if seek_n else None),
+            "seek_term_n": seek_n,
+            "seek_flat_frac": (round(self._seek_flat_n / dec_n, 6) if dec_n else None),
+            # 🔴 自熄占比：`lowagg_field` 在邻域全为 0 ⇒ 该项恒 0 ⇒ **逐位 no-op**。
+            #    预注册允许结局「**猎物池枯竭**」（设计稿 §3.4）⇒ 它高**不等于**"没接线"。
+            "seek_zero_frac": (round(self._seek_zero_n / dec_n, 6) if dec_n else None),
+            "fear_term_mean": (round(self._fear_term_sum / fear_n, 6) if fear_n else None),
+            "fear_term_n": fear_n,
+            "fear_applied_ind_frac": (round(fear_ind / dec_n, 6) if dec_n else None),
+            "fear_flat_frac": (round(self._fear_flat_n / fear_ind, 6) if fear_ind else None),
+            "dec_n": dec_n,
+            "note": "seek/fear_term_mean = 按**候选**求均值（分母 = 候选数）；fear 项**符号为负**"
+                    "（扣分）。seek_flat_frac 分母 = 求值个体数 dec_n；fear_flat_frac 分母 = "
+                    "danger 非空的个体数（fear_applied_ind_frac 即其占比）。flat = 该项对该个体"
+                    "跨候选取同值 ⇒ **逐位 no-op**（R148-1 形态）。",
         }
 
     def genome_t0_stats(self) -> dict:
@@ -1656,6 +1712,33 @@ class SphereEngine:
                     self._mob_sq_sum += float(np.dot(mob_eff, mob_eff))
                     self._mob_n += int(Nm)
                     self._agef_sum += float(age_factor.sum())
+                # ── R146/R149 L1（本段 = [所有者·天平] 线 = B1）：每 tick 预计算 ──────
+                # 信息自洽（派工单 §3.2）：只用**1 圈内可直读**的量。`occ` = 移动前占用
+                # （:1425 已算好，与信号段共用，0 额外成本）；两个场是**格域聚合** ⇒ 逐候选
+                # 直接索引即得，**不需要**任何"候选格的邻域聚合"（那要距离-2 信息 ⇒ 越界）。
+                # 关档：整段不执行（无 RNG、无状态改变）⇒ H1 逐位等价。
+                _sim0 = self.config.simulation
+                _l1_seek_on = bool(_sim0.l1_seek)
+                _l1_fear_on = bool(_sim0.l1_fear)
+                _l1_on = _l1_seek_on or _l1_fear_on
+                if _l1_on:
+                    _gate0 = float(self.config.predation.attack_gene_gate)  # 引用同一常量，不抄字面量
+                    if _l1_seek_on:
+                        if str(_sim0.l1_prey_mode) == "any":
+                            # E′ 归因臂：猎物代理 = **任意占格者**（去掉低 g16 过滤）——
+                            # 唯一能回答"分化是不是那个过滤造出来的"的对照（不进合取）
+                            _seek_field = occ.astype(np.float64)
+                        else:
+                            _low = genes[:P, Gene.AGGRESSION] <= _gate0
+                            _seek_field = np.bincount(
+                                self._flat[:P][_low], minlength=self.world.n_cells
+                            ).astype(np.float64)
+                    if _l1_fear_on:
+                        # 威胁强度：只取**超过门槛**的部分（弱 g16 个体不构成威胁）
+                        _thr = np.maximum(0.0, genes[:P, Gene.AGGRESSION] - _gate0)
+                        _agg_field = np.bincount(
+                            self._flat[:P], weights=_thr, minlength=self.world.n_cells
+                        )
                 ifcfg3 = self.config.info_structure
                 d2_asym = ifcfg3.enabled and ifcfg3.perception_radius == 4
                 d2_noise = ifcfg3.enabled and ifcfg3.perception_noise > 0
@@ -1718,6 +1801,42 @@ class SphereEngine:
                             dtype=np.float64,
                         )
                         score = score + 0.4 * perc * interp
+                    # ── R146/R149 L1 两项（**逐候选**；本段 = [所有者·天平] 线 = B1）─────
+                    # 🔴 R148-1 认账：若某项对**所有候选**取同值 ⇒ `argmax` 逐位不变、
+                    #    `softmax` 数学无效应（`[实测]` 偏差 9.6e-15 / 20 万次 0 翻转）
+                    #    ⇒ 等于"接了却一行行为没改"。故两项都按**候选格**求值，并用
+                    #    `_seek_flat_n`/`_fear_flat_n` 计"跨候选取同值"的个体（段一必报）。
+                    if _l1_on:
+                        _g16i = float(genes[idx, Gene.AGGRESSION])
+                        self._l1_dec_n += 1
+                        if _l1_seek_on:
+                            # L1a 追猎：朝**低攻击性个体（猎物代理）**密集的候选格走
+                            _sk = (_sim0.w_seek_max * float(genes[idx, Gene.DIET])
+                                   * perc * _g16i) * np.minimum(_seek_field[nb], 1.0)
+                            score = score + _sk
+                            self._seek_term_sum += float(_sk.sum())
+                            self._seek_term_n += int(_sk.size)
+                            if float(_sk.max() - _sk.min()) < 1e-12:
+                                self._seek_flat_n += 1
+                                # 细分：**恒为 0** = 自熄（邻域无猎物代理），与"取同值但非零"是
+                                # 两种不同诊断（前者对应预注册的「猎物池枯竭」结局）⇒ 分开记
+                                if float(np.abs(_sk).max()) < 1e-12:
+                                    self._seek_zero_n += 1
+                        if _l1_fear_on:
+                            # L1b 恐惧：**背向**威胁（复用 `_memory_orientation_cos`，与 Rust 逐字同式）
+                            # ⚠️ danger == nb（每个候选格都有威胁）⇒ `cos ≡ 1` ⇒ **逐位 no-op**
+                            #    ⇒ 由 `_fear_flat_n` 计数暴露（R149-4 的反退化断言落点）
+                            _danger = nb[_agg_field[nb] > 0.0]
+                            if len(_danger) > 0:
+                                _cos = self._memory_orientation_cos(
+                                    int(self._flat[idx]), nb, _danger)
+                                _fe = (_sim0.w_fear * perc * (1.0 - _g16i)) * _cos
+                                score = score - _fe
+                                self._fear_term_sum -= float(_fe.sum())   # 记**施加之量**（负）
+                                self._fear_term_n += int(_fe.size)
+                                self._fear_ind_n += 1
+                                if float(_fe.max() - _fe.min()) < 1e-12:
+                                    self._fear_flat_n += 1
                     # D2-3 softmax：温度采样替代argmax（tau=0时回退argmax）
                     if d2_softmax:
                         exp_s = np.exp((score - score.max()) / ifcfg3.softmax_tau)

@@ -201,6 +201,18 @@ class SimulationConfig:
     # ⚠️ H3：置 True 且 `use_sim_core=True` ⇒ **构造期直接抛 NotImplementedError**（fail-loud，
     #    不并进 `_d2_asym` —— 那是"静默换路径"，正是 dash PR 的翻车形态）。
     l2_dash: bool = False
+    # ===== L1 感知追击（R146/R149；**由 [所有者·天平] 线添加** = B1）=====
+    # 🔴 默认全关 = **旧行为**（关档不消费任何 L1 字段 ⇒ H1 逐位等价）。
+    # ⚠️ H3：置 True 且 `use_sim_core=True` ⇒ **构造期直接抛**（同 `l2_dash`，不静默换路径）。
+    # ⚠️ 两项必须**逐候选格**求值（R148-1 认账：逐个体标量 ⇒ 全候选取同值 ⇒ argmax 逐位
+    #    不变、softmax 数学无效应 = "接了却一行行为没改"的静默 no-op）。
+    l1_seek: bool = False           # L1a 追猎：`w_seek_max × g17`（g17 = DIET，语义变更见 §十三 13.2）
+    l1_fear: bool = False           # L1b 恐惧：固定权重 `w_fear`（**无自由度**；方向由物理给出）
+    w_seek_max: float = 0.5         # L1a 权重**上限**（预注册：0.5(B)/0.25(C) 两档都过才算）
+    w_fear: float = 0.5             # L1b 固定权重（D 臂 = 0，作"fear 是否存在"的操作检查）
+    # 猎物代理场口径（**不是"可食集"** —— 引擎里邻格**任何人**皆可被吃，故须自解释命名）：
+    #   "lowagg" = `Σ 1[g16 ≤ attack_gene_gate]`（低攻击性个体代理）｜"any" = 任意占格者（E′ 归因臂）
+    l1_prey_mode: str = "lowagg"
     social_move_weight: float = 1.0 # 移动决策群居项权重（D0 修复：densities 按邻居上限归一化后与感知项同量级，此项可扫描 0~2）
     stay_prob: float = 0.0          # 停驻率（战役参数：move_prob × (1-stay_prob)，0=旧行为每tick必移判定；配合D2感知半径4=等效扩世界）
 

@@ -92,6 +92,18 @@ def _ec_csv_row(e) -> dict:
     return out
 
 
+def _probe_csv(probe: dict | None, key: str):
+    """L1/L2 探针读数进 CSV 列（R150 B4）。
+
+    🔴 探针为 `None`（开关关 ⇒ **未适用**）或该键为 `None`（分母为 0）⇒ **空串**，
+    **不是 0**（R120 / §五.12 口径铁律："没测" ≠ "测出零"）。
+    """
+    if not probe:
+        return ""
+    v = probe.get(key)
+    return "" if v is None else v
+
+
 def _moments(x) -> tuple[float, float, float]:
     """样本标准差 / 偏度 / **超额**峰度（矩法）—— BC 双峰系数的输入（R135 第 -1 步①）。
 
@@ -140,7 +152,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           # R144/R145：能量封顶开关（默认 False = 与 E-017~E-031/calib1 可比）
           energy_cap: bool = False,
           # R145 §七.1：光合产能覆盖（`photo_max`；None = 不覆盖）——供配对臂用
-          photo_max: float | None = None) -> SphereEngine:
+          photo_max: float | None = None,
+          # R146/R149 L1/L2（R150 B1/B2；**默认全关 = 旧行为**，逐位等价）
+          l1_seek: bool = False, l1_fear: bool = False, l2_dash: bool = False,
+          w_seek_max: float = 0.5, w_fear: float = 0.5,
+          l1_prey_mode: str = "lowagg") -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -159,6 +175,13 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.organisms.energy_cap_enabled = bool(energy_cap)           # R144：能量封顶（新纪元开关）
     if photo_max is not None:
         c.organisms.photo_max = float(photo_max)                # R145：光合配对臂
+    # R146/R149 L1/L2（R150 B1/B2）：**默认全关 ⇒ 旧行为**（H1 逐位等价，C7 已钉死）
+    c.simulation.l1_seek = bool(l1_seek)
+    c.simulation.l1_fear = bool(l1_fear)
+    c.simulation.l2_dash = bool(l2_dash)
+    c.simulation.w_seek_max = float(w_seek_max)
+    c.simulation.w_fear = float(w_fear)
+    c.simulation.l1_prey_mode = str(l1_prey_mode)
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
     # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
@@ -325,6 +348,23 @@ def main() -> None:
                          "默认 false=旧行为（与 E-017~E-031/calib1 可比）")
     ap.add_argument("--photo-max", dest="photo_max", type=float, default=None,
                     help="R145：光合产能覆盖（默认 None=不覆盖）；配对臂用 --photo-max 0 关光合")
+    # ---- R146/R149 L1 感知追击 + L2 机动性（R150 B1；**全部默认关 = 旧行为**）----
+    # 🔴 臂间开关差必须从产物自证 ⇒ 全部进 `switches`（C4）。
+    # ⚠️ `store_true`：preset 变体里写裸名（`"l1-seek"`）即可 —— `expand()` 对无值键
+    #    只拼开关名（见 `cli_flag`/`expand` 的 `if val:` 分支）。
+    ap.add_argument("--l1-seek", dest="l1_seek", action="store_true",
+                    help="L1a 追猎项（默认关 = 旧行为，逐位等价）")
+    ap.add_argument("--l1-fear", dest="l1_fear", action="store_true",
+                    help="L1b 恐惧项（默认关 = 旧行为，逐位等价）")
+    ap.add_argument("--l2-dash", dest="l2_dash", action="store_true",
+                    help="L2 机动性（两段式冲刺；默认关 = 旧行为，逐位等价）")
+    ap.add_argument("--w-seek-max", dest="w_seek_max", type=float, default=0.5,
+                    help="L1a 权重上限（预注册两档：0.5(B)/0.25(C)，两档都过才算）")
+    ap.add_argument("--w-fear", dest="w_fear", type=float, default=0.5,
+                    help="L1b 固定权重（D 臂 = 0，作 fear 是否存在的操作检查）")
+    ap.add_argument("--l1-prey-mode", dest="l1_prey_mode", default="lowagg",
+                    choices=("lowagg", "any"),
+                    help="猎物代理场：lowagg=低 g16 个体 / any=任意占格者（E′ 归因臂）")
     ap.add_argument("--init-g16-clusters", dest="init_g16_clusters", default="",
                     help="R141 P0-2：g16 初始投放（逗号分隔，按簇等分人口）；"
                          "空=旧行为。校准批用 \"0.05,0.5,0.9\"")
@@ -423,7 +463,11 @@ def main() -> None:
                   forage_tradeoff_k=args.forage_tradeoff_k,
                   init_g16_clusters=args.init_g16_clusters,
                   energy_cap=(args.energy_cap == "true"),
-                  photo_max=args.photo_max)
+                  photo_max=args.photo_max,
+                  # R146/R149（R150 B1）：L1/L2 臂身份（默认全关 = 旧行为）
+                  l1_seek=bool(args.l1_seek), l1_fear=bool(args.l1_fear),
+                  l2_dash=bool(args.l2_dash), w_seek_max=args.w_seek_max,
+                  w_fear=args.w_fear, l1_prey_mode=args.l1_prey_mode)
         start_tick = 0
     # 🔴 内评未闭合项 #6（2026-09-20 修）：**provenance 必须在跑之前采集**。
     #   收尾时采集记的是"跑完之后的代码树"——长批期间若有人推提交（E-027 就发生过），
@@ -453,6 +497,22 @@ def main() -> None:
             raise SystemExit(
                 f"distribution 冲突：命令行 {args.distribution!r} vs "
                 f"快照 {e.config.resources.distribution!r} —— 前提开关不得跨批混用（R127 C8）"
+            )
+        # R146/R149：L1/L2 开关是**臂身份**（A 臂 vs B 臂的唯一差别）⇒ 续跑时命令行若与
+        # 快照不符，必须**硬失败**而非静默沿用快照（同 F-R21/C5 家族："传了开关没生效"）。
+        # 段二正是"从段一快照续跑"⇒ 这条检查就是段二不错臂的机器保证。
+        for _k, _cli in (("l1_seek", bool(args.l1_seek)), ("l1_fear", bool(args.l1_fear)),
+                         ("l2_dash", bool(args.l2_dash))):
+            _snap_v = bool(getattr(e.config.simulation, _k))
+            if _cli != _snap_v:
+                raise SystemExit(
+                    f"{_k} 冲突：命令行 {_cli} vs 快照 {_snap_v} —— 臂身份不得静默混用"
+                    "（段二续跑必须与段一同臂）"
+                )
+        if str(args.l1_prey_mode) != str(e.config.simulation.l1_prey_mode):
+            raise SystemExit(
+                f"l1_prey_mode 冲突：命令行 {args.l1_prey_mode!r} vs "
+                f"快照 {e.config.simulation.l1_prey_mode!r}（E′ 臂身份）"
             )
     # R121 §3.4：**指标口径必须随档位走**（"16"⇒16、"4"⇒4）。
     # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
@@ -490,7 +550,12 @@ def main() -> None:
               "resp_a", "resp_b", "oracle_ratio",   # D-18⑥/D-8（累计口径）
               "mem_bit_frac",   # R128 §五 步骤 0：mem_bit 取值分布的**时间序列**（累计口径）
               # A′（2026-09-19）：**先证"测到了"**再判读 ⇒ 两个可观测性占比（累计口径）
-              "mem_grad_slots_frac", "mem_grad_trig_frac"]
+              "mem_grad_slots_frac", "mem_grad_trig_frac",
+              # R146/R149 L1/L2（R150 B4）：闸门读数的**时间序列**（累计口径；关档 ⇒ 空串
+              # = **未适用**，不是 0）。`seek_zero_frac` 高 = **自熄**（邻域无猎物代理）——
+              # 预注册允许结局「猎物池枯竭」，**不得**被读成"没接线"。
+              "seek_term_mean", "seek_zero_frac", "fear_term_mean",
+              "dash_frac", "mob_eff_mean"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -521,6 +586,8 @@ def main() -> None:
             # 键名按 `DeathCause` 成员名归一化（枚举 str() 形如 "DeathCause.STARVATION"）。
             _dct = {str(k).split(".")[-1].upper(): int(v)
                     for k, v in e.death_cause_totals().items()}
+            # R146/R149 L1/L2 读数（R150 B4）：**每次只取一次探针**（关档 ⇒ None ⇒ 空串）
+            _l1p, _l2p = e.l1_probe(), e.l2_probe()
             w.writerow({
                 "tick": t, "N": P,
                 "g14": round(float(e._genes[:P, 14].mean()), 4) if P else "",
@@ -567,6 +634,12 @@ def main() -> None:
                     e.alphabet_stats()["mem_bit_frac"]
                     if e.alphabet_stats()["mem_bit_frac"] is not None else ""
                 ),
+                # R146/R149 L1/L2（R150 B4）：闸门读数的时间序列（关档 ⇒ 空串 = 未适用）
+                "seek_term_mean": _probe_csv(_l1p, "seek_term_mean"),
+                "seek_zero_frac": _probe_csv(_l1p, "seek_zero_frac"),
+                "fear_term_mean": _probe_csv(_l1p, "fear_term_mean"),
+                "dash_frac": _probe_csv(_l2p, "dash_frac"),
+                "mob_eff_mean": _probe_csv(_l2p, "mob_eff_mean"),
             })
             fh.flush()
             last = t
@@ -647,6 +720,22 @@ def main() -> None:
             "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),
             "learning_bottleneck": bool(e.config.info_structure.learning_bottleneck),
             "use_sim_core": bool(e.config.simulation.use_sim_core),
+            # ---- R146/R149 L1/L2（R150 B1/B2）：**臂身份必须能从产物自证**（C4）----
+            # A 臂 vs B/C/D/E′ 的唯一差别就在这几个键上 ⇒ 缺席 ⇒ 外复核只能靠 preset 名
+            # （R136 §一 增量 2 的同型缺口）。
+            "l1_seek": bool(e.config.simulation.l1_seek),
+            "l1_fear": bool(e.config.simulation.l1_fear),
+            "l2_dash": bool(e.config.simulation.l2_dash),
+            "w_seek_max": float(e.config.simulation.w_seek_max),
+            "w_fear": float(e.config.simulation.w_fear),
+            "l1_prey_mode": str(e.config.simulation.l1_prey_mode),
+            # L2 几何/成本参数（「参数制造分化」的可核查性）
+            "dash_min_energy_frac": float(e.config.organisms.dash_min_energy_frac),
+            "dash_cost_kappa": float(e.config.organisms.dash_cost_kappa),
+            "dash_cost_exp": float(e.config.organisms.dash_cost_exp),
+            "young_mob_mult": float(e.config.organisms.young_mob_mult),
+            "old_mob_mult": float(e.config.organisms.old_mob_mult),
+            "far_cap": int(e.config.organisms.far_cap),
             "distribution": e.config.resources.distribution,
             "initial_count": int(e.config.population.initial_count),
             "max_count": int(e.config.population.max_count),
@@ -706,6 +795,9 @@ def main() -> None:
             "cannibalism": e.cannibalism_stats(),
             # R144/R145：能量封顶探针 + 状态量边界自检
             "energy_cap": e.energy_cap_probe(),
+            # R146/R149（R150 B1/B2）：L1 两项 + L2 机动性读数（**关档 ⇒ None = 未适用**）
+            "l1": e.l1_probe(),
+            "l2": e.l2_probe(),
             "bounds": e.state_bounds_check(),
             # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
             "energy_ledger": e.energy_ledger(),

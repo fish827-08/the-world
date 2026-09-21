@@ -733,9 +733,11 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | 项 | 内容 |
 |---|---|
 | **触发变更** | ① `Gene.DIET`(g17) **语义变更**为「**追猎倾向** `w_seek`」并**接线消费** ② `Gene.DEFENSE`(g18) **语义变更**为「**机动性** `mob_eff`」并**接线消费**（含老幼 `mob` 折减）③ 移动可达距离 1 → 1/2（冲刺） |
-| **⚠️ 两层要分开** | (a) **改名**（不动行为）：旧批的 `g17/g18` **均值不可与新批对比**（含义已换）。(b) **接线**（动行为）：属本纪元，产物 `switches` 须可自证（`l1_seek_on`/`l2_dash_on`/`dash_min_energy_frac`/`young_mob_mult`/`old_mob_mult`） |
+| **⚠️ 两层要分开** | (a) **改名**（不动行为）：旧批的 `g17/g18` **均值不可与新批对比**（含义已换）。(b) **接线**（动行为）：属本纪元，产物 `switches` 须可自证 |
+| **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`l1_seek` / `l1_fear` / `l2_dash` / `w_seek_max` / `w_fear` / `l1_prey_mode` / `dash_min_energy_frac` / `dash_cost_kappa` / `dash_cost_exp` / `young_mob_mult` / `old_mob_mult` / `far_cap` / `energy_cap_enabled` / `use_sim_core`；`result`：`l1` / `l2` 两探针块（**全关 ⇒ `null` = 未适用，不是 0**） |
 | **纪律** | 🔴 **禁跨纪元比较**；本批**同批含 `energy_cap_enabled=True`**（R147 裁决 3：封顶作为**批内配对臂** ⇒ 一次只改一件事在**批内**成立） |
-| **状态** | 🔵 实现侧设计稿在办（先稿后码，R146 §七 步 1）；实施后补实测读数 |
+| **状态（2026-09-21 23:5x 更新）** | ✅ **实施已落地**：L1 两项 + 配置字段（B1，本线）+ L2 两段式/CSR/纯能量闸/H3（B2/B3，`[本地开发]` 线）⇒ 段一 preset `l1l2seg1` 已就绪（12k × 6 seed × 5 臂）。**实测待补**（段一跑完回填） |
+| **⚠️ 改名未做（非阻塞，已登记）** | `Gene.DIET`/`Gene.DEFENSE` **枚举名暂留**（改它要动 Rust 常量名 + 重编 `sim_core.so` ⇒ 跑批前不做）；代码内已加注释指明语义 = `SEEK_TENDENCY`/`MOBILITY`。**语义变更本身已在生效**（g17/g18 从预留位变成被消费）⇒ 纪元判定**不受改名影响** |
 
 ---
 

@@ -690,6 +690,54 @@ PRESETS = {
                  template="_rerun_logs/cstep3memgrad20/mn_s{seed}.csv"),
         ],
     ),
+    # R146/R149 **段一（筛查）**：L1 感知追击 + L2 机动性 —— 12k × 6 seed × 5 臂 = **30 run**
+    # ==================================================================
+    # 🔴 **本段不判"分化"**（设计稿 §八）：12k 只有 ≈9 代，而分化是世代尺度效应 ⇒ 段一的唯一
+    #    使命 = **闸门 + 接线确认 + 量级**（防"跑完才发现没接线/不可读"）。判读在**段二**
+    #    （40k × 3 seed，**从本段快照续跑**）。
+    # 🔴 臂表（**同 seed 批内配对 ⇒ 归因干净**：一次改一件事在批内成立）：
+    #      A = cap ON, L1L2 **OFF**  → 对照 + **天然漂变零模型**（g18 无消费点 ⇒ 纯漂变）
+    #      B = 全开, w_seek_max=0.5    → 处理档①
+    #      C = 全开, w_seek_max=0.25   → 敏感性档（**两档都过才算**，否则记「参数依赖」）
+    #      D = 全开, w_fear=0          → **操作检查臂**（"fear 是否存在"）——**不进合取**
+    #      E′ = 全开, 猎物=**任意占格者** → **归因对照**（"分化是不是低 g16 过滤造出来的"）**不进合取**
+    # ⚠️ 全臂 `use_sim_core=False`（H3：L1/L2 开 + Rust ⇒ 构造期硬报错；且 D2 本就走 Python）。
+    #    `switches.use_sim_core` 已入产物 ⇒ 执行路径是批次规格的一部分（R149-6④）。
+    # ⚠️ 前提：patchy（C8：纬度只解释 31.7%）+ 16 码 + 软顶 0.6（无软顶该构造 N 崩到 59–162）
+    #    + cap ON（新纪元；关档 88.7% 个体超上限 ⇒ 判据会被囤积淹没，R147 裁决 3）。
+    # 🔴 段一必报：世代数｜`frac_g16_le_gate`｜**跨候选反退化占比**（`seek_flat_frac` /
+    #    `seek_zero_frac`）｜`dash_frac` / `mob_eff_std`｜各项闸门 G1–G5。
+    # ⚠️ 独立快照目录 `l1l2_snap1`（防与历史批同名静默续跑 —— F-R32 家族）；段二**必须**用它续跑。
+    # 成本估：参照 E-023 实测 12k×12 run ≈ 36 min ⇒ 本批 30 run ≈ **75–95 min**
+    #    （L1/L2 每 tick 多的只是两次 bincount + 每候选两次小向量运算，量级 <5%）。
+    "l1l2seg1": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45,46,47"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/l1l2_snap1",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            # A：对照（L1/L2 全关）—— 也是 g18 的**漂变零分布**来源（零额外机时）
+            dict(name="A", args=[],
+                 template="_rerun_logs/l1l2seg1/A_s{seed}.csv"),
+            dict(name="B", args=["l1-seek", "l1-fear", "l2-dash",
+                                 "w-seek-max=0.5", "w-fear=0.5"],
+                 template="_rerun_logs/l1l2seg1/B_s{seed}.csv"),
+            dict(name="C", args=["l1-seek", "l1-fear", "l2-dash",
+                                 "w-seek-max=0.25", "w-fear=0.5"],
+                 template="_rerun_logs/l1l2seg1/C_s{seed}.csv"),
+            dict(name="D", args=["l1-seek", "l1-fear", "l2-dash",
+                                 "w-seek-max=0.5", "w-fear=0.0"],
+                 template="_rerun_logs/l1l2seg1/D_s{seed}.csv"),
+            dict(name="Ep", args=["l1-seek", "l1-fear", "l2-dash",
+                                  "w-seek-max=0.5", "w-fear=0.5",
+                                  "l1-prey-mode=any"],
+                 template="_rerun_logs/l1l2seg1/Ep_s{seed}.csv"),
+        ],
+    ),
 }
 
 # ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
