@@ -84,7 +84,14 @@ class OrganismConfig:
     """个体能量收支与生命周期参数。"""
 
     initial_energy: float = 60.0      # 新生个体起始能量
-    max_energy: float = 300.0         # 能量上限（多余溢出丢弃）
+    # 🔴 R144/R145 事故修正（2026-09-21）：本字段原注释写「多余溢出丢弃」，
+    #   但**代码里从来没有过钳制** —— 文档承诺了不存在的不变量，十天无人核对。
+    #   现改为：钳制由 `energy_cap_enabled` 显式控制（**默认关 = 与 E-017~E-031 可比**）。
+    max_energy: float = 300.0         # 能量上限（**仅在 energy_cap_enabled=True 时钳制**；
+    #                                    False ⇒ 旧行为：能量可无限累积，实测可达 33× 上限）
+    energy_cap_enabled: bool = False  # 🔴 能量封顶开关（R144 四件之①）；
+    #                                    关 = 旧纪元（可跨批比较 E-017~E-031/calib1）；
+    #                                    开 = **新纪元**（禁跨比）。钳制点在 `_advance_one_tick` 末。
     base_metabolism: float = 0.6      # 每 tick 基础维持消耗（体温/活动）
     move_cost: float = 0.4            # 移动一格的基础能量消耗
     eat_amount: float = 0.5           # 每 tick 每格进食量上限

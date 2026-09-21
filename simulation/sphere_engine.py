@@ -332,6 +332,8 @@ class SphereEngine:
         # R141 P0：分通道能量记账（逐个体缓冲 + 逐 tick 统计序列）
         "_ec_global", "_ec_box", "_ec_n", "_ec_pt", "_ec_ts",
         "_ec_prey_e_sum", "_ec_prey_kill_n",
+        # R145：能量封顶活体探针
+        "_frac_over_cap_max", "_over_cap_seen",
         # R141/R138：真决斗三级拆分（名义/出手/致死 + skip 原因）
         "_duel",
     )
@@ -680,6 +682,9 @@ class SphereEngine:
         self._ec_ts: list[dict] = []
         self._ec_prey_e_sum = 0.0     # Σ 被击杀瞬间的猎物能量（R141 解方程关键输入）
         self._ec_prey_kill_n = 0
+        # R145 制度补丁②：能量封顶的**活体探针**（钳制后仍越限者 ⇒ 钳制失效）
+        self._frac_over_cap_max = 0.0
+        self._over_cap_seen = 0
         # R141/R138：真决斗三级拆分（键预置 ⇒ 输出稳定，不随是否有事件而缺列）
         self._duel = Counter({k: 0 for k in DUEL_KEYS})
 
@@ -836,6 +841,46 @@ class SphereEngine:
                     "（**不含光合**，派工单 §1.2）；net_incl_photo_* 为附加口径",
         }
 
+    def state_bounds_check(self) -> dict:
+        """状态量边界自检（R145 制度补丁③：Pre-Flight 增"状态量边界检查"）。
+
+        覆盖 `energy ≤ max_energy`（**仅封顶开时**）/ `stomach ≤ 胃容量` / `age ≥ 0`。
+        返回违例计数（**全 0 = 健康**）；供 a4 每 tick 或收尾调用。
+        """
+        P = len(self._id)
+        ocfg = self.config.organisms
+        out = {"n": int(P), "energy_over_cap": 0, "stomach_over_cap": 0, "age_negative": 0,
+               "energy_cap_enabled": bool(ocfg.energy_cap_enabled)}
+        if P == 0:
+            return out
+        if ocfg.energy_cap_enabled:
+            out["energy_over_cap"] = int(np.count_nonzero(self._energy[:P] > ocfg.max_energy))
+        # 🔴 自检第一个战果（2026-09-21，`state_bounds_check` 首跑即抓到）：
+        #    **胃容量在两个路径上口径不同且从未对齐** ——
+        #      进食路径（:859）        `max_energy/eat_eff × 0.5 × cap_mult`（均值 ≈62.5）
+        #      捕食路径（:1737 / Rust `predation.rs:43`）`max_energy/eat_eff`（=100）
+        #    ⇒ 捕食转移后胃粮可**超过**进食路径的容量（最多约 1.6 倍）。
+        #    这是**既有行为**（Python 与 Rust **互相一致** ⇒ 不是双路径漂移，而是两处语义并存）
+        #    ⇒ 本函数**如实报两个口径**，不擅自改行为（改了就是新纪元）。
+        cap_mult = 0.5 + self._genes[:P, Gene.STOMACH_CAP] * 1.5
+        stomach_cap = ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
+        stomach_cap_pred = ocfg.max_energy / max(1e-9, ocfg.eat_efficiency)
+        out["stomach_over_cap"] = int(np.count_nonzero(self._stomach[:P] > stomach_cap + 1e-9))
+        out["stomach_over_cap_pred"] = int(
+            np.count_nonzero(self._stomach[:P] > stomach_cap_pred + 1e-9))
+        out["age_negative"] = int(np.count_nonzero(self._age[:P] < 0))
+        out["note"] = ("stomach_over_cap 用**进食**口径（×0.5×cap_mult）；"
+                       "stomach_over_cap_pred 用**捕食**口径（max_energy/eat_eff）——"
+                       "两口径不同是既有行为，不代表双路径漂移")
+        return out
+
+    def energy_cap_probe(self) -> dict:
+        """能量封顶的活体探针读数（R145 补丁②）：`frac_max` **应恒 0**（开时）。"""
+        return {"enabled": bool(self.config.organisms.energy_cap_enabled),
+                "frac_max": round(float(self._frac_over_cap_max), 8),
+                "over_cap_seen": int(self._over_cap_seen),
+                "note": "钳制**之后**统计 ⇒ 开时正常恒 0；非 0 即钳制失效（报警）"}
+
     def genome_t0_stats(self) -> dict:
         """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
 
@@ -949,8 +994,19 @@ class SphereEngine:
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
-        # 能量封顶（修复囤积 bug：之前没有钳制，个体可无限囤积能量，稀释选择压力）
-        self._energy = np.minimum(self._energy, self.config.organisms.max_energy)
+        # 能量封顶（R144；`7516ba9` 引入 → 2026-09-21 补开关/测试/冒烟/纪元声明）
+        # 关（默认）⇒ **与 E-017~E-031/calib1 逐位一致**（旧纪元）；开 ⇒ 新纪元（禁跨比）。
+        if self.config.organisms.energy_cap_enabled:
+            _cap = self.config.organisms.max_energy
+            self._energy = np.minimum(self._energy, _cap)
+            # R145 制度补丁②：**活体探针** —— 钳制之后若仍有越限者，说明钳制失效。
+            # 正常应恒 0；非 0 即报警（比"再写一条测试"更能覆盖真实运行路径）。
+            _P = len(self._id)
+            if _P:
+                _over = int(np.count_nonzero(self._energy[:_P] > _cap))
+                self._frac_over_cap_max = max(self._frac_over_cap_max,
+                                              _over / float(_P))
+                self._over_cap_seen += _over
         # D-17 ⑤：每 tick 末给"首次进入窗口"的存活个体记观测（含死亡个体靠 _id 账本留存）
         if self._measure_resp:
             self._observe_selection_cohort()

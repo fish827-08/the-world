@@ -136,7 +136,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           # R135 第3步 A-连续（2026-09-20）：凸 trade-off 取食倍率 (1−g16)^k
           forage_tradeoff_k: float = 0.0,
           # R141 P0-2（派工单 §二）：g16 初始投放（"" = 旧行为；"0.05,0.5,0.9" = 校准批）
-          init_g16_clusters: str = "") -> SphereEngine:
+          init_g16_clusters: str = "",
+          # R144/R145：能量封顶开关（默认 False = 与 E-017~E-031/calib1 可比）
+          energy_cap: bool = False,
+          # R145 §七.1：光合产能覆盖（`photo_max`；None = 不覆盖）——供配对臂用
+          photo_max: float | None = None) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -152,6 +156,9 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         forage_tradeoff_k=float(forage_tradeoff_k),
     )
     c.genome.init_g16_clusters = str(init_g16_clusters or "")   # R141 P0-2
+    c.organisms.energy_cap_enabled = bool(energy_cap)           # R144：能量封顶（新纪元开关）
+    if photo_max is not None:
+        c.organisms.photo_max = float(photo_max)                # R145：光合配对臂
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
     # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
@@ -312,6 +319,12 @@ def main() -> None:
     ap.add_argument("--soft-cap-target", dest="soft_cap_target", type=float, default=0.0,
                     help="PC-1 S1（目标窗形式）：N* = target×max_count，出生率在 N* 处线性归零；"
                          "0=关（默认=原式）。R134 PC-1 拟 0.6（窗 [0.2K,0.95K] 的中位）")
+    ap.add_argument("--energy-cap", dest="energy_cap", default="false",
+                    choices=("true", "false"),
+                    help="R144 能量封顶：true=每 tick 末钳制 energy ≤ max_energy（**新纪元**）；"
+                         "默认 false=旧行为（与 E-017~E-031/calib1 可比）")
+    ap.add_argument("--photo-max", dest="photo_max", type=float, default=None,
+                    help="R145：光合产能覆盖（默认 None=不覆盖）；配对臂用 --photo-max 0 关光合")
     ap.add_argument("--init-g16-clusters", dest="init_g16_clusters", default="",
                     help="R141 P0-2：g16 初始投放（逗号分隔，按簇等分人口）；"
                          "空=旧行为。校准批用 \"0.05,0.5,0.9\"")
@@ -408,7 +421,9 @@ def main() -> None:
                   learning_bottleneck=(args.learning_bottleneck == "true"),
                   reputation_weight=args.reputation_weight,
                   forage_tradeoff_k=args.forage_tradeoff_k,
-                  init_g16_clusters=args.init_g16_clusters)
+                  init_g16_clusters=args.init_g16_clusters,
+                  energy_cap=(args.energy_cap == "true"),
+                  photo_max=args.photo_max)
         start_tick = 0
     # 🔴 内评未闭合项 #6（2026-09-20 修）：**provenance 必须在跑之前采集**。
     #   收尾时采集记的是"跑完之后的代码树"——长批期间若有人推提交（E-027 就发生过），
@@ -466,6 +481,8 @@ def main() -> None:
               "g_mid_n", "g_mid_net_mean", "g_mid_net_p50", "g_mid_net_var",
               "g_hi_n", "g_hi_net_mean", "g_hi_net_p50", "g_hi_net_var",
               "forage_in_mean", "pred_in_mean", "prey_energy_mean",
+              # R145 补丁②：封顶活体探针（逐 tick 越限占比，正常恒 0）
+              "frac_over_cap",
               "max_gen", "max_gen_cur",       # R77：高水位 / 当刻最深（两个口径分列）
               "mean_row", "polar_frac",
               "codebook_conv", "pred_frac",   # D-16：R31③/R38③ 判据列
@@ -520,6 +537,8 @@ def main() -> None:
                 "d_pred": _dct.get("PREDATION", 0),
                 "d_old": _dct.get("OLD_AGE", 0),
                 "g3": round(float(e._genes[:P, 3].mean()), 4) if P else "",
+                "frac_over_cap": (round(float(np.count_nonzero(e._energy[:P] > e.config.organisms.max_energy) / P), 8)
+                                  if P else ""),
                 # R141 P0：逐 tick 净收入统计（`_ec_flush` 每 tick 追加一行；n=0 ⇒ None ⇒ 写空）
                 **_ec_csv_row(e),
                 "trust": round(float(e._trust[:P].mean()), 4) if P else "",
@@ -619,6 +638,9 @@ def main() -> None:
             "forage_tradeoff_k": float(e.config.predation.forage_tradeoff_k),
             # R141 P0-2：初始投放必须可读回（C4）
             "init_g16_clusters": str(e.config.genome.init_g16_clusters),
+            # R144/R145：能量封顶与光合必须可读回（C4；且封顶开关进指纹 ⇒ 纪元可判）
+            "energy_cap_enabled": bool(e.config.organisms.energy_cap_enabled),
+            "photo_max": float(e.config.organisms.photo_max),
             # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
             #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
             "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),
@@ -681,6 +703,9 @@ def main() -> None:
             "memory_gradient": e.memory_gradient_stats(),
             # R135 第 -1 步④：互捕结构量化（攻击者/猎物 g16 直方图 + Δ + 真决斗三级拆分）
             "cannibalism": e.cannibalism_stats(),
+            # R144/R145：能量封顶探针 + 状态量边界自检
+            "energy_cap": e.energy_cap_probe(),
+            "bounds": e.state_bounds_check(),
             # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
             "energy_ledger": e.energy_ledger(),
             # R135 第 -1 步③：t=0 基因组基线（搭车诊断）
