@@ -774,6 +774,39 @@ PRESETS = {
                  template="_rerun_logs/p0niche/C0_s{seed}.csv"),
         ],
     ),
+    # R154 **P0.6：把捕食通量补到"捕食端净收入 ≥ 0"** —— 2 臂 × 4 seed × 8k = 8 run
+    # ==================================================================
+    # 🔴 目标值**由 R154 的账本算式给出**（非盲试）：C0 的捕食端净收入 −0.66…−0.82，
+    #    需要 捕食入 ≥ 1.01–1.09（现 0.21–0.35）⇒ **还差 2.9–4.9×**。
+    #    本批把四个旋钮合计提高 **≈×4.4**，恰好补齐该缺口：
+    #      attack_prob_coef 0.5→1.0（×2）｜success_floor/ceil 0.35/0.95→0.6/0.98（×1.5）
+    #      transfer_ratio 0.8→0.9（×1.125）｜attack_gate 0.15→0.05（×1.3）
+    # 🔴 预注册允许结局：① 捕食端真的转正 ⇒ 看 g16 是否出现**两端聚集**（真进展）
+    #    ② 猎物池被吃光 ⇒ 崩盘（C0 已 2/4 崩，本批风险更高；文献提示需"比率依赖捕食"防灭绝）
+    #    ③ 通量提不上去（受猎物密度限制）⇒ 说明瓶颈在**猎物供给**而非旋钮 ⇒ 转 P2（庇护所/季节）
+    # ⚠️ 本批与 `p0niche` 同 seed(42–45)/同 tick/同构造 ⇒ **C0 与 C06 批内配对可比**
+    # 成本：8 run × 8k / 并发 12 ⇒ 单波 ≈ **8–10 min**
+    "p06flux": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,43,44,45"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/p06flux_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true"],
+        variants=[
+            dict(name="C0", args=["forage-tradeoff-k=2.0", "attack-cost=1.0",
+                                  "transfer-ratio=0.8", "attack-gate=0.15",
+                                  "attack-prob-coef=0.5", "success-floor=0.35",
+                                  "success-ceil=0.95"],
+                 template="_rerun_logs/p06flux/C0_s{seed}.csv"),
+            dict(name="C06", args=["forage-tradeoff-k=2.0", "attack-cost=1.0",
+                                   "transfer-ratio=0.9", "attack-gate=0.05",
+                                   "attack-prob-coef=1.0", "success-floor=0.6",
+                                   "success-ceil=0.98"],
+                 template="_rerun_logs/p06flux/C06_s{seed}.csv"),
+        ],
+    ),
 }
 
 # ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
