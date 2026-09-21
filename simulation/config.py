@@ -119,6 +119,18 @@ class OrganismConfig:
     niche_floor: float = 0.4
     niche_gain: float = 0.6
 
+    # ===== L2 机动性（R146/R149；**由 [本地开发] 线添加**，仅这些字段）=====
+    # 🔴 全部默认 = **旧行为**（L2 关闭时不读取 ⇒ H1 逐位等价）。
+    #    `g18 DEFENSE` → **MOBILITY**（语义变更，见 `AGENT.md` §十三 13.2；旧批 g18 均值不可与新批比）
+    dash_min_energy_frac: float = 0.2   # 冲刺（走 2 格）的**纯能量阈值** = frac × max_energy
+    #                                     口径纪律（派工单 §3.2.1）：**仅此一条**，禁引入饱食/饥饿语义
+    dash_cost_kappa: float = 1.0        # 冲刺耗能系数：cost × (1 + κ·(2^p − 1))
+    dash_cost_exp: float = 2.0          # 代价指数 p（外鉴：凸性有支持、指数 2 是插值约定；p∈{1,2,3} 先注册）
+    young_mob_mult: float = 0.55        # 幼体机动折减（fish 指定；**设计选择**，勿挂"老=慢"文献）
+    old_mob_mult: float = 0.55          # 老年机动折减（同上）
+    far_cap: int = 32                   # strict 2 圈规模 > 该值的格**不可冲刺**（拓扑退化）
+    #                                     `[实测]` 不变区间 [16,119] ⇒ 非可调旋钮
+
     def __post_init__(self) -> None:
         assert self.initial_energy < self.max_energy, "初始能量要小于上限"
         assert self.eat_amount > 0, "进食量上限为正"
@@ -184,6 +196,11 @@ class SimulationConfig:
     stop_on_extinction: bool = True    # 种群归零时提前停
     history_limit: int = 0          # 统计历史保留上限（0=无限，长程实验用环形尾部）
     use_sim_core: bool = False      # True=种群数值管线走 Rust（sim_core.step_vectors）
+    # ===== L2 机动性总开关（R146/R149；**由 [本地开发] 线添加**）=====
+    # 🔴 默认 False = **旧行为**（不消费任何 L2 字段 ⇒ H1 逐位等价）。
+    # ⚠️ H3：置 True 且 `use_sim_core=True` ⇒ **构造期直接抛 NotImplementedError**（fail-loud，
+    #    不并进 `_d2_asym` —— 那是"静默换路径"，正是 dash PR 的翻车形态）。
+    l2_dash: bool = False
     social_move_weight: float = 1.0 # 移动决策群居项权重（D0 修复：densities 按邻居上限归一化后与感知项同量级，此项可扫描 0~2）
     stay_prob: float = 0.0          # 停驻率（战役参数：move_prob × (1-stay_prob)，0=旧行为每tick必移判定；配合D2感知半径4=等效扩世界）
 

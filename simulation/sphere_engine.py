@@ -336,6 +336,11 @@ class SphereEngine:
         "_frac_over_cap_max", "_over_cap_seen",
         # R141/R138：真决斗三级拆分（名义/出手/致死 + skip 原因）
         "_duel",
+        # R146/R149 L2 机动性（本段 = [本地开发] 线）：strict 2 圈 CSR + 读数计数器
+        "_far_off", "_far_cells", "_far_len", "_far_excluded_n",
+        "_run_mover_n", "_run_dash_n", "_mover_n_by_box", "_dash_n_by_box",
+        "_mob_sum", "_mob_sq_sum", "_mob_n", "_agef_sum",
+        "_inelig_pop_n", "_pop_n", "_g16_le_gate_n",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -456,6 +461,45 @@ class SphereEngine:
         for c in range(n_cells):
             nbs = self.world.neighbors(c)
             self._nb_table[c, :len(nbs)] = nbs
+
+        # ── R146/R149 L2：**strict 2 圈**候选表（CSR；构造期一次）──────────────────
+        # 语义：2 跳可达、去掉自身与 1 圈（球面拓扑用**跳数**，**不套 5×5 方窗**；
+        #       极点格走 `neighbors()` 的整带语义）。只在 `l2_dash=True` 时被读。
+        # `FAR_CAP` 语义 = 「strict 2 圈规模 > FAR_CAP 的格**不可冲刺**」（拓扑退化），
+        #   🔴 措辞：排除的是**格**，不是"极区个体"；`[实测]` 不变区间 [16,119] ⇒ 非旋钮。
+        self._far_off = np.zeros(n_cells + 1, dtype=np.int64)
+        self._far_len = np.zeros(n_cells, dtype=np.int64)
+        _rings: list[np.ndarray] = [np.zeros(0, dtype=np.int32) for _ in range(n_cells)]
+        _far_cap = int(config.organisms.far_cap)
+        for c in range(n_cells):
+            one = {int(x) for x in self.world.neighbors(c)}
+            two: set[int] = set()
+            for d in one:
+                two.update(int(x) for x in self.world.neighbors(d))
+            two.discard(c)
+            two -= one
+            if 0 < len(two) <= _far_cap:
+                _rings[c] = np.fromiter(sorted(two), dtype=np.int32, count=len(two))
+        for c in range(n_cells):
+            self._far_len[c] = len(_rings[c])
+            self._far_off[c + 1] = self._far_off[c] + self._far_len[c]
+        self._far_cells = (np.concatenate(_rings) if self._far_off[-1] else
+                           np.zeros(0, dtype=np.int32))
+        self._far_excluded_n = int(np.count_nonzero(self._far_len == 0))
+        del _rings
+
+        # ── H3（R146 硬约束）：L1/L2 开启时必须 **fail-loud**（本段 = [本地开发] 线）────
+        # 为什么不并进 `_d2_asym`：那是**静默换路径**（开开关后悄悄走 Python ⇒ 与"静默
+        # no-op"同族）。dash PR 的翻车形态就是"改了代码但实验路径没走到"。
+        # ⚠️ L1 的两个开关（`l1_seek`/`l1_fear`）由 B1（所有者线）添加 ⇒ 此处用 getattr 兜底：
+        #    字段缺失时**不会**因此跳过 guard（缺失 ⇒ 视为 False，等于 L1 未开）。
+        _scfg0 = config.simulation
+        _l1_any = bool(getattr(_scfg0, "l1_seek", False)) or bool(getattr(_scfg0, "l1_fear", False))
+        if _scfg0.use_sim_core and (_l1_any or bool(getattr(_scfg0, "l2_dash", False))):
+            raise NotImplementedError(
+                "L1/L2 尚未下沉 Rust：use_sim_core=True 时开启 l1_seek/l1_fear/l2_dash 会"
+                "**静默走旧路径**（= dash PR 的翻车形态）⇒ 硬报错。请设 use_sim_core=False。"
+            )
 
         n = config.population.initial_count
         self._flat = np.zeros(n, dtype=np.int64)
@@ -673,6 +717,19 @@ class SphereEngine:
         # R135 第 -1 步④：互捕结构量化累计器（5-bin，g16 ∈ [0,1]）
         self._cannib_atk_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
         self._cannib_prey_hist = np.zeros(CANNIB_BINS, dtype=np.int64)
+        # R146/R149 L2 读数（B4；本段 = [本地开发] 线）。**l2_dash 关时全部不累加**
+        #   ⇒ `l2_probe()` 返回 None（"未适用"），不是 0（R120/§五.12 口径铁律）。
+        self._run_mover_n = 0                 # 本 run 的移动事件数（分母）
+        self._run_dash_n = 0                  # 其中走 2 格的（分子）⇒ dash_frac
+        self._mover_n_by_box = np.zeros(3, dtype=np.int64)
+        self._dash_n_by_box = np.zeros(3, dtype=np.int64)
+        self._mob_sum = 0.0                   # Σ mob_eff（行为口径）
+        self._mob_sq_sum = 0.0
+        self._mob_n = 0
+        self._agef_sum = 0.0                  # Σ age_factor
+        self._inelig_pop_n = 0                # Σ（处于不可冲刺格的人口）——**人口**口径
+        self._pop_n = 0                       # Σ 人口（同时用于 frac(g16≤gate)）
+        self._g16_le_gate_n = 0               # Σ 1[g16 ≤ attack_gene_gate]
         # R141 P0：分通道能量记账（5 通道 × 全球/三分箱）。见 `energy_channel_stats`。
         self._ec_global = np.zeros(EC_N, dtype=np.float64)
         self._ec_box = np.zeros((3, EC_N), dtype=np.float64)
@@ -927,6 +984,45 @@ class SphereEngine:
             self._energy[:P] > self.config.organisms.max_energy))
         return round(n_over / P, 8)
 
+
+    def l2_probe(self) -> dict | None:
+        """L2 机动层读数（R150 B4；本段 = [本地开发] 线）。
+
+        🔴 `l2_dash=False` ⇒ **None（未适用）**，**不是 0**（R120 / §五.12 口径铁律：
+        "没测" ≠ "测出零"）。所有分母都写进 `note`，便于独立复算。
+        """
+        if not bool(self.config.simulation.l2_dash):
+            return None
+        n_mov = int(self._run_mover_n)
+        n_dash = int(self._run_dash_n)
+        mob_mean = (self._mob_sum / self._mob_n) if self._mob_n else None
+        mob_var = ((self._mob_sq_sum / self._mob_n) - mob_mean ** 2) if self._mob_n else None
+        boxes = ("herb", "omni", "carn")
+        return {
+            "dash_frac": (round(n_dash / n_mov, 6) if n_mov else None),
+            "mover_n": n_mov,
+            "dash_n": n_dash,
+            "dash_frac_by_g16_box": {
+                boxes[r]: (round(int(self._dash_n_by_box[r]) / int(self._mover_n_by_box[r]), 6)
+                           if self._mover_n_by_box[r] else None)
+                for r in range(3)},
+            "mob_eff_mean": (round(float(mob_mean), 6) if mob_mean is not None else None),
+            "mob_eff_std": (round(float(np.sqrt(max(0.0, mob_var))), 6)
+                            if mob_var is not None else None),
+            "age_factor_mean": (round(self._agef_sum / self._mob_n, 6) if self._mob_n else None),
+            "nondash_cell_pop_frac": (round(self._inelig_pop_n / self._pop_n, 6)
+                                      if self._pop_n else None),
+            "frac_g16_le_gate": (round(self._g16_le_gate_n / self._pop_n, 6)
+                                 if self._pop_n else None),
+            "far_cap": int(self.config.organisms.far_cap),
+            "dash_cost_exp": float(self.config.organisms.dash_cost_exp),
+            "dash_ineligible_cells": int(self._far_excluded_n),
+            "dash_eligible_cells": int(self.world.n_cells) - int(self._far_excluded_n),
+            "note": "dash_frac 分母 = **移动事件数**（Σ 每 tick `mover_n`，非人口·tick）；"
+                    "mob_eff = g18(DEFENSE→MOBILITY) × age_factor；"
+                    "nondash_cell_pop_frac = Σ(处于不可冲刺格的人口)/Σ人口；"
+                    "frac_g16_le_gate = Σ1[g16 ≤ attack_gene_gate]/Σ人口（**判读前置门**用）",
+        }
 
     def genome_t0_stats(self) -> dict:
         """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
@@ -1493,6 +1589,17 @@ class SphereEngine:
             moved = self.rng.random(P) < move_prob
             moved &= energy >= move_cost_ind  # 付得起才走
             Nm = int(moved.sum())
+            # ── R146/R149 L2：人口口径读数（B4；本段 = [本地开发] 线）─────────────
+            # 只在 l2_dash 开启时累加 ⇒ **关档 `l2_probe()` 返回 None（未适用），不是 0**
+            # （R120/§五.12 口径铁律）。与"谁在动"无关，故放在 `if Nm:` **之外**。
+            _l2_on = bool(self.config.simulation.l2_dash)
+            if _l2_on:
+                _gate = float(self.config.predation.attack_gene_gate)
+                self._pop_n += int(P)
+                self._g16_le_gate_n += int(np.count_nonzero(
+                    genes[:P, Gene.AGGRESSION] <= _gate))
+                self._inelig_pop_n += int(np.count_nonzero(
+                    self._far_len[self._flat[:P]] == 0))
             if Nm:
                 mi = np.flatnonzero(moved)
                 food_ratio = self.resources._grid / np.maximum(
@@ -1510,6 +1617,45 @@ class SphereEngine:
                     0, 1_000_000, size=Nm, dtype=np.int64
                 )
                 targets = np.empty(Nm, dtype=np.int64)
+                # ── R146/R149 L2：两段式冲刺（**本段 = [本地开发] 线**）─────────────
+                # 第一段「走多远」：纯能量闸（dash 门槛 + 2 格成本，**顺序无关**）× mob 概率闸
+                # 第二段「选哪格」：走 2 格时在 **strict 2 圈**里**均匀盲选**
+                # ⚠️ 措辞纪律（R148-2a）：这是**同一抽数的两个位域**（`10^6 = 100 × 10^4`
+                #    恰好整除 ⇒ 均匀源下两字段不相关，已实测 χ²=9775.6/df 9801）
+                #    —— **不是"两次独立判定"**，报告与注释都禁写。
+                # ⚠️ RNG 形状保持（H2）：本段**不新增、也不跳过**任何 `rng.*` 调用
+                #    （`u = self.rng.random()` 仍按个体消费 ⇒ 每 tick 抽取数与关档一致）。
+                dash = np.zeros(Nm, dtype=bool)
+                _mult = np.ones(Nm, dtype=np.float64)
+                mob_eff = np.zeros(Nm, dtype=np.float64)
+                age_factor = np.ones(Nm, dtype=np.float64)
+                if _l2_on:
+                    _ocfg = self.config.organisms
+                    _cells = self._flat[mi]
+                    _ls = self._lifespan(genes[mi, Gene.LIFE_GENE])   # 个体自己的寿命
+                    _agef = self._age[mi].astype(np.float64)
+                    age_factor[_agef < _ocfg.maturity_fraction * _ls] = _ocfg.young_mob_mult
+                    age_factor[_agef >= _ocfg.senile_fraction * _ls] = _ocfg.old_mob_mult
+                    # g18 = DEFENSE（B1/注册表改名为 MOBILITY 后此处同步；语义变更见 §十三 13.2）
+                    mob_eff = genes[mi, Gene.DEFENSE] * age_factor
+                    _step = 1.0 + _ocfg.dash_cost_kappa * (2.0 ** _ocfg.dash_cost_exp - 1.0)
+                    _cost2 = move_cost_ind[mi] * _step
+                    dash = (((rand_choice % 100) < (100.0 * mob_eff).astype(np.int64))
+                            & (energy[mi] >= _ocfg.dash_min_energy_frac * _ocfg.max_energy)
+                            & (energy[mi] >= _cost2)
+                            & (self._far_len[_cells] > 0))
+                    _mult = np.where(dash, _step, 1.0)
+                    # 读数（B4）：dash_frac 的分子/分母、mob_eff/age_factor 分布
+                    self._run_mover_n += int(Nm)
+                    self._run_dash_n += int(dash.sum())
+                    _box = np.clip((genes[mi, Gene.AGGRESSION] * 3).astype(np.int64), 0, 2)
+                    self._mover_n_by_box += np.bincount(_box, minlength=3)[:3]
+                    if dash.any():
+                        self._dash_n_by_box += np.bincount(_box[dash], minlength=3)[:3]
+                    self._mob_sum += float(mob_eff.sum())
+                    self._mob_sq_sum += float(np.dot(mob_eff, mob_eff))
+                    self._mob_n += int(Nm)
+                    self._agef_sum += float(age_factor.sum())
                 ifcfg3 = self.config.info_structure
                 d2_asym = ifcfg3.enabled and ifcfg3.perception_radius == 4
                 d2_noise = ifcfg3.enabled and ifcfg3.perception_noise > 0
@@ -1621,10 +1767,25 @@ class SphereEngine:
                         targets[i] = nb[int(rand_choice[i] % len(nb))]
                     else:
                         targets[i] = nb[int(np.argmax(score))]
+                    # ── R146/R149 L2 第二段：冲刺者改走 2 格（**盲选**）─────────────
+                    # 位置：**在 score/softmax 之后** ⇒ `u = self.rng.random()` 仍按个体消费
+                    # ⇒ 每 tick 随机抽取数与关档**逐字一致**（H2/H1 的形状要求）。
+                    # 代价：冲刺者白算一次 score（换取随机流形状不变 —— 值得）。
+                    if _l2_on and dash[i]:
+                        _c = int(self._flat[idx])
+                        _fl = int(self._far_len[_c])
+                        targets[i] = int(self._far_cells[
+                            int(self._far_off[_c]) + int(rand_choice[i] // 100) % _fl])
                 self._flat[mi] = targets
-                energy[mi] -= move_cost_ind[mi]
-                # R141 P0：cost_move 通道（只记 Python 路径；Rust 路径在 Rust 内扣费）
-                self._ec_add(EC_MOVE, mi, move_cost_ind[mi])
+                if _l2_on:
+                    # L2：按实际步数计费（d=1 ×1，d=2 ×(1+κ(2^p−1))）
+                    _cost = move_cost_ind[mi] * _mult
+                    energy[mi] -= _cost
+                    self._ec_add(EC_MOVE, mi, _cost)
+                else:
+                    energy[mi] -= move_cost_ind[mi]
+                    # R141 P0：cost_move 通道（只记 Python 路径；Rust 路径在 Rust 内扣费）
+                    self._ec_add(EC_MOVE, mi, move_cost_ind[mi])
                 # 5.6) 信任学习
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
