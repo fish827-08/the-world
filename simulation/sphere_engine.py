@@ -863,7 +863,7 @@ class SphereEngine:
         out = {"n": int(P),
                "cap_residual_n": None,        # 关档 ⇒ None（**未检查**，非 0）
                "energy_checked": cap_on,
-               "stomach_over_cap": 0, "stomach_over_cap_pred": 0, "age_negative": 0,
+               "stomach_over_eat_cap": 0, "stomach_over_pred_cap": 0, "age_negative": 0,
                "energy_cap_enabled": cap_on}
         if P == 0:
             out["note"] = "P=0：无可检个体"
@@ -881,16 +881,20 @@ class SphereEngine:
         cap_mult = 0.5 + self._genes[:P, Gene.STOMACH_CAP] * 1.5
         stomach_cap = ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
         stomach_cap_pred = ocfg.max_energy / max(1e-9, ocfg.eat_efficiency)
-        out["stomach_over_cap"] = int(np.count_nonzero(self._stomach[:P] > stomach_cap + 1e-9))
-        out["stomach_over_cap_pred"] = int(
+        out["stomach_over_eat_cap"] = int(
+            np.count_nonzero(self._stomach[:P] > stomach_cap + 1e-9))
+        out["stomach_over_pred_cap"] = int(
             np.count_nonzero(self._stomach[:P] > stomach_cap_pred + 1e-9))
         out["age_negative"] = int(np.count_nonzero(self._age[:P] < 0))
         out["note"] = (
+            "**字段语义铁律（R148 §五.12）：`None` ⟺ 未检查；`0` ⟺ 检查过且合规。**"
             "cap_residual_n = **仪器**（钳制后仍越限 ⇒ 失效报警；关档为 None=未检查）；"
             "囤积规模见 `over_cap_frac()`（**现象**，两者正交）。"
-            "stomach_over_cap 用**进食**口径（×0.5×cap_mult）；"
-            "stomach_over_cap_pred 用**捕食**口径（max_energy/eat_eff）——"
-            "两口径不同是既有行为，不代表双路径漂移")
+            "stomach_over_eat_cap / stomach_over_pred_cap 是**两条独立容量**"
+            "（进食口径 ×0.5×cap_mult ≈62.5 ｜ 捕食口径 max_energy/eat_eff =100；"
+            "见 `OrganismConfig` 的「两条独立胃容量」声明）——"
+            "两口径不同是**既有行为**，不代表双路径漂移；命名已按内评 §一.1 改为自解释"
+            "（`*_eat_cap` / `*_pred_cap`，勿再读成「唯一上限」）")
         return out
 
     def energy_cap_probe(self) -> dict:

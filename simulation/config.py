@@ -96,6 +96,16 @@ class OrganismConfig:
     move_cost: float = 0.4            # 移动一格的基础能量消耗
     eat_amount: float = 0.5           # 每 tick 每格进食量上限
     eat_efficiency: float = 3.0       # 每单位食物转化为能量的倍率
+    # 🔴 R148 §五.2（内评 §一.2 选项 b，所有者裁定「暂不统一但必须补声明」）：
+    #   **`stomach` 有两条独立的容量上限，取决于写入路径** —— 这是**既有行为**，不是缺陷：
+    #     ① **进食路径**（`sphere_engine.py` 取食段）：`max_energy/eat_efficiency × 0.5 × cap_mult`，
+    #        `cap_mult = 0.5 + g5×1.5` ⇒ 均值 ≈62.5（上限 100，受 `g5 STOMACH_CAP` 调节）
+    #     ② **捕食路径**（Python 捕食段 ／ `sim_core/src/predation.rs`）：`max_energy/eat_efficiency` = 100
+    #        （满容量、无 ×0.5、不受 g5 缩放）
+    #   ⇒ 两路径**各自只与自己的容量比较**；Python 与 Rust **互相一致** ⇒ 不是双路径漂移。
+    #   ⚠️ 后果（须写进判读）：① 任何用 `stomach` 的指标**必须声明路径口径**；
+    #     ② **`g5` 的选择效应是路径依赖的** ⇒ 若将来把 g5 纳入判据，须先统一两容量（= 第三纪元）。
+    #   统一方案（内评推荐 (a)，未采纳）：由 `g5` 决定**唯一**上限、所有写入路径共用。
     photo_max: float = 0.1            # 光合最大产能：光照=1（赤道正午）时每 tick 产这么多
     homeo_upkeep: float = 0.15        # 恒温个体每 tick 的额外维持费（换取低温不减速）
     maturity_fraction: float = 0.15   # 成熟年龄 = 寿命的几成 → 达到才能繁衍（防止一出生就生）

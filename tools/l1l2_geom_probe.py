@@ -79,6 +79,25 @@ def main() -> int:
         print(f"  {band:<8} n={len(v):>3}  r=1 中位 {sorted(r1)[len(r1)//2]:>4} "
               f"| r<=2 中位 {sorted(v)[len(v)//2]:>4}  范围 {min(v)}–{max(v)}")
 
+    # —— 全格扫描：strict 2 圈规模分布与"冲刺排除格"的规模（R148-2(b) 要求量化）——
+    import numpy as np  # 局部 import：本段只在全扫时用
+    r2_len = np.zeros(world.n_cells, dtype=np.int64)
+    for c in range(world.n_cells):
+        r2_len[c] = len(_ring2(adj, c))
+    far_cap = 32
+    inelig = int((r2_len > far_cap).sum())
+    rows_arr = np.arange(world.n_cells) // world.cols
+    inelig_rows = sorted(set(int(r) for r in rows_arr[r2_len > far_cap]))
+    print("=== strict 2 圈规模（全 7200 格；决定 FAR_CAP 与'冲刺排除格'）===")
+    qs = [50, 75, 90, 95, 99, 100]
+    print("  分位: " + " ".join(f"p{q}={int(np.percentile(r2_len, q))}" for q in qs))
+    print(f"  > {far_cap}（拟排除）的格数 = {inelig} / {world.n_cells}"
+          f" = {inelig / world.n_cells * 100:.2f}%（按格均匀占位 ≈ 人口占比）")
+    print(f"  受影响的行号 = {inelig_rows}")
+    for cap in (16, 24, 32, 48, 64):
+        n_ex = int((r2_len > cap).sum())
+        print(f"    若 FAR_CAP={cap:>3}: 排除 {n_ex:>4} 格 ({n_ex / world.n_cells * 100:.2f}%)")
+
     # —— Q1 逃脱 / Q2 追击 ——
     q1 = defaultdict(lambda: [0, 0, 0, 0])   # band -> [r1_risk_n, r1_n, r2_risk_n, r2_n]
     # band -> [r1_reach_n, r1_n, r2_reach_n, r2_n, r1_cnt_sum, r2_cnt_sum]

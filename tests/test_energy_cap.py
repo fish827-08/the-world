@@ -136,10 +136,11 @@ def test_state_bounds_check_clean():
     assert b["cap_residual_n"] == 0
     assert b["energy_checked"] is True
     assert b["age_negative"] == 0
-    # ⚠️ `stomach_over_cap` **不保证 0**：进食与捕食两条路径的胃容量口径不同
-    #    （后者是前者的约 1.6 倍）⇒ 捕食后可能超过"进食口径"的上限。这是**既有行为**，
+    # ⚠️ `stomach_over_eat_cap` **不保证 0**：`stomach` 有**两条独立容量**
+    #    （R148 §五.1/§五.2：进食 `×0.5×cap_mult`≈62.5 vs 捕食 `=100`，后者约 1.6 倍）
+    #    ⇒ 捕食后可能超过"进食口径"的上限。这是**既有行为**（已在 `OrganismConfig` 声明），
     #    自检如实报两个口径；此处只锚定"捕食口径必须无越限"。
-    assert b["stomach_over_cap_pred"] == 0, "捕食口径的胃容量都被突破了 ⇒ 真异常"
+    assert b["stomach_over_pred_cap"] == 0, "捕食口径的胃容量都被突破了 ⇒ 真异常"
 
 
 def test_bounds_cap_off_reports_none_not_zero():
@@ -154,7 +155,11 @@ def test_bounds_cap_off_reports_none_not_zero():
         f"关档报了 {b['cap_residual_n']!r} ⇒ 把'没测'写成了'测出零'（R147 §二 违规）")
     assert b["energy_cap_enabled"] is False
     # 其余三项与开关无关，仍应是可用的整数（不是 None）
-    assert isinstance(b["stomach_over_cap"], int) and isinstance(b["age_negative"], int)
+    # 字段语义铁律（R148 §五.12）：None ⟺ 未检查；0 ⟺ 检查过且合规。
+    # 这三项与开关无关 ⇒ 恒为"检查过"的整数（不是 None）。
+    assert isinstance(b["stomach_over_eat_cap"], int)
+    assert isinstance(b["stomach_over_pred_cap"], int)
+    assert isinstance(b["age_negative"], int)
 
 
 def test_over_cap_frac_is_orthogonal_to_cap_residual():
