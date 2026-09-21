@@ -58,7 +58,19 @@ def main() -> int:
     ap.add_argument("--rows", type=int, default=60)
     ap.add_argument("--cols", type=int, default=120)
     ap.add_argument("--step", type=int, default=37, help="扫描捕食者位置的步长")
+    ap.add_argument("--bitfield", action="store_true",
+                    help="顺带跑 H2 位域独立性检验（调用权威件 tools/l1l2_bitfield_check.py）")
     args = ap.parse_args()
+
+    if args.bitfield:
+        # R149-6⑤：权威件在 tools/l1l2_bitfield_check.py（原内评独立实现，
+        # 因老工侧当时**无复现路径**而被裁定收编）。此处只做"同源可复现"转发。
+        import subprocess
+        from pathlib import Path
+        tool = Path(__file__).with_name("l1l2_bitfield_check.py")
+        print(f"=== --bitfield：转发权威件 {tool.name} ===")
+        r = subprocess.run([sys.executable, "-X", "utf8", str(tool)], check=False)
+        print(f"  （子进程 rc={r.returncode}）\n")
 
     world = SphereWorld(args.rows, args.cols)
     adj = _adj_sets(world)
@@ -94,9 +106,16 @@ def main() -> int:
     print(f"  > {far_cap}（拟排除）的格数 = {inelig} / {world.n_cells}"
           f" = {inelig / world.n_cells * 100:.2f}%（按格均匀占位 ≈ 人口占比）")
     print(f"  受影响的行号 = {inelig_rows}")
-    for cap in (16, 24, 32, 48, 64):
-        n_ex = int((r2_len > cap).sum())
-        print(f"    若 FAR_CAP={cap:>3}: 排除 {n_ex:>4} 格 ({n_ex / world.n_cells * 100:.2f}%)")
+    # R149-6⑤：**不变区间必须机器求**（v2 手工写 [16,120] 被内评反打 —— 有 2 格规模恰为 120）
+    sizes = {int(v): int((r2_len == v).sum()) for v in np.unique(r2_len)}
+    print(f"  规模直方图 = {sorted(sizes.items())}")
+    base = set(np.nonzero(r2_len > 16)[0].tolist())
+    same = [c for c in range(16, int(r2_len.max()) + 6)
+            if set(np.nonzero(r2_len > c)[0].tolist()) == base]
+    print(f"  ⇒ **FAR_CAP 不变区间 = [{min(same)}, {max(same)}]**（对此区间内任一取值，"
+          f"排除集恒为 {len(base)} 格 = {len(base) / world.n_cells * 100:.2f}%）"
+          " ← 所以该参数**不是旋钮**（反「调参凑结果」）")
+    print(f"  可达 far_len（未排除者）= {sorted(int(v) for v in np.unique(r2_len) if v <= far_cap)}")
 
     # —— Q1 逃脱 / Q2 追击 ——
     q1 = defaultdict(lambda: [0, 0, 0, 0])   # band -> [r1_risk_n, r1_n, r2_risk_n, r2_n]
