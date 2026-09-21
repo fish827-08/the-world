@@ -524,6 +524,12 @@ gitee 私有仓库  little-fishy/digital-life-sphere
 - `git switch --detach main` 后未察觉 detached → commit dad62f9 悬空
 - push 在 non-tty 环境下被卡 → 浪费 3 分钟才发现是认证问题
 
+**🔴 追加（2026-09-22 事故后，血泪）**：**本仓库禁用 `git pull --rebase` / `git rebase` 合并远端**。
+事故：`pull --rebase` 在本环境报 `could not mark as interactive` 后中断 ⇒ 分支变成 **`No commits yet`**，
+且该 commit 对象**从对象库消失**（`cat-file -t` 找不到）。恢复路径：`git reset --hard <远端 sha>` + 重放工作区改动
+（**先备份文件**）。⇒ **改用 `git merge <remote> --no-edit`**（本次 ort 策略自动合并成功、零冲突）。
+⇒ 若要线性历史，只在**确认无他人并发提交**时用 rebase，且先 `git rev-parse --short HEAD` 留证。
+
 > **总原则**：宁可在讨论板上多花 2 分钟问"要不要继续"，也不要 30 分钟救火。
 > **本规则适用范围**：所有角色（含所有者代理）。
 
