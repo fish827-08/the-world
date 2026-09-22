@@ -50,6 +50,7 @@ from simulation.config import (  # noqa: E402
     InfoStructureConfig,
     PredationConfig,
     SimConfig,
+    SubposConfig,
 )
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
@@ -172,7 +173,14 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           wound_heal_rate: float = 0.001, wound_heal_energy_cost: float = 0.05,
           contest_enabled: bool = False, holder_adv: float = 1.2,
           escalation_gap: float = 0.25, contest_cost_energy: float = 0.5,
-          w_fear_health: float = 0.5, need_aggression_k: float = 0.5) -> SphereEngine:
+          w_fear_health: float = 0.5, need_aggression_k: float = 0.5,
+          # 13.4 波 1（设计稿 §二/§三）：亚格连续坐标（**默认全关 = 旧行为**，逐位等价）
+          subpos_enabled: bool = False, subdiv: int = 4,
+          speed_gain: float = 4.0, speed_max: float = 2.0,
+          min_energy_frac: float = 0.05, lat_floor: float = 0.3,
+          stay_base: float = 0.0, stay_food_k: float = 0.0,
+          stay_signal_k: float = 0.0, stay_fear_k: float = 0.0,
+          stay_max: float = 0.8) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -226,6 +234,20 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         contest_cost_energy=float(contest_cost_energy),
         w_fear_health=float(w_fear_health),
         need_aggression_k=float(need_aggression_k),
+    )
+    # 13.4 波 1：亚格连续坐标（**整体替换** SubposConfig ⇒ 须一次传全，防漏传静默重置）
+    c.subpos = SubposConfig(
+        enabled=bool(subpos_enabled),
+        subdiv=int(subdiv),
+        speed_gain=float(speed_gain),
+        speed_max=float(speed_max),
+        min_energy_frac=float(min_energy_frac),
+        lat_floor=float(lat_floor),
+        stay_base=float(stay_base),
+        stay_food_k=float(stay_food_k),
+        stay_signal_k=float(stay_signal_k),
+        stay_fear_k=float(stay_fear_k),
+        stay_max=float(stay_max),
     )
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
@@ -451,6 +473,31 @@ def main() -> None:
                     help="血条恐惧项权重（低血条 ⇒ 更恐惧；能力导向）")
     ap.add_argument("--need-aggression-k", dest="need_aggression_k", type=float, default=0.5,
                     help="饥饿激进项强度（固定 0.5；D 臂设 0 = 关'饥饿更激进'）")
+    # ---- 13.4 波 1：亚格连续坐标（R169/R175；**默认全关 = 旧行为**）----
+    # 臂身份必须能从产物自证（C4）⇒ 全部进 `switches` 读回。
+    ap.add_argument("--subpos-enabled", dest="subpos_enabled", action="store_true",
+                    help="亚格连续坐标（默认关 = 旧行为，逐位等价；与 l2_dash 互斥 H3）")
+    ap.add_argument("--subpos-subdiv", dest="subdiv", type=int, default=4,
+                    help="每格 4×4=16 亚位置 ⇒ 最小步长 0.25 格")
+    ap.add_argument("--subpos-speed-gain", dest="speed_gain", type=float, default=4.0,
+                    help="speed = clamp(mob_eff×gain, 0, speed_max)；4.0 ≈ 历史 1+dash_frac")
+    ap.add_argument("--subpos-speed-max", dest="speed_max", type=float, default=2.0,
+                    help="速度上限（格/tick）；=2 使 subpos 包含 L2 冲刺语义")
+    ap.add_argument("--subpos-min-energy-frac", dest="min_energy_frac", type=float,
+                    default=0.05,
+                    help="移动能量门槛（纯能量阈值；0.05×max_energy=15，拦'真要饿死'）")
+    ap.add_argument("--subpos-lat-floor", dest="lat_floor", type=float, default=0.3,
+                    help="极区移速折减下限（speed_cap = speed_max×(lat_floor+(1−lat_floor)cos)）")
+    ap.add_argument("--subpos-stay-base", dest="stay_base", type=float, default=0.0,
+                    help="停留概率基座（默认 0 = 默认走；语义反转）")
+    ap.add_argument("--subpos-stay-food-k", dest="stay_food_k", type=float, default=0.0,
+                    help="本格还有余粮 ⇒ 停着吃（权重）")
+    ap.add_argument("--subpos-stay-signal-k", dest="stay_signal_k", type=float, default=0.0,
+                    help="收到信号 ⇒ 停（权重）")
+    ap.add_argument("--subpos-stay-fear-k", dest="stay_fear_k", type=float, default=0.0,
+                    help="邻域有威胁 ⇒ 停（权重；本波不接线，只读回）")
+    ap.add_argument("--subpos-stay-max", dest="stay_max", type=float, default=0.8,
+                    help="停留概率上限（反退化闸：任何个体至少 20% 概率移动）")
     ap.add_argument("--init-g16-clusters", dest="init_g16_clusters", default="",
                     help="R141 P0-2：g16 初始投放（逗号分隔，按簇等分人口）；"
                          "空=旧行为。校准批用 \"0.05,0.5,0.9\"")
@@ -587,6 +634,15 @@ def main() -> None:
                   contest_cost_energy=args.contest_cost_energy,
                   w_fear_health=args.w_fear_health,
                   need_aggression_k=args.need_aggression_k,
+                  # 13.4 波 1：亚格连续坐标（默认全关 = 旧行为）
+                  subpos_enabled=bool(args.subpos_enabled),
+                  subdiv=args.subdiv, speed_gain=args.speed_gain,
+                  speed_max=args.speed_max,
+                  min_energy_frac=args.min_energy_frac,
+                  lat_floor=args.lat_floor,
+                  stay_base=args.stay_base, stay_food_k=args.stay_food_k,
+                  stay_signal_k=args.stay_signal_k, stay_fear_k=args.stay_fear_k,
+                  stay_max=args.stay_max,
                   # R152/P0：捕食生态位结构 6 参
                   attack_cost=args.attack_cost, transfer_ratio=args.transfer_ratio,
                   attack_gene_gate=args.attack_gene_gate,
@@ -686,7 +742,9 @@ def main() -> None:
               "corpse_total", "corpse_eaten",
               "health_mean", "health_low_frac", "wound_n", "contest_n",
               # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率 + 血条恐惧项反退化
-              "contest_win_by_holder_frac", "fear_health_flat_frac"]
+              "contest_win_by_holder_frac", "fear_health_flat_frac",
+              # 13.4 波 1（R169/R175）：亚格坐标读数（关档 ⇒ 空串 = 未适用，R120 口径）
+              "subpos_flat_moves", "subpos_slow_frac"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -787,6 +845,9 @@ def main() -> None:
                     e.wound_probe(), "contest_win_by_holder_frac"),
                 "fear_health_flat_frac": _probe_csv(
                     e.wound_probe(), "fear_health_flat_frac"),
+                # 13.4 波 1：亚格坐标读数（关档 ⇒ None ⇒ 空串 = 未适用）
+                "subpos_flat_moves": _probe_csv(e.subpos_probe(), "mean_flat_moves"),
+                "subpos_slow_frac": _probe_csv(e.subpos_probe(), "slow_frac"),
             })
             fh.flush()
             last = t
@@ -910,6 +971,19 @@ def main() -> None:
             "contest_cost_energy": float(e.config.corpse_wound.contest_cost_energy),
             "w_fear_health": float(e.config.corpse_wound.w_fear_health),
             "need_aggression_k": float(e.config.corpse_wound.need_aggression_k),
+            # ---- 13.4 波 1：亚格连续坐标（C4 读回；臂身份 = `subpos_enabled`）----
+            # 关档 = 旧行为 ⇒ 这些键仍是"默认值读回"，不叫"未适用"（开关可读回是硬要求）。
+            "subpos_enabled": bool(e.config.subpos.enabled),
+            "subpos_subdiv": int(e.config.subpos.subdiv),
+            "subpos_speed_gain": float(e.config.subpos.speed_gain),
+            "subpos_speed_max": float(e.config.subpos.speed_max),
+            "subpos_min_energy_frac": float(e.config.subpos.min_energy_frac),
+            "subpos_lat_floor": float(e.config.subpos.lat_floor),
+            "subpos_stay_base": float(e.config.subpos.stay_base),
+            "subpos_stay_food_k": float(e.config.subpos.stay_food_k),
+            "subpos_stay_signal_k": float(e.config.subpos.stay_signal_k),
+            "subpos_stay_fear_k": float(e.config.subpos.stay_fear_k),
+            "subpos_stay_max": float(e.config.subpos.stay_max),
             # L2 几何/成本参数（「参数制造分化」的可核查性）
             "dash_min_energy_frac": float(e.config.organisms.dash_min_energy_frac),
             "dash_cost_kappa": float(e.config.organisms.dash_cost_kappa),
@@ -983,6 +1057,8 @@ def main() -> None:
             # S1 骨架（设计稿 §5.2 项 9）：尸体—食腐 + 血条读数块（**空壳**，值可为 0）
             "corpse": e.corpse_probe(),
             "wound": e.wound_probe(),
+            # 13.4 波 1：亚格坐标读数（关档 ⇒ None = 未适用，R120 口径）
+            "subpos": e.subpos_probe(),
             # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
             "energy_ledger": e.energy_ledger(),
             # R135 第 -1 步③：t=0 基因组基线（搭车诊断）
