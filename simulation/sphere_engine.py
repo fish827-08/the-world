@@ -175,10 +175,14 @@ CANNIB_BINS = 5
 #   ⚠️ 只在 **Python 路径**（`use_sim_core=False`）记账：Rust 路径的扣费发生在
 #      Rust 内部，Python 侧看不到 ⇒ `energy_channel_stats()` 会标 `path="rust"` + 值 None
 #      （**不报 0**——"没测到"与"测到 0"必须分开，本项目老坑）。
-EC_FORAGE, EC_PRED, EC_PHOTO, EC_META, EC_MOVE, EC_ATTACK = range(6)
-EC_N = 6
+EC_FORAGE, EC_PRED, EC_PHOTO, EC_META, EC_MOVE, EC_ATTACK, EC_SCAV = range(7)
+EC_N = 7
 EC_NAMES = ("intake_forage", "intake_pred", "intake_photo",
-            "cost_meta", "cost_move", "cost_attack")
+            "cost_meta", "cost_move", "cost_attack", "intake_scav")
+# 🔴 `intake_scav`（R165 0-2，2026-09-23 立）：**尸体来源的收入单列**。
+#    此前食腐质量在胃里与植物质量不可区分 ⇒ 消化时整笔记进 `intake_forage`，
+#    账本无法分离"尸体收入 vs 植物收入"（复核发现 3）。现按胃内比例归因拆开，
+#    **两者之和恒等于原 `digest × eat_efficiency`** ⇒ 既有净收入数值不变、只变得可分离。
 # 三腿的分组名（派工单 §1.1：**每 tick 按个体当前 g16 现算**，不用出生标签 ⇒ 防杂交后失效）
 EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
 # 收入侧通道（净收入 = 收入 − 支出；缺 `intake_photo` 会让净收入虚假为负——
@@ -351,6 +355,11 @@ class SphereEngine:
         # S2 主机制（设计稿 §5.3 项 3）：腐烂处资源 +50% 的 boost 剩余 tick 格数组
         "_corpse_boost",
         "_corpse_eaten_n", "_wound_n", "_contest_n",
+        # 🔴 R165 0-2：**胃内尸源质量归因**（质量单位，恒 ≤ `_stomach`）
+        "_stomach_scav",
+        # 🔴 R165 0-1：尸体池**收支闭账**四计数器（能量单位；使池守恒可自证）
+        "_corpse_deposited_e", "_corpse_overflow_e",
+        "_corpse_scav_e", "_corpse_decayed_e",
         # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率计数 + 血条恐惧项反退化计数
         "_contest_holder_win_n", "_fearh_flat_n", "_fearh_dec_n",
     )
@@ -532,6 +541,8 @@ class SphereEngine:
             n, config.organisms.initial_energy, dtype=np.float64
         )
         self._stomach = np.zeros(n, dtype=np.float64)
+        # R165 0-2：胃内"尸源"质量（归因用；关档恒 0 ⇒ 零轨迹影响）
+        self._stomach_scav = np.zeros(n, dtype=np.float64)
         self._genes = self.rng.uniform(
             config.genome.gene_min,
             config.genome.gene_max,
@@ -795,6 +806,11 @@ class SphereEngine:
         self._health = np.ones(n, dtype=np.float64)
         # S1 空壳读数计数器（设计稿 §5.2 项 9；值可为 0 —— S2/S3 接线后才累加）
         self._corpse_eaten_n = 0
+        # R165 0-1：池收支四流（见 `corpse_probe` 的 audit 段）
+        self._corpse_deposited_e = 0.0   # 投放（意图，钳制前）
+        self._corpse_overflow_e = 0.0    # 被 `corpse_cap_per_cell` 丢弃
+        self._corpse_scav_e = 0.0        # 食腐取走（能量）
+        self._corpse_decayed_e = 0.0     # 腐烂清除
         self._wound_n = 0
         self._contest_n = 0
         # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率分子 + 血条恐惧项反退化计数
@@ -872,9 +888,13 @@ class SphereEngine:
         #    `arr[idx] = f(arr[idx])` 的 fancy-index 读-改-写**只保留最后一次写入**
         #    （实测：同格 2 具各 deposit 9.0 ⇒ 只存 9.0，丢失 50%；死亡越聚集丢得越多，
         #     恰好砍在尸源最富的格上）。
+        self._corpse_deposited_e += float(deposit.sum())      # R165 0-1：投放（意图）
         np.add.at(self._corpse_energy, cells, deposit)
         # 单格上限钳制（整数组布尔就地钳制 ⇒ 无重复索引问题）
         _cap = float(_cwc.corpse_cap_per_cell)
+        # R165 0-1：溢出量单列（`np.unique` 去重 ⇒ 同格多具不重复计）
+        self._corpse_overflow_e += float(
+            np.maximum(0.0, self._corpse_energy[np.unique(cells)] - _cap).sum())
         np.clip(self._corpse_energy, 0.0, _cap, out=self._corpse_energy)
         self._corpse_age[cells] = 0
 
@@ -896,6 +916,8 @@ class SphereEngine:
             ripe = has & (self._corpse_age >= int(_cwc.corpse_decay_ticks))
             if ripe.any():
                 cells = np.flatnonzero(ripe)
+                # R165 0-1：本 tick 从池中清除的总量（能量）= 腐烂前该格存量
+                self._corpse_decayed_e += float(self._corpse_energy[cells].sum())
                 # 归还植物池（受容量上限）
                 ret = self._corpse_energy[cells] * float(_cwc.corpse_to_plant_frac)
                 room = np.maximum(
@@ -928,13 +950,20 @@ class SphereEngine:
 
         🔴 **写胃、不直接写能量**（复用 `stomach` ⇒ 天然限速，防暴富，设计稿 §三）。
         🔴 确定性数值（无 RNG 消费）⇒ 关档零开销、零轨迹影响（C7）。
+        🔴 **R165 0-1（2026-09-23）：尸体池 = 能量单位；本函数是唯一换算点**
+        （能量 → 质量等价 ÷`eat_efficiency`）。此前池按能量记、却把同一数字当**质量**
+        写进 `stomach`（消化时再 ×`eat_efficiency`）⇒ **1 单位尸体吐 3 倍能量**
+        （R163 复核实测：每次死亡净创造 1.7E）。
         """
         _cwc = self.config.corpse_wound
+        # ⚠️ 分配仍在**质量域**（对 `corpse_cap_per_cell` 与胃容量的语义零改动）：
+        #    只把"格上存量"折算成质量等价，扣减时再乘回 `eff` ⇒ Σ取×eff ≡ 池减（精确）。
+        eff = max(1e-9, float(self.config.organisms.eat_efficiency))
         g16 = np.clip(genes[:P, Gene.AGGRESSION], 0.0, 1.0)
         _s = float(_cwc.scav_s)
         _g = float(_cwc.scav_gate)
         scav_mult = g16 ** _s / (g16 ** _s + _g ** _s + 1e-12)
-        # 胃容量余量
+        # 胃容量余量（质量：`stomach` 与植物食物同池）
         room = np.maximum(0.0, stomach_cap[:P] - stomach[:P])
         want = np.minimum(
             self.config.organisms.eat_amount * scav_mult,
@@ -942,22 +971,25 @@ class SphereEngine:
         )
         if not (want > 0.0).any():
             return
-        # 🔴 R161 P1-2 修复：**按格汇总需求 → 按格上存量分配**，防"同格多体各自按全量取"
-        #    的超发（原实现实测：格上 1.0 + 同格 12 个体 ⇒ 拿走 4.78、格上变 **−3.78**
-        #    ⇒ 凭空生成能量、破坏守恒）。现改为**逐格守恒**：Σ取 ≤ 格存量，且格上恒 ≥ 0。
+        # 🔴 R161 P1-2 修复（保留）：**按格汇总需求 → 按格上存量分配**，防"同格多体各自
+        #    按全量取"的超发（原实现：格上 1.0 + 同格 12 个体 ⇒ 拿走 4.78、格上 **−3.78**
+        #    ⇒ 凭空生成能量）。现为**逐格守恒**：Σ取 ≤ 格存量，且格上恒 ≥ 0。
         cells = self._flat[:P]
         n_cells = self.world.n_cells
-        demand = np.bincount(cells, weights=want, minlength=n_cells)
-        supply = np.maximum(0.0, self._corpse_energy)
-        alloc = np.minimum(demand, supply)          # 每格实际可分配总量
+        demand = np.bincount(cells, weights=want, minlength=n_cells)   # 质量
+        supply_mass = np.maximum(0.0, self._corpse_energy) / eff       # 能量 → 质量等价
+        alloc = np.minimum(demand, supply_mass)     # 每格实际可分配（质量）
         # 个体按"格内需求占比"取（demand>0 处；其余 scale=1 免得 0 除）
         scale = np.ones(n_cells, dtype=np.float64)
         nz = demand > 0.0
         scale[nz] = alloc[nz] / demand[nz]
-        take = want * scale[cells]
+        take = want * scale[cells]                                     # 入胃质量
         if (alloc > 0.0).any():
-            # 扣减 = 每格分配总量（整数组运算 ⇒ 无重复索引问题；且已保证 ≤ 存量）
-            self._corpse_energy -= alloc
+            # 扣减 = 每格分配总量 × eff（**能量单位**；整数组运算 ⇒ 无重复索引问题，
+            # 且 `alloc ≤ supply_mass` ⇒ 池恒 ≥ 0）
+            self._corpse_energy -= alloc * eff
+            self._corpse_scav_e += float(alloc.sum()) * eff   # R165 0-1：取走（能量）
+            self._stomach_scav[:P] += take       # R165 0-2：尸源归因（质量）
             stomach[:P] += take
             self._corpse_eaten_n += int(np.count_nonzero(take > 1e-12))
 
@@ -984,6 +1016,9 @@ class SphereEngine:
         _adv = float(_cwc.holder_adv)
         _lose = float(_cwc.wound_base)          # 败者扣血（复用血条量级，Δ_loser）
         _cost = float(_cwc.contest_cost_energy) # 胜者代价
+        # 🔴 R165 0-2：胜者代价**折进 `cost_attack`**（不新开通道）。
+        #    逐 tick 收集后**一次**写入（争夺可达百万次 ⇒ 不能逐次调 `_ec_add`）。
+        _paid: list = []
         for i in eaters:
             cell = int(flat[i])
             nb = np.asarray(self.world.neighbors(cell))
@@ -1024,6 +1059,9 @@ class SphereEngine:
                 self._contest_holder_win_n += 1
             self._health[loser] = max(0.0, float(self._health[loser]) - _lose)
             energy[winner] -= _cost
+            _paid.append(int(winner))
+        if _paid:                                  # R165 0-2：一次写入（不是逐次）
+            self._ec_add(EC_ATTACK, np.asarray(_paid, dtype=np.int64), _cost)
 
     def _ec_ensure(self, n: int) -> None:
         """确保逐个体记账缓冲够长（P 会随生死/繁殖变化）。"""
@@ -1061,7 +1099,11 @@ class SphereEngine:
         if self._use_sim_core or P <= 0:
             return
         pt = self._ec_pt[:, :P]
-        net = (pt[EC_FORAGE] + pt[EC_PRED]
+        # 🔴 R165 0-2：net **必须加** `intake_scav` —— 食腐收入已从 `intake_forage`
+        #    拆出，若 net 不加它，食腐收入会从净收入里凭空消失（口径破坏）。
+        #    因为 forage + scav ≡ 原 forage，故 net **数值不变**（与派工单 §1.2 等价，
+        #    只是通道更细）—— 这一条已标注为「与派工单 §1.2 字面不符、需追认」。
+        net = (pt[EC_FORAGE] + pt[EC_PRED] + pt[EC_SCAV]
                - pt[EC_META] - pt[EC_MOVE] - pt[EC_ATTACK])
         box = np.clip((self._genes[:P, Gene.AGGRESSION] * 3).astype(np.int64), 0, 2)
         row: dict = {}
@@ -1119,6 +1161,7 @@ class SphereEngine:
             # 净收入（**按派工单口径，不含光合**）+ 含光合的附加量
             groups[name]["net_sum"] = round(float(
                 self._ec_box[b, EC_FORAGE] + self._ec_box[b, EC_PRED]
+                + self._ec_box[b, EC_SCAV]
                 - self._ec_box[b, EC_META] - self._ec_box[b, EC_MOVE]
                 - self._ec_box[b, EC_ATTACK]), 3)
             groups[name]["net_incl_photo_sum"] = round(float(
@@ -1131,8 +1174,11 @@ class SphereEngine:
             "prey": {"kills": int(self._ec_prey_kill_n),
                      "energy_sum": round(float(self._ec_prey_e_sum), 3)},
             "attack": {"attempts": int(self._duel["real_attempts"])},
-            "note": "net = intake_forage + intake_pred − cost_meta − cost_move − cost_attack"
-                    "（**不含光合**，派工单 §1.2）；net_incl_photo_* 为附加口径",
+            "note": "net = intake_forage + intake_pred + intake_scav"
+                    " − cost_meta − cost_move − cost_attack"
+                    "（**不含光合**；R165 0-2 起把 `intake_scav` 计入收入侧 ——"
+                    " 与派工单 §1.2 的 6 通道字面不同，但数值等价：forage+scav ≡ 原 forage）；"
+                    "net_incl_photo_* 为附加口径",
         }
 
     def state_bounds_check(self) -> dict:
@@ -1317,13 +1363,30 @@ class SphereEngine:
             "corpse_cap_per_cell": int(getattr(cwc, "corpse_cap_per_cell", 3)),
             "scav_gate": float(getattr(cwc, "scav_gate", 0.5)),
             "scav_s": float(getattr(cwc, "scav_s", 2.0)),
+            # 🔴 R165 0-1：**单位标记**（可自证"这批用的是哪套单位"）
+            "corpse_pool_unit": str(getattr(cwc, "corpse_pool_unit", "energy")),
+            "scav_to_energy_divisor": float(self.config.organisms.eat_efficiency),
             "corpse_total": round(float(self._corpse_energy.sum()), 6),
             "corpse_eaten": int(self._corpse_eaten_n),
+            # R165 0-1：池收支四流 + **闭账审计**
+            "corpse_deposited_e": round(float(self._corpse_deposited_e), 6),
+            "corpse_overflow_e": round(float(self._corpse_overflow_e), 6),
+            "corpse_scav_e": round(float(self._corpse_scav_e), 6),
+            "corpse_decayed_e": round(float(self._corpse_decayed_e), 6),
+            "corpse_balance_residual": round(float(
+                self._corpse_energy.sum()
+                - (self._corpse_deposited_e - self._corpse_overflow_e
+                   - self._corpse_scav_e - self._corpse_decayed_e)), 9),
             "corpse_age_max": (int(self._corpse_age.max())
                                if self._corpse_age.size else 0),
             "corpse_boost_active": int(np.count_nonzero(self._corpse_boost > 0)),
             "note": "S2 接线后 corpse_total/eaten 反映实际尸体通道；关档恒 0（未启用）。"
-                    "corpse_boost_active = 当前处于 +50% 再生加成的格数（S2 项 3）",
+                    "corpse_boost_active = 当前处于 +50% 再生加成的格数（S2 项 3）。"
+                    "R165 0-1：`corpse_pool_unit=energy` ⇒ 池以**能量**记，食腐入胃处"
+                    "按 ÷`eat_efficiency` 折算成质量 ⇒ Σ取×eff ≡ 池减。"
+                    "`corpse_balance_residual` 应恒 0（池收支只有四条流：投放/溢出/"
+                    "食腐/腐烂；非 0 ⇒ 漏记某条流）。`corpse_eaten` 是**个体计数**"
+                    "（不是质量、也不是能量）—— 2026-09-23 更正，我曾误当质量用。",
         }
 
     def wound_probe(self) -> dict:
@@ -1361,6 +1424,26 @@ class SphereEngine:
             "note": "S2 接线后 wound_n 反映血条消耗战命中数；S3 接线后 contest_n/"
                     "contest_win_by_holder_frac（判据④）与 fear_health_flat_frac（反退化，"
                     "应≈0）可读；关档恒 0/None（未启用）",
+        }
+
+    def stomach_scav_audit(self) -> dict:
+        """R165 0-2 归因自检：`_stomach_scav` 必须 ∈ [0, `_stomach`] 且无 NaN。
+
+        🔴 这是"反退化断言"（教训库 #8：有测试 ≠ 不变量被验过）：归因数组有 **4 个
+        维护位点**（食腐累加/繁殖传代/新生儿扩容/死亡压缩）—— 漏改任一处都会**静默**
+        让归因与胃脱节，而账本只会安静地记错。故本方法给出一句话自检。
+        """
+        P = len(self._id)
+        if P <= 0:
+            return {"n": 0, "over": 0, "negative": 0, "max_excess": 0.0}
+        ss = self._stomach_scav[:P]
+        st = self._stomach[:P]
+        return {
+            "n": int(P),
+            "over": int(np.count_nonzero(ss > st + 1e-9)),
+            "negative": int(np.count_nonzero(ss < -1e-12)),
+            "max_excess": round(float((ss - st).max()), 9),
+            "note": "over>0 或 negative>0 ⇒ 归因数组与胃脱节（繁殖/死亡/扩容位点漏改）",
         }
 
     def genome_t0_stats(self) -> dict:
@@ -1639,7 +1722,22 @@ class SphereEngine:
             # 🔴 口径坑（我第一版就踩了）：若记"进胃的原始食物量"（未乘 3.0），
             #    `net = 收入 − 支出` 会**虚假为负**（实测 −0.23/人·tick，而个体显然活着）
             #    ⇒ 必须与 `intake_pred`/`intake_photo`（都直接进能量）同口径。
-            self._ec_add(EC_FORAGE, None, _dg)
+            # 🔴 R165 0-2（2026-09-23）：**把胃内容按比例拆成"植物/尸体"两条腿**。
+            #    胃是**充分混合池**（两来源在 `stomach` 里不可区分）⇒ 按 `scav/stomach`
+            #    比例归因；**两腿之和恒等于 `_dg`** ⇒ 净收入数值一分不变，只是可分离。
+            #    关档（`corpse_enabled=False`）走原路径，零开销、零轨迹影响。
+            if bool(self.config.corpse_wound.corpse_enabled):
+                _sc_frac = np.clip(
+                    np.divide(self._stomach_scav[:P], stomach,
+                              out=np.zeros_like(stomach), where=stomach > 0.0),
+                    0.0, 1.0,
+                )
+                _dg_scav = _dg * _sc_frac
+                self._ec_add(EC_FORAGE, None, _dg - _dg_scav)
+                self._ec_add(EC_SCAV, None, _dg_scav)
+                self._stomach_scav[:P] -= digest * _sc_frac   # 同步扣减归因
+            else:
+                self._ec_add(EC_FORAGE, None, _dg)
             stomach -= digest
 
             # 3) 基础维持消耗（体温/活动，必扣，与温度无关基础价）
@@ -1671,7 +1769,10 @@ class SphereEngine:
                 self._health[:P] = np.minimum(
                     1.0, self._health[:P] + float(_cwc_pred.wound_heal_rate)
                 )
-                energy[_heal] -= float(_cwc_pred.wound_heal_energy_cost)
+                _heal_cost = float(_cwc_pred.wound_heal_energy_cost)
+                energy[_heal] -= _heal_cost
+                # R165 0-2：愈合耗能**折进 `cost_meta`**（维持类，不新开通道）
+                self._ec_add(EC_META, np.flatnonzero(_heal), _heal_cost)
 
         # 3.5) 植物化光合增强（g19）：统一在 stage1 之后补，确保 Rust/Python 双路径一致
         #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
@@ -2576,6 +2677,12 @@ class SphereEngine:
                 child_genes = np.empty((K, gcfg.gene_count), dtype=np.float64)
                 child_energy = np.empty(K, dtype=np.float64)
                 child_stomach = np.empty(K, dtype=np.float64)
+                # R165 0-2：Rust 繁殖路径的尸源归因**恒零** —— 该路径只在
+                # `use_sim_core=True` 时走，而 R145 H3 守卫已保证"开 corpse 时
+                # `use_sim_core=True` 直接硬报错" ⇒ 此路径下 `_stomach_scav` 恒 0。
+                # ⚠️ 这条**曾经漏写**：只在 Python 分支定义 `child_stomach_scav`，
+                #    结果 Rust 分支在 append 处 UnboundLocalError（11 例测试当场抓到）。
+                child_stomach_scav = np.zeros(K, dtype=np.float64)
                 child_exp = np.empty((K, 120), dtype=np.float64)
                 child_interp = np.empty((K, 16), dtype=np.float64)
                 child_trust = np.empty(K, dtype=np.float64)
@@ -2605,8 +2712,11 @@ class SphereEngine:
                 split = 0.3 + genes[ri, Gene.PARENTAL_INVEST] * 0.4
                 child_energy = energy[ri] * split
                 child_stomach = stomach[ri] * split
+                # R165 0-2：尸源归因随胃粮**同比**传给子代（比例不变）
+                child_stomach_scav = self._stomach_scav[ri] * split
                 energy[ri] -= child_energy
                 stomach[ri] -= child_stomach
+                self._stomach_scav[ri] -= child_stomach_scav
                 # 生完进入冷却（g12）：间隔 = g12 × 60 tick，冷却没到攒再多也不生
                 self._repro_cooldown[ri] = genes[ri, Gene.REPRO_COOLDOWN] * 60.0
                 # 愉悦度：子代继承亲代 expectation + 噪声（文化传递载体）
@@ -2655,6 +2765,9 @@ class SphereEngine:
             self._flat = np.concatenate([self._flat, self._flat[ri]])
             self._energy = np.concatenate([self._energy, child_energy])
             self._stomach = np.concatenate([self._stomach, child_stomach])
+            self._stomach_scav = np.concatenate(
+                [self._stomach_scav, child_stomach_scav])
+
             # S1 骨架：血条随子代扩容（初值 1.0，H1）；机制不接线，仅保数组同长
             self._health = np.concatenate([self._health, np.ones(K, dtype=np.float64)])
             self._genes = np.concatenate([self._genes, child_genes])
@@ -2726,6 +2839,9 @@ class SphereEngine:
             )
             self._stomach = np.concatenate(
                 [self._stomach[:P][keep], self._stomach[P:]]
+            )
+            self._stomach_scav = np.concatenate(
+                [self._stomach_scav[:P][keep], self._stomach_scav[P:]]
             )
             # S1 骨架：血条随死亡压缩（与 _energy 同节拍）；机制不接线，仅保数组同长
             self._health = np.concatenate(
@@ -3442,6 +3558,7 @@ class SphereEngine:
         data["flat"] = self._flat[:P].copy()
         data["energy"] = self._energy[:P].copy()
         data["stomach"] = self._stomach[:P].copy()
+        data["stomach_scav"] = self._stomach_scav[:P].copy()   # R165 0-2 归因
         data["genes"] = self._genes[:P].copy()
         data["age"] = self._age[:P].copy()
         data["generation"] = self._generation[:P].copy()
@@ -3475,6 +3592,9 @@ class SphereEngine:
         data["corpse_boost"] = self._corpse_boost.copy()    # (n_cells,) S2：腐烂处 +50% 计时
         data["health"] = self._health[:P].copy()            # (P,)
         data["corpse_eaten_n"] = np.array(self._corpse_eaten_n)
+        data["corpse_flows"] = np.array(
+            [self._corpse_deposited_e, self._corpse_overflow_e,
+             self._corpse_scav_e, self._corpse_decayed_e], dtype=np.float64)
         data["wound_n"] = np.array(self._wound_n)
         data["contest_n"] = np.array(self._contest_n)
         data["contest_holder_win_n"] = np.array(self._contest_holder_win_n)
@@ -3660,6 +3780,13 @@ class SphereEngine:
 
         # --- 7.6 恢复 S1 骨架数组（旧快照缺键 ⇒ 回退零值/初值，不报错）---
         # 格数组恒 (n_cells,)；health 恒 (P,)，P = len(_id)（恢复后 _id 已就位）。
+        # R165 0-2 归因数组：旧快照缺键 ⇒ 回退零（**归因从 0 起**，不报错；
+        # 该批此前的食腐收入已入 `intake_forage`，故"从旧快照续跑"的归因不可追认）。
+        engine._stomach_scav = (
+            data["stomach_scav"].copy()
+            if "stomach_scav" in data
+            else np.zeros(len(engine._id), dtype=np.float64)
+        )
         engine._corpse_energy = (
             data["corpse_energy"].copy()
             if "corpse_energy" in data
@@ -3681,6 +3808,10 @@ class SphereEngine:
             else np.ones(len(engine._id), dtype=np.float64)
         )
         engine._corpse_eaten_n = int(data["corpse_eaten_n"]) if "corpse_eaten_n" in data else 0
+        if "corpse_flows" in data:      # R165 0-1（旧快照缺键 ⇒ 回退零，不报错）
+            _fl = [float(x) for x in data["corpse_flows"]]
+            (engine._corpse_deposited_e, engine._corpse_overflow_e,
+             engine._corpse_scav_e, engine._corpse_decayed_e) = _fl[:4]
         engine._wound_n = int(data["wound_n"]) if "wound_n" in data else 0
         engine._contest_n = int(data["contest_n"]) if "contest_n" in data else 0
         engine._contest_holder_win_n = int(

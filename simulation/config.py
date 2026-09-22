@@ -540,6 +540,11 @@ class CorpseWoundConfig:
     #   取 200 ≈ 一具满能量尸体（既容纳完整尸体、又保留"防极点/聚集处无界堆叠"的意图）。
     #   ⚠️ 三处默认值必须一致：本字段 / a4 CLI / `build()` 签名（R161 P1-1 的教训）。
     corpse_cap_per_cell: int = 200        # 单格尸体能量上限
+    # 🔴 R165 0-1（2026-09-23 裁定）：**池的单位标记**。设计稿与注释口径都是
+    #    「能量」（`corpse_energy_frac`=剩余能量×0.9、cap=单格**能量**上限 200）。
+    #    单位进 `config_fingerprint` ⇒ **纪元可自证**（13.3 批无此字段且用了
+    #    「池当质量」的旧口径 ⇒ 能量层读数不可跨纪比较）。
+    corpse_pool_unit: str = "energy"      # 只允许 "energy"（换算点在食腐入胃处）
     scav_gate: float = 0.5                # 食腐 Hill 半效点（**不是硬门槛**）
     scav_s: float = 2.0                   # 食腐 Hill 陡度（scav_mult = g16^s/(g16^s+gate^s)）
 

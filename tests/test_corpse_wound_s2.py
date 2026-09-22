@@ -324,8 +324,12 @@ def test_scavenging_conserves_energy_same_cell():
     got = float(e._stomach[:P].sum())
     assert after >= -1e-9, f"格上尸体能量被扣成负值：{after}"
     assert got <= before + 1e-9, f"超发：取走 {got} ＞ 格上存量 {before}"
-    assert abs((before - after) - got) < 1e-6, (
-        f"取量与扣减不等（不守恒）：取走 {got}，格上减少 {before - after}")
+    # 🔴 R165 0-1（2026-09-23）**单位裁定**：池 = **能量**、胃 = **质量** ⇒
+    #    取量（质量）× `eat_efficiency` == 池减（能量）。旧版把池里的数字当质量用
+    #    ⇒ 池减 == 取量（**少算 eff 倍**，即"1 单位尸体吐 3 倍能量"）。
+    _eff = float(e.config.organisms.eat_efficiency)
+    assert abs((before - after) - got * _eff) < 1e-6, (
+        f"取量×{_eff} 与池减不等（不守恒）：取走 {got}、格上减少 {before - after}")
 
 
 def test_scavenging_same_cell_no_double_dip():
@@ -344,8 +348,10 @@ def test_scavenging_same_cell_no_double_dip():
     e._step_scavenging(P, e._stomach[:P], np.full(P, 100.0), e._genes[:P])
     total = float(e._stomach[:P].sum())
     assert total > 0.0, "存量充足时应当能吃到"
-    assert abs((1e9 - float(e._corpse_energy[cell])) - total) < 1e-3, (
-        "扣减量应等于总取量（逐格守恒）")
+    # 🔴 R165 0-1：池减（能量）= 取量（质量）× `eat_efficiency`（旧版漏了这个倍率）
+    _eff = float(e.config.organisms.eat_efficiency)
+    assert abs((1e9 - float(e._corpse_energy[cell])) - total * _eff) < 1e-3, (
+        "扣减量应等于总取量×eat_efficiency（逐格守恒，能量口径）")
 
 
 def test_deposit_accumulates_same_cell():

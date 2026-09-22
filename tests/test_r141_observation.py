@@ -44,13 +44,21 @@ def _engine(*, d2: bool = True, ticks: int = 300, seed: int = 42,
 
 # ---------------------------------------------------------------- ① 分通道记账
 
-def test_channel_accounting_has_six_channels_and_boxes():
+def test_channel_accounting_has_seven_channels_and_boxes():
+    """R165 0-2（2026-09-23）：通道 **6 → 7**，新增 `intake_scav`（尸体收入单列）。
+
+    加它的原因：食腐质量在胃里与植物质量不可区分 ⇒ 消化时整笔记进 `intake_forage`
+    ⇒ 账本无法分离"尸体收入 vs 植物收入"（R163 复核发现 3）。
+    """
     el = _engine().energy_ledger()
     assert el["path"] == "python"
     # 派工单 §1.3 锁定的结构（段名/键名勿改——calib_solve.py 按此消费）
     assert set(el["groups"].keys()) == {"lo", "mid", "hi"}
-    assert len(EC_NAMES) == EC_N == 6
+    assert len(EC_NAMES) == EC_N == 7
     assert "intake_photo" in EC_NAMES          # 光合是独立收入通道（不经过胃）
+    assert "intake_scav" in EC_NAMES           # R165 0-2：尸体收入单列
+    for b in ("lo", "mid", "hi"):
+        assert "intake_scav_sum" in el["groups"][b]
     for k in ("obs_count", "global", "groups", "prey", "attack"):
         assert k in el
 

@@ -893,6 +893,11 @@ def main() -> None:
             "corpse_to_plant_frac": float(e.config.corpse_wound.corpse_to_plant_frac),
             "corpse_patch_boost": float(e.config.corpse_wound.corpse_patch_boost),
             "corpse_cap_per_cell": int(e.config.corpse_wound.corpse_cap_per_cell),
+            # 🔴 R165 0-1（2026-09-23，老工）：**单位自证** —— 尸体池以**能量**记，
+            #    食腐入胃处按 ÷`eat_efficiency` 折算成质量。13.3 批（p1corpse）
+            #    无此标记且用了"池当质量"的旧口径（×3 放大）⇒ 能量层读数不可跨纪比较。
+            "corpse_pool_unit": str(e.config.corpse_wound.corpse_pool_unit),
+            "scav_to_energy_divisor": float(e.config.organisms.eat_efficiency),
             "scav_gate": float(e.config.corpse_wound.scav_gate),
             "scav_s": float(e.config.corpse_wound.scav_s),
             "wound_enabled": bool(e.config.corpse_wound.wound_enabled),

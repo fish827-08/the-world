@@ -1,16 +1,22 @@
-"""R164 记账污染量化（R163 复核附带；老工线，2026-09-22）。
+"""记账污染量化（R163 复核附带；**2026-09-23 更正版**）。
 
-把三处记账缺口换算成 **能量/人·tick**，用于修正 p1corpse 批里"净收入"类读数：
+## 为什么要更正（老工自曝）
 
-  1. 尸体来源的**质量**被记进 `intake_forage`，且消化时经 `x eat_efficiency(3.0)` ⇒
-     若尸体池按设计稿是**能量单位**，则多记 `2 x corpse_eaten`（正确应为 1x）
-  2. `contest_cost_energy` 不入账 ⇒ 漏计 `0.5 x contest_n`（只影响开争夺的臂）
-  3. `wound_heal_energy_cost` 亦未入账（本脚本不估，量级更小）
+初版把 `corpse_probe()["corpse_eaten"]` 当作**质量**算"×3 放大"。实际上它是
+`_corpse_eaten_n` = **个体计数**（每 tick"取到食的个体数"累加，见
+`_step_scavenging` 的 `+= int(np.count_nonzero(take > 1e-12))`）——
+**既不是质量、也不是能量**（所有者 R164 帖里写的就是"万**次**"）。
+⇒ 初版那条 "+3x infl ≈ 0.06 能量/人·tick" 量纲错误，**已作废**。
 
-`∫N dt` 用 `final_N x ticks` 近似（饱和态下误差小）。纯 ASCII，只读。
+## 现在能算的
 
-用法：在仓库根运行
-    .venv/Scripts/python.exe -X utf8 tools/r164_ledger_impact.py
+| 项 | 可否量化 | 口径 |
+|---|---|---|
+| `contest_cost` 漏计 | ✅ 可算 | `contest_cost_energy × contest_n ÷ ∫N dt`（两者同为"能量"） |
+| `heal_cost` 漏计 | ⚠️ 未算（量级更小） | `wound_heal_energy_cost × 愈合个体·tick` |
+| 尸体 ×3 放大 | ❌ 13.3 批**不可事后量化** | 缺质量/能量计数 ⇒ 13.4 起用 `intake_scav` 前向测 |
+
+用法：`.venv/Scripts/python.exe -X utf8 tools/r164_ledger_impact.py [批目录]`
 """
 from __future__ import annotations
 
@@ -32,28 +38,29 @@ for p in sorted(glob.glob(os.path.join(BATCH, "*.summary.json"))):
     seed = name.split("_s")[-1][:-13]
     n = int(r["final_N"])
     pt = n * TICKS
-    ce = float(r["corpse"]["corpse_eaten"])
-    cn = float(r["wound"].get("contest_n") or 0.0)
-    infl = 2.0 * ce / pt
-    miss = float(r["wound"]["contest_cost_energy"]) * cn / pt
-    rows.append((arm, seed, n, ce, cn, infl, miss))
+    miss = float(r["wound"]["contest_cost_energy"]) * float(
+        r["wound"].get("contest_n") or 0.0) / pt
+    led = (r.get("energy_ledger") or {}).get("global") or {}
+    scav = led.get("intake_scav_sum")
+    rows.append((arm, seed, n, miss, scav))
 
 print(f"=== ledger contamination audit: {BATCH} ===")
-print(f"  {'arm':<4}{'seed':>5}{'N':>6}{'corpse_eaten':>14}{'contest_n':>12}"
-      f"{'+3x infl':>11}{'miss cost':>11}{'sum':>9}")
-for a, s, n, ce, cn, i, m in rows:
-    print(f"  {a:<4}{s:>5}{n:>6}{ce:>14.1f}{cn:>12.0f}{i:>11.4f}{m:>11.4f}{i + m:>9.4f}")
+print("  NOTE: `corpse_eaten` 是**个体计数**，不可当质量/能量用（初版错误，已更正）")
+print(f"  {'arm':<4}{'seed':>5}{'N':>6}{'missed contest cost':>21}"
+      f"{'intake_scav_sum':>18}")
+for a, s, n, m, sc in rows:
+    txt = f"{sc:.4f}" if sc is not None else "n/a (13.3 批无此列)"
+    print(f"  {a:<4}{s:>5}{n:>6}{m:>21.4f}{txt:>18}")
 
 print()
-print("=== per-arm median (energy per person-tick) ===")
+print("=== per-arm median: missed contest cost (energy per person-tick) ===")
 agg = {}
-for a, s, n, ce, cn, i, m in rows:
-    agg.setdefault(a, []).append((i, m))
+for a, s, n, m, sc in rows:
+    agg.setdefault(a, []).append(m)
 for a in sorted(agg):
-    v = agg[a]
-    print(f"  {a}: +3x={st.median([x[0] for x in v]):>7.4f}  "
-          f"miss={st.median([x[1] for x in v]):>7.4f}  "
-          f"total={st.median([x[0] + x[1] for x in v]):>7.4f}")
+    print(f"  {a}: {st.median(agg[a]):>7.4f}")
 print()
-print("note: '+3x infl' 是**均摊上界**；实际 `scav_mult` 强 g16 门控 ⇒ 收入集中在")
-print("      mid/hi 箱 ⇒ hi 箱的真实修正更大（分层需 `intake_scav` 通道）。")
+print("=> This term biases arms with contests ON (D) systematically POSITIVE:")
+print("   R164's 'net income turned positive' must subtract it.")
+print("=> The corpse x3 inflation CANNOT be quantified post-hoc for 13.3 runs;")
+print("   from 13.4 on it is read directly from energy_ledger.intake_scav_sum.")
