@@ -297,3 +297,84 @@ def test_s2_probes_off_shell():
     assert cp["corpse_eaten"] == 0
     assert wp["wound_n"] == 0
     assert wp["contest_n"] == 0
+
+
+# --------------------------------------------------------------- ⑧ R161 回归：同格多体
+# 原 32 例新测试**无一覆盖"同格多体"** ⇒ 两个真 bug 恰好落在盲区（单个体情形全绿）。
+# 本组两例是它们的**最小反例**（[所有者·天平] 2026-09-22 修复时补）。
+
+def test_scavenging_conserves_energy_same_cell():
+    """R161 P1-2 回归：同格多体食腐**必须守恒**（Σ取 ≤ 格存量，格上恒 ≥ 0）。
+
+    原 bug：每人按"格上全量"取 ⇒ 实测 12 个体从格上 1.0 拿走 **4.78**、格上变 **−3.78**
+    （凭空生成能量 + 负值污染 corpse_total）。
+    """
+    e = _engine(corpse=True)
+    P = len(e._id)
+    assert P >= 2, "需要 ≥2 个体才能构造同格场景"
+    e._genes[:, Gene.AGGRESSION] = 0.99          # scav_mult ≈ 1
+    cell = 3600
+    e._flat[:P] = cell                           # 全体同格
+    e._corpse_energy[:] = 0.0
+    e._corpse_energy[cell] = 1.0                 # 格上只有 1.0
+    e._stomach[:P] = 0.0
+    before = float(e._corpse_energy[cell])
+    e._step_scavenging(P, e._stomach[:P], np.full(P, 100.0), e._genes[:P])
+    after = float(e._corpse_energy[cell])
+    got = float(e._stomach[:P].sum())
+    assert after >= -1e-9, f"格上尸体能量被扣成负值：{after}"
+    assert got <= before + 1e-9, f"超发：取走 {got} ＞ 格上存量 {before}"
+    assert abs((before - after) - got) < 1e-6, (
+        f"取量与扣减不等（不守恒）：取走 {got}，格上减少 {before - after}")
+
+
+def test_scavenging_same_cell_no_double_dip():
+    """R161 P1-2 回归（同族）：格存量**充足**时，每人应按自己的需求取（不得互相吞噬）。
+
+    这是"超额分配"的对照组：`Σwant ≤ 存量` ⇒ 每人拿满 `want`、格上按总需求扣减。
+    """
+    e = _engine(corpse=True)
+    P = len(e._id)
+    e._genes[:, Gene.AGGRESSION] = 0.99
+    cell = 3610
+    e._flat[:P] = cell
+    e._corpse_energy[:] = 0.0
+    e._corpse_energy[cell] = 1e9                 # 存量充足
+    e._stomach[:P] = 0.0
+    e._step_scavenging(P, e._stomach[:P], np.full(P, 100.0), e._genes[:P])
+    total = float(e._stomach[:P].sum())
+    assert total > 0.0, "存量充足时应当能吃到"
+    assert abs((1e9 - float(e._corpse_energy[cell])) - total) < 1e-3, (
+        "扣减量应等于总取量（逐格守恒）")
+
+
+def test_deposit_accumulates_same_cell():
+    """R161 P1-3 回归：同格多具尸体**必须累加**。
+
+    原 bug：`arr[idx] = f(arr[idx])` 的 fancy-index 读-改-写只保留最后一次写入
+    ⇒ 实测同格 2 具各 deposit 9.0 只存 **9.0**（丢失 50%）。
+    """
+    e = _engine(corpse=True)
+    P = min(len(e._id), 4)
+    assert P >= 2, "需要 ≥2 个体才能构造同格场景"
+    cell = 3700
+    e._flat[:P] = cell
+    e._corpse_energy[:] = 0.0
+    dead = np.zeros(P, dtype=bool)
+    dead[:2] = True                              # 前两个同 tick 死亡
+    energy = np.zeros(P, dtype=np.float64)
+    energy[:2] = 10.0                            # 每个 deposit = 10 × 0.9 = 9.0
+    e._deposit_corpse(dead, energy)
+    got = float(e._corpse_energy[cell])
+    assert abs(got - 18.0) < 1e-9, (
+        f"同格 2 具各 9.0 应得 18.0，实得 {got}（丢失 {18.0 - got:.3f}）")
+
+
+def test_cap_scale_matches_corpse_energy():
+    """R161 裁定：`corpse_cap_per_cell` 语义 = **单格尸体能量上限**，量级须 ≥ 一具尸体。
+
+    猎物尸体 = 剩余能量 × 0.9 ≈ 126–198 ⇒ cap=3 会把整具尸体钳掉（尸体通道失去意义）。
+    """
+    cwc = CorpseWoundConfig()
+    assert int(cwc.corpse_cap_per_cell) >= 200, (
+        f"cap={cwc.corpse_cap_per_cell} 小于一具尸体能量（126–198）⇒ 尸体通道被钳死")

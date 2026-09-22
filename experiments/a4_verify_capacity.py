@@ -166,11 +166,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           # 逐位等价；机制未接线，开关仅建字段 + 读回）
           corpse_enabled: bool = False, corpse_energy_frac: float = 0.9,
           corpse_decay_ticks: int = 600, corpse_to_plant_frac: float = 0.5,
-          corpse_patch_boost: float = 0.5, corpse_cap_per_cell: int = 3,
+          corpse_patch_boost: float = 0.5, corpse_cap_per_cell: int = 200,
           scav_gate: float = 0.5, scav_s: float = 2.0,
           wound_enabled: bool = False, wound_base: float = 0.35,
           wound_heal_rate: float = 0.001, wound_heal_energy_cost: float = 0.05,
-          contest_enabled: bool = False, holder_adv: float = 0.3,
+          contest_enabled: bool = False, holder_adv: float = 1.2,
           escalation_gap: float = 0.25, contest_cost_energy: float = 0.5,
           w_fear_health: float = 0.5, need_aggression_k: float = 0.5) -> SphereEngine:
     c = SimConfig(seed=seed)
@@ -417,15 +417,15 @@ def main() -> None:
     ap.add_argument("--corpse-enabled", dest="corpse_enabled", action="store_true",
                     help="尸体—食腐通道（默认关 = 旧行为；S1 只建字段，机制不接线）")
     ap.add_argument("--corpse-energy-frac", dest="corpse_energy_frac", type=float, default=0.9,
-                    help="死亡时剩余能量 × 该比例 转入尸体格（留 10% 分解即失）")
+                    help="死亡时剩余能量 × 该比例 转入尸体格（留 10%% 分解即失）")
     ap.add_argument("--corpse-decay-ticks", dest="corpse_decay_ticks", type=int, default=600,
                     help="尸体存续 tick（≈ 世代时间 ⇒ 脉冲可累积，Noy-Meir）")
     ap.add_argument("--corpse-to-plant-frac", dest="corpse_to_plant_frac", type=float, default=0.5,
                     help="腐烂归还植物池比例（其余为分解损失）")
     ap.add_argument("--corpse-patch-boost", dest="corpse_patch_boost", type=float, default=0.5,
-                    help="腐烂处资源 +50%（持续 2000 tick）")
-    ap.add_argument("--corpse-cap-per-cell", dest="corpse_cap_per_cell", type=int, default=3,
-                    help="单格尸体能量上限（防极点/聚集处无界堆叠）")
+                    help="腐烂处资源 +50%%（持续 2000 tick）")
+    ap.add_argument("--corpse-cap-per-cell", dest="corpse_cap_per_cell", type=int, default=200,
+                    help="单格尸体**能量**上限（R161 裁定：非尸具数；200 ≈ 一具满能量尸体）")
     ap.add_argument("--scav-gate", dest="scav_gate", type=float, default=0.5,
                     help="食腐 Hill 半效点（**不是硬门槛**；R156 陷阱修正 1）")
     ap.add_argument("--scav-s", dest="scav_s", type=float, default=2.0,
@@ -441,8 +441,8 @@ def main() -> None:
                     help="愈合耗能 / tick（不免费）")
     ap.add_argument("--contest-enabled", dest="contest_enabled", action="store_true",
                     help="争夺食物战（RHP；默认关 = 旧行为；S3 接线）")
-    ap.add_argument("--holder-adv", dest="holder_adv", type=float, default=0.3,
-                    help="持有者优势（Parker 1974）")
+    ap.add_argument("--holder-adv", dest="holder_adv", type=float, default=1.2,
+                    help="持有者优势（Parker 1974；R161 裁定默认 1.2 —— 0.3 被 RHP 的 (0.3+g16) 淹没）")
     ap.add_argument("--escalation-gap", dest="escalation_gap", type=float, default=0.25,
                     help="不升级的 RHP 差阈值（只有接近才升级）")
     ap.add_argument("--contest-cost-energy", dest="contest_cost_energy", type=float, default=0.5,

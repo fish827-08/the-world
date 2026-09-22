@@ -868,11 +868,14 @@ class SphereEngine:
         # 🔴 饿死个体能量 ≤ 0 ⇒ deposit 可为负 ⇒ 钳到 ≥0（"老死/饿死自然很轻"= 0，
         #    不得写成负数污染格上总量）。
         deposit = np.maximum(0.0, deposit)
-        # 单格上限钳制（np.minimum 后写回；同格多具叠加时以"加总后钳制"为准）
-        total = self._corpse_energy[cells] + deposit
-        self._corpse_energy[cells] = np.minimum(
-            total, float(_cwc.corpse_cap_per_cell)
-        )
+        # 🔴 R161 P1-3 修复：必须用 `np.add.at` **累加** —— 同格多具尸体时
+        #    `arr[idx] = f(arr[idx])` 的 fancy-index 读-改-写**只保留最后一次写入**
+        #    （实测：同格 2 具各 deposit 9.0 ⇒ 只存 9.0，丢失 50%；死亡越聚集丢得越多，
+        #     恰好砍在尸源最富的格上）。
+        np.add.at(self._corpse_energy, cells, deposit)
+        # 单格上限钳制（整数组布尔就地钳制 ⇒ 无重复索引问题）
+        _cap = float(_cwc.corpse_cap_per_cell)
+        np.clip(self._corpse_energy, 0.0, _cap, out=self._corpse_energy)
         self._corpse_age[cells] = 0
 
     def _step_corpse_decay(self) -> None:
@@ -937,11 +940,24 @@ class SphereEngine:
             self.config.organisms.eat_amount * scav_mult,
             room,
         )
-        cell_corpse = self._corpse_energy[self._flat[:P]]
-        take = np.minimum(want, cell_corpse)
-        if take.any():
-            # 同格多个体时逐格扣减（np.subtract.at 对重复索引安全）
-            np.subtract.at(self._corpse_energy, self._flat[:P], take)
+        if not (want > 0.0).any():
+            return
+        # 🔴 R161 P1-2 修复：**按格汇总需求 → 按格上存量分配**，防"同格多体各自按全量取"
+        #    的超发（原实现实测：格上 1.0 + 同格 12 个体 ⇒ 拿走 4.78、格上变 **−3.78**
+        #    ⇒ 凭空生成能量、破坏守恒）。现改为**逐格守恒**：Σ取 ≤ 格存量，且格上恒 ≥ 0。
+        cells = self._flat[:P]
+        n_cells = self.world.n_cells
+        demand = np.bincount(cells, weights=want, minlength=n_cells)
+        supply = np.maximum(0.0, self._corpse_energy)
+        alloc = np.minimum(demand, supply)          # 每格实际可分配总量
+        # 个体按"格内需求占比"取（demand>0 处；其余 scale=1 免得 0 除）
+        scale = np.ones(n_cells, dtype=np.float64)
+        nz = demand > 0.0
+        scale[nz] = alloc[nz] / demand[nz]
+        take = want * scale[cells]
+        if (alloc > 0.0).any():
+            # 扣减 = 每格分配总量（整数组运算 ⇒ 无重复索引问题；且已保证 ≤ 存量）
+            self._corpse_energy -= alloc
             stomach[:P] += take
             self._corpse_eaten_n += int(np.count_nonzero(take > 1e-12))
 

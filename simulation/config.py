@@ -534,11 +534,12 @@ class CorpseWoundConfig:
     corpse_decay_ticks: int = 600         # 尸体存续 tick（≈ 世代时间 ⇒ 脉冲可累积，Noy-Meir）
     corpse_to_plant_frac: float = 0.5     # 腐烂归还植物池比例（其余为分解损失）
     corpse_patch_boost: float = 0.5       # 腐烂处资源 +50%（持续 2000 tick）
-    # 🔴 cap 由 3 → 30（2026-09-22 自行优化，fish 授权"23 自行优化"）：
-    #   原值 3 连**一具完整尸体**的能量都放不下（猎物尸体 ~126–198 能量 ⇒ 一进即被钳到 3，
-    #   corpse_total 2000 tick 仅 ~100 ⇒ 尸体通道价值被压没）；30 ≈ max_energy/10，
-    #   既能容纳完整尸体、又保留"防极点/聚集处无界堆叠"的意图。
-    corpse_cap_per_cell: int = 30         # 单格尸体能量上限（防极点/聚集处无界堆叠）
+    # 🔴 cap 由 3 → 30 → **200**（R161 裁定：语义 = **单格尸体能量上限**，不是"尸具数"）。
+    #   猎物尸体能量 = 剩余能量 × 0.9 ≈ **126–198** ⇒ cap 必须 ≥ 一具完整尸体，
+    #   否则一进格就被钳掉（cap=3 时 corpse_total 2000 tick 仅 ~100 ⇒ 尸体通道价值被压没）。
+    #   取 200 ≈ 一具满能量尸体（既容纳完整尸体、又保留"防极点/聚集处无界堆叠"的意图）。
+    #   ⚠️ 三处默认值必须一致：本字段 / a4 CLI / `build()` 签名（R161 P1-1 的教训）。
+    corpse_cap_per_cell: int = 200        # 单格尸体能量上限
     scav_gate: float = 0.5                # 食腐 Hill 半效点（**不是硬门槛**）
     scav_s: float = 2.0                   # 食腐 Hill 陡度（scav_mult = g16^s/(g16^s+gate^s)）
 
