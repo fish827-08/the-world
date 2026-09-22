@@ -51,6 +51,20 @@ class ResourceConfig:
 
     capacity_per_area: float = 40.0   # 每单位面积的食物上限（容量）
     regrowth_rate: float = 0.5        # 基准再生：温度合适时每 tick 每格长多少
+    # 🔴 13.4 波 2（fish 00:38 裁定，**本波暂不改**）：**格内**取食速度必须 > 斑块生长速度。
+    #   本字段将由 0.5 → **0.4**（配 `OrganismConfig.eat_amount` 0.6）。
+    #   ⚠️ 为什么**不**在波 1 改（已裁定，见板帖 R174）：
+    #     (1) 改它 = **改构造** ⇒ 会改变人口承载，并迫使更新 **7 处写死的 C7 基线 digest**
+    #         （`(573985, 8171.692943)`）⇒ 与"坐标基础设施"混在一笔，会让波 1 的验收点
+    #         「关档逐位等价」**失去可验证性**（同时改两件事 ⇒ 归因不干净）；
+    #     (2) §14.6「阶段边界必须可发布 / 一次只改一件事」；
+    #     (3) 它与 `cell_occupancy_cap`（单格个体上限，见 §十一.2）**必须同批** ——
+    #         两者共同决定"**站着不动到底能不能活**"，分开做会得到互相矛盾的读数。
+    #   📐 依据（R171 §十.2 的构造巧合）：原 0.5 与 `eat_amount`(0.5) **数值恰好相等** ⇒
+    #     "一个静止个体独占一格"时"取 0.5 / 补 0.5"恰好动态平衡 ⇒ 静止成为**可持续策略**。
+    #   📐 波 2 改后：格内比值 **1.5** ⇒ 静止者 `40/(0.6−0.4)` = **200 tick 吃空一格**；
+    #     全球裕度：总再生 `Σcell_area(4586)×0.4 = 1834` vs 总需求 `N(1944)×0.6 = 1166` ⇒ **+57%**。
+    #     （两个层面不矛盾：格内"吃>长"⇒ 必须移动；全球"需求<再生"⇒ 整体不枯竭。）
     temp_sensitivity: float = 1.0     # 再生对温度的依赖（0=不 care，越大越敏感）
     initial_fill: float = 0.5         # 初始填充比例（每格开始有多少食物，0~1）
 
@@ -95,6 +109,10 @@ class OrganismConfig:
     base_metabolism: float = 0.6      # 每 tick 基础维持消耗（体温/活动）
     move_cost: float = 0.4            # 移动一格的基础能量消耗
     eat_amount: float = 0.5           # 每 tick 每格进食量上限
+    # 🔴 13.4 波 2（fish 00:38 裁定，**本波暂不改**）：将由 0.5 → **0.6**，
+    #   与 `ResourceConfig.regrowth_rate`(0.4) 配对实现"**格内吃 > 长**"（比值 1.5）。
+    #   ⚠️ 本波不改的三条理由、全球裕度核算、以及"必须与 `cell_occupancy_cap`（单格个体上限）
+    #   同批"这条依赖 —— 全部见 `regrowth_rate` 处注释。
     eat_efficiency: float = 3.0       # 每单位食物转化为能量的倍率
     # 🔴 R148 §五.2（内评 §一.2 选项 b，所有者裁定「暂不统一但必须补声明」）：
     #   **`stomach` 有两条独立的容量上限，取决于写入路径** —— 这是**既有行为**，不是缺陷：
@@ -659,6 +677,71 @@ SIGNAL_ALPHABET_IMPLEMENTED: tuple[str, ...] = ("16", "4", "8")
 
 
 @dataclass
+class SubposConfig:
+    """亚格连续坐标（13.4 波 1）—— 把"每 tick 必走满 1 格"细化为 0.25 格粒度。
+
+    为什么
+    ------
+    旧行为：移动决策从 8 邻格选 1，**位移恒 = 1 格**，且候选不含自身 ⇒ **没有"原地不动"**
+    ⇒ 世界体感小（个体每 tick 都在跳整格，既不能慢行、也不能停下来进食或观察）。
+
+    本配置把位移细化为 `0 / 0.25 / … / speed_max` 格（`subdiv=4`），并把语义从
+    "以概率**移动**"改为"**默认走、以概率停**"（`stay_prob_eff` 决定停，见设计稿 §十.4）。
+
+    🔴 三条不变式（违反即返工）
+    --------------------------
+    * **I1** `enabled=False` ⇒ **不进任何新代码路径** ⇒ C7 逐位等价（基线 `(573985, 8171.692943)`）
+    * **I2** `_flat` 恒与 `(sub_r, sub_c)` 一致；派生**只走 `world.rc_to_flat`**
+      （极点坍缩/经度环绕**只有一处定义**，防两处规则漂移）
+    * **I3** **不新增每 tick 随机抽取** —— 速度由已算好的 `mob_eff` **确定性**推导。
+      这是 L2 的核心契约：`rand_choice` 被 `%100` / `//100` **位域拆分**为
+      "冲刺闸 + 盲选方向"两用，动了随机流形状就作废 L2 的全部对拍价值。
+
+    🔴 H3 互斥（fail-loud）
+    -----------------------
+    `enabled=True` 且 `SimulationConfig.l2_dash=True` ⇒ **构造期直接抛**
+    （同 `l2_dash` / `corpse_enabled` 的先例，禁止静默换路径）：
+    两者都是"**走多远**"的乘子（L2 只有 1/2 两档，subpos 是它的一般化），同开会
+    语义冲突，且 `dash_frac` 与 `steps` 两个读数互相污染 ⇒ 归因不干净。
+
+    ⚠️ 另一个必须记住的构造后果（设计稿 §二）
+    -----------------------------------------
+    老逻辑移动者**位移恒 ≥ 1 格 ⇒ 跨格 100%**；subpos 下位移可以 < 1 格 ⇒ **不换格**。
+    而取食/信号/尸体/资源**全部按整数格**（I2）⇒ 位移不足 1 格**在格层面等于没动**。
+    因此判据必须用 **`mean_flat_moves_per_tick`（真正跨格的比例）**，**不是 `mean_steps`**
+    —— 后者会把"原地挪小步"误读成"在移动"。见 §2.2 的校准（`speed_gain` 初值 4.0）。
+    """
+
+    enabled: bool = False            # 总开关（默认关 = 旧行为**逐位一致**；S1 骨架不接线机制）
+    subdiv: int = 4                  # 每格 4×4 = 16 个亚位置 ⇒ 最小步长 0.25 格
+    speed_gain: float = 4.0          # speed = clamp(mob_eff × gain, 0, speed_max)
+    #                                  初值 4.0：`mob_eff` 实测均值 ≈0.27 ⇒ 0.27×4 ≈ 1.08 格，
+    #                                  贴近历史 `1 + dash_frac`（1.12–1.24）⇒ 跨格频率不塌（§2.2）
+    speed_max: float = 2.0           # 速度上限（格/tick）；=2 使 subpos **包含** L2 的冲刺语义
+    min_energy_frac: float = 0.2     # 移动能量门槛（**纯能量阈值**，沿用 L2 口径，不另造一套）
+    lat_floor: float = 0.3           # 极区移速折减下限：
+    #                                  speed_cap = speed_max × (lat_floor + (1−lat_floor)·cos 纬度)
+    #                                  ⇒ 赤道 100%、极区 30%（fish 00:30"极区移速更慢"）
+    # ---- 停留概率（语义反转：**默认走、以概率停**；由状态/信息驱动）----
+    stay_base: float = 0.0           # 基座停留概率
+    stay_food_k: float = 0.0         # 本格还有余粮 ⇒ 停着吃
+    stay_signal_k: float = 0.0       # 收到信号 ⇒ 停（去看/听）
+    stay_fear_k: float = 0.0         # 邻域有威胁 ⇒ 停（隐蔽）
+    stay_max: float = 0.8            # 🔴 停留概率**上限** = 硬性**反退化闸**
+    #                                  （任何个体至少 20% 概率移动；防"一群不动的生物"，R171 §十）
+
+    def __post_init__(self) -> None:
+        assert self.subdiv >= 1, "subdiv 至少 1"
+        assert self.speed_gain >= 0.0, "speed_gain 非负"
+        assert self.speed_max > 0.0, "speed_max 为正"
+        assert 0.0 <= self.min_energy_frac <= 1.0, "min_energy_frac 是比例（0~1）"
+        assert 0.0 <= self.lat_floor <= 1.0, "lat_floor 在 0~1"
+        for _nm in ("stay_base", "stay_food_k", "stay_signal_k", "stay_fear_k"):
+            assert 0.0 <= getattr(self, _nm) <= 1.0, f"{_nm} 在 0~1"
+        assert 0.0 <= self.stay_max < 1.0, "stay_max 必须 < 1（反退化闸：不许全停）"
+
+
+@dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
 
@@ -677,6 +760,10 @@ class SimConfig:
     fruit: FruitConfig = field(default_factory=FruitConfig)
     # ---- 尸体—食腐 + 血条（S1 骨架；默认全关 = 旧行为逐位一致）----
     corpse_wound: CorpseWoundConfig = field(default_factory=CorpseWoundConfig)
+    # ---- 13.4 波 1：亚格连续坐标（默认关 = 旧行为**逐位一致**）----
+    #   ⚠️ 挂进 SimConfig ⇒ 由 `to_dict()`/`config_fingerprint()`（= `asdict`）**自动进指纹**
+    #      ⇒ "跨档续跑"会被拦（同 `signal_alphabet` 的机制）。
+    subpos: SubposConfig = field(default_factory=SubposConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
