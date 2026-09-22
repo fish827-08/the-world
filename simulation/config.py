@@ -518,6 +518,75 @@ class OracleConfig:
             )
 
 
+@dataclass
+class CorpseWoundConfig:
+    """尸体—食腐 + 血条—受伤（S1 骨架；设计稿 §三参数表）。
+
+    🔴 **S1 阶段只建字段 + 读回，机制一律不接线**（开关存在但不动行为，
+    默认全关 = 旧行为逐位一致，C7 digest 钉死）。S2/S3 才接线。
+    🔴 全部须可 CLI 调 + `switches` 读回（C4）—— 参数表见
+    `docs/设计文档/设计-尸体食腐与血条恐惧-云端实施-20260922.md` §三。
+    """
+
+    # ---- 尸体—食腐通道（R156 定稿；fish 01:2x 构想）----
+    corpse_enabled: bool = False          # 总开关（默认关 = 旧行为；S2 接线）
+    corpse_energy_frac: float = 0.9       # 死亡时剩余能量 ×0.9 转入尸体格（留 10% 分解即失）
+    corpse_decay_ticks: int = 600         # 尸体存续 tick（≈ 世代时间 ⇒ 脉冲可累积，Noy-Meir）
+    corpse_to_plant_frac: float = 0.5     # 腐烂归还植物池比例（其余为分解损失）
+    corpse_patch_boost: float = 0.5       # 腐烂处资源 +50%（持续 2000 tick）
+    # 🔴 cap 由 3 → 30 → **200**（R161 裁定：语义 = **单格尸体能量上限**，不是"尸具数"）。
+    #   猎物尸体能量 = 剩余能量 × 0.9 ≈ **126–198** ⇒ cap 必须 ≥ 一具完整尸体，
+    #   否则一进格就被钳掉（cap=3 时 corpse_total 2000 tick 仅 ~100 ⇒ 尸体通道价值被压没）。
+    #   取 200 ≈ 一具满能量尸体（既容纳完整尸体、又保留"防极点/聚集处无界堆叠"的意图）。
+    #   ⚠️ 三处默认值必须一致：本字段 / a4 CLI / `build()` 签名（R161 P1-1 的教训）。
+    corpse_cap_per_cell: int = 200        # 单格尸体能量上限
+    scav_gate: float = 0.5                # 食腐 Hill 半效点（**不是硬门槛**）
+    scav_s: float = 2.0                   # 食腐 Hill 陡度（scav_mult = g16^s/(g16^s+gate^s)）
+
+    # ---- 血条—受伤（H1–H5；fish 01:48 构想）----
+    wound_enabled: bool = False           # 总开关（默认关 = 旧行为；S2 接线）
+    wound_base: float = 0.35              # 每次成功攻击扣血条 Δ（×(0.5+0.5×攻击性)）
+    wound_heal_rate: float = 0.001        # 每 tick 恢复（上限 1.0；完全愈合 1000 tick）
+    wound_heal_energy_cost: float = 0.05  # 愈合耗能 / tick（不免费）
+
+    # ---- 争夺食物战（H3；S3 接线）----
+    contest_enabled: bool = False         # 总开关（默认关 = 旧行为；S3 接线）
+    # 🔴 holder_adv 由 0.3 → 1.2（2026-09-22 自行优化，fish 授权"23 自行优化"）：
+    #   原值 0.3 被 RHP 中 `(0.3+g16)` 的 g16 线性放大淹没（g16 差 0.3 ⇒ RHP ~2×，
+    #   0.3 只给 1.3× ⇒ 持有者胜率实测 ~0.41，远低于判据④ >55%）；且原实现
+    #   "撤退分支不计胜负"导致读数系统性低估（已修复，loser==j 记 holder 胜）。
+    #   1.2 时**正式配置**（默认 max_count=5000）多 seed 实测持有者胜率 0.66–0.85
+    #   （判据④ >55% 达标，且保留挑战者 ~30% 胜率 ⇒ 争夺战不失去意义）。
+    holder_adv: float = 1.2               # 持有者优势（Parker 1974）
+    escalation_gap: float = 0.25          # 不升级的 RHP 差阈值（只有接近才升级）
+    contest_cost_energy: float = 0.5      # 驱逐战的代价（防"免费赶人"）
+
+    # ---- 恐惧/激进项（S3；方向相反，各自开关）----
+    w_fear_health: float = 0.5            # 血条恐惧项权重（低血条 ⇒ 更恐惧；能力导向）
+    need_aggression_k: float = 0.5        # 饥饿激进项强度（固定 0.5；D 臂设 0 = 关"饥饿更激进"）
+
+    def __post_init__(self) -> None:
+        assert 0.0 <= self.corpse_energy_frac <= 1.0, "corpse_energy_frac ∈ [0,1]"
+        assert self.corpse_decay_ticks >= 1, "corpse_decay_ticks ≥ 1"
+        assert 0.0 <= self.corpse_to_plant_frac <= 1.0, "corpse_to_plant_frac ∈ [0,1]"
+        assert self.corpse_patch_boost >= 0, "corpse_patch_boost 非负"
+        assert self.corpse_cap_per_cell >= 1, "corpse_cap_per_cell ≥ 1"
+        assert 0.0 <= self.scav_gate <= 1.0, "scav_gate ∈ [0,1]（半效点，非门槛）"
+        assert self.scav_s > 0, "scav_s > 0"
+        assert 0.0 <= self.wound_base <= 1.0, "wound_base ∈ [0,1]"
+        assert 0.0 <= self.wound_heal_rate <= 1.0, "wound_heal_rate ∈ [0,1]"
+        assert self.wound_heal_energy_cost >= 0, "wound_heal_energy_cost 非负"
+        assert self.holder_adv >= 0, "holder_adv 非负（持有者优势）"
+        assert self.escalation_gap >= 0, "escalation_gap 非负"
+        assert self.contest_cost_energy >= 0, "contest_cost_energy 非负"
+        assert self.w_fear_health >= 0, "w_fear_health 非负"
+        assert self.need_aggression_k >= 0, "need_aggression_k 非负"
+
+
+# 旧存档回退（corpse_wound）：未知键忽略、缺失键用默认值（同 oracle/_INFO_FIELDS 先例）。
+_CORPSE_WOUND_FIELDS: frozenset = frozenset(f.name for f in fields(CorpseWoundConfig))
+
+
 # 旧存档回退（oracle）：未知键忽略、缺失键用默认值。
 _ORACLE_FIELDS: frozenset = frozenset(f.name for f in fields(OracleConfig))
 
@@ -601,6 +670,8 @@ class SimConfig:
     culture: CultureConfig = field(default_factory=CultureConfig)
     info_structure: InfoStructureConfig = field(default_factory=InfoStructureConfig)
     fruit: FruitConfig = field(default_factory=FruitConfig)
+    # ---- 尸体—食腐 + 血条（S1 骨架；默认全关 = 旧行为逐位一致）----
+    corpse_wound: CorpseWoundConfig = field(default_factory=CorpseWoundConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -663,6 +734,14 @@ class SimConfig:
                 FruitConfig(**data["fruit"])
                 if "fruit" in data
                 else FruitConfig()
+            ),
+            # 尸体—食腐 + 血条配置（S1 骨架）；旧存档回退默认值（全关 = 旧行为）。
+            corpse_wound=CorpseWoundConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("corpse_wound") or {}).items()
+                    if k in _CORPSE_WOUND_FIELDS
+                }
             ),
             # D-8：oracle 配置；旧存档缺失时回退默认关闭（C-6/C-7 先例同 reputation_weight）。
             oracle=OracleConfig(

@@ -46,6 +46,7 @@ from simulation.config import (  # noqa: E402
     CALIBRATION_M_RANGE,
     SIGNAL_ALPHABET_IMPLEMENTED,
     SIGNAL_ALPHABET_STATES,
+    CorpseWoundConfig,
     InfoStructureConfig,
     PredationConfig,
     SimConfig,
@@ -160,7 +161,18 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           # R146/R149 L1/L2（R150 B1/B2；**默认全关 = 旧行为**，逐位等价）
           l1_seek: bool = False, l1_fear: bool = False, l2_dash: bool = False,
           w_seek_max: float = 0.5, w_fear: float = 0.5,
-          l1_prey_mode: str = "lowagg") -> SphereEngine:
+          l1_prey_mode: str = "lowagg",
+          # S1 骨架（设计稿 §三/§5.2）：尸体—食腐 + 血条—受伤（**默认全关 = 旧行为**，
+          # 逐位等价；机制未接线，开关仅建字段 + 读回）
+          corpse_enabled: bool = False, corpse_energy_frac: float = 0.9,
+          corpse_decay_ticks: int = 600, corpse_to_plant_frac: float = 0.5,
+          corpse_patch_boost: float = 0.5, corpse_cap_per_cell: int = 200,
+          scav_gate: float = 0.5, scav_s: float = 2.0,
+          wound_enabled: bool = False, wound_base: float = 0.35,
+          wound_heal_rate: float = 0.001, wound_heal_energy_cost: float = 0.05,
+          contest_enabled: bool = False, holder_adv: float = 1.2,
+          escalation_gap: float = 0.25, contest_cost_energy: float = 0.5,
+          w_fear_health: float = 0.5, need_aggression_k: float = 0.5) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -193,6 +205,28 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.simulation.w_seek_max = float(w_seek_max)
     c.simulation.w_fear = float(w_fear)
     c.simulation.l1_prey_mode = str(l1_prey_mode)
+    # S1 骨架（设计稿 §三）：尸体—食腐 + 血条—受伤，**整体替换** CorpseWoundConfig
+    # （默认全关 = 旧行为，逐位等价；机制未接线 ⇒ 开关只进指纹/读回）
+    c.corpse_wound = CorpseWoundConfig(
+        corpse_enabled=bool(corpse_enabled),
+        corpse_energy_frac=float(corpse_energy_frac),
+        corpse_decay_ticks=int(corpse_decay_ticks),
+        corpse_to_plant_frac=float(corpse_to_plant_frac),
+        corpse_patch_boost=float(corpse_patch_boost),
+        corpse_cap_per_cell=int(corpse_cap_per_cell),
+        scav_gate=float(scav_gate),
+        scav_s=float(scav_s),
+        wound_enabled=bool(wound_enabled),
+        wound_base=float(wound_base),
+        wound_heal_rate=float(wound_heal_rate),
+        wound_heal_energy_cost=float(wound_heal_energy_cost),
+        contest_enabled=bool(contest_enabled),
+        holder_adv=float(holder_adv),
+        escalation_gap=float(escalation_gap),
+        contest_cost_energy=float(contest_cost_energy),
+        w_fear_health=float(w_fear_health),
+        need_aggression_k=float(need_aggression_k),
+    )
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
     # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
@@ -376,6 +410,47 @@ def main() -> None:
     ap.add_argument("--l1-prey-mode", dest="l1_prey_mode", default="lowagg",
                     choices=("lowagg", "any"),
                     help="猎物代理场：lowagg=低 g16 个体 / any=任意占格者（E′ 归因臂）")
+    # ---- S1 骨架（设计稿 §三/§5.2）：尸体—食腐 + 血条—受伤 -------------------
+    # 🔴 全部**默认关/默认值 = 旧行为**（逐位等价，C7 digest 钉死）。机制未接线 ⇒
+    #    这些开关只进指纹与 `switches` 读回（C4），S2/S3 才接线。
+    # ⚠️ 开 + `use_sim_core=True` ⇒ 引擎构造期硬报错（H3 fail-loud，同 L1/L2 先例）。
+    ap.add_argument("--corpse-enabled", dest="corpse_enabled", action="store_true",
+                    help="尸体—食腐通道（默认关 = 旧行为；S1 只建字段，机制不接线）")
+    ap.add_argument("--corpse-energy-frac", dest="corpse_energy_frac", type=float, default=0.9,
+                    help="死亡时剩余能量 × 该比例 转入尸体格（留 10%% 分解即失）")
+    ap.add_argument("--corpse-decay-ticks", dest="corpse_decay_ticks", type=int, default=600,
+                    help="尸体存续 tick（≈ 世代时间 ⇒ 脉冲可累积，Noy-Meir）")
+    ap.add_argument("--corpse-to-plant-frac", dest="corpse_to_plant_frac", type=float, default=0.5,
+                    help="腐烂归还植物池比例（其余为分解损失）")
+    ap.add_argument("--corpse-patch-boost", dest="corpse_patch_boost", type=float, default=0.5,
+                    help="腐烂处资源 +50%%（持续 2000 tick）")
+    ap.add_argument("--corpse-cap-per-cell", dest="corpse_cap_per_cell", type=int, default=200,
+                    help="单格尸体**能量**上限（R161 裁定：非尸具数；200 ≈ 一具满能量尸体）")
+    ap.add_argument("--scav-gate", dest="scav_gate", type=float, default=0.5,
+                    help="食腐 Hill 半效点（**不是硬门槛**；R156 陷阱修正 1）")
+    ap.add_argument("--scav-s", dest="scav_s", type=float, default=2.0,
+                    help="食腐 Hill 陡度（scav_mult = g16^s/(g16^s+gate^s)）")
+    ap.add_argument("--wound-enabled", dest="wound_enabled", action="store_true",
+                    help="血条—受伤（消耗战；默认关 = 旧行为；S1 只建字段，机制不接线）")
+    ap.add_argument("--wound-base", dest="wound_base", type=float, default=0.35,
+                    help="每次成功攻击扣血条 Δ（×(0.5+0.5×攻击性)；一次击杀需 3 次成功）")
+    ap.add_argument("--wound-heal-rate", dest="wound_heal_rate", type=float, default=0.001,
+                    help="每 tick 恢复（上限 1.0；完全愈合 1000 tick ≈ 1/10 寿命）")
+    ap.add_argument("--wound-heal-energy-cost", dest="wound_heal_energy_cost",
+                    type=float, default=0.05,
+                    help="愈合耗能 / tick（不免费）")
+    ap.add_argument("--contest-enabled", dest="contest_enabled", action="store_true",
+                    help="争夺食物战（RHP；默认关 = 旧行为；S3 接线）")
+    ap.add_argument("--holder-adv", dest="holder_adv", type=float, default=1.2,
+                    help="持有者优势（Parker 1974；R161 裁定默认 1.2 —— 0.3 被 RHP 的 (0.3+g16) 淹没）")
+    ap.add_argument("--escalation-gap", dest="escalation_gap", type=float, default=0.25,
+                    help="不升级的 RHP 差阈值（只有接近才升级）")
+    ap.add_argument("--contest-cost-energy", dest="contest_cost_energy", type=float, default=0.5,
+                    help="驱逐战的代价（防'免费赶人'）")
+    ap.add_argument("--w-fear-health", dest="w_fear_health", type=float, default=0.5,
+                    help="血条恐惧项权重（低血条 ⇒ 更恐惧；能力导向）")
+    ap.add_argument("--need-aggression-k", dest="need_aggression_k", type=float, default=0.5,
+                    help="饥饿激进项强度（固定 0.5；D 臂设 0 = 关'饥饿更激进'）")
     ap.add_argument("--init-g16-clusters", dest="init_g16_clusters", default="",
                     help="R141 P0-2：g16 初始投放（逗号分隔，按簇等分人口）；"
                          "空=旧行为。校准批用 \"0.05,0.5,0.9\"")
@@ -495,6 +570,23 @@ def main() -> None:
                   l1_seek=bool(args.l1_seek), l1_fear=bool(args.l1_fear),
                   l2_dash=bool(args.l2_dash), w_seek_max=args.w_seek_max,
                   w_fear=args.w_fear, l1_prey_mode=args.l1_prey_mode,
+                  # S1 骨架：尸体—食腐 + 血条—受伤（默认全关 = 旧行为）
+                  corpse_enabled=bool(args.corpse_enabled),
+                  corpse_energy_frac=args.corpse_energy_frac,
+                  corpse_decay_ticks=args.corpse_decay_ticks,
+                  corpse_to_plant_frac=args.corpse_to_plant_frac,
+                  corpse_patch_boost=args.corpse_patch_boost,
+                  corpse_cap_per_cell=args.corpse_cap_per_cell,
+                  scav_gate=args.scav_gate, scav_s=args.scav_s,
+                  wound_enabled=bool(args.wound_enabled),
+                  wound_base=args.wound_base,
+                  wound_heal_rate=args.wound_heal_rate,
+                  wound_heal_energy_cost=args.wound_heal_energy_cost,
+                  contest_enabled=bool(args.contest_enabled),
+                  holder_adv=args.holder_adv, escalation_gap=args.escalation_gap,
+                  contest_cost_energy=args.contest_cost_energy,
+                  w_fear_health=args.w_fear_health,
+                  need_aggression_k=args.need_aggression_k,
                   # R152/P0：捕食生态位结构 6 参
                   attack_cost=args.attack_cost, transfer_ratio=args.transfer_ratio,
                   attack_gene_gate=args.attack_gene_gate,
@@ -587,7 +679,14 @@ def main() -> None:
               # = **未适用**，不是 0）。`seek_zero_frac` 高 = **自熄**（邻域无猎物代理）——
               # 预注册允许结局「猎物池枯竭」，**不得**被读成"没接线"。
               "seek_term_mean", "seek_zero_frac", "fear_term_mean",
-              "dash_frac", "mob_eff_mean"]
+              "dash_frac", "mob_eff_mean",
+              # S1 骨架（设计稿 §5.2 项 10）：尸体—食腐 + 血条 CSV 列
+              # （关档 = 空壳读数：corpse_total/corpse_eaten/wound_n/contest_n 恒 0，
+              #   health_mean 恒 1.0 —— S2/S3 接线后才非平凡）
+              "corpse_total", "corpse_eaten",
+              "health_mean", "health_low_frac", "wound_n", "contest_n",
+              # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率 + 血条恐惧项反退化
+              "contest_win_by_holder_frac", "fear_health_flat_frac"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -672,6 +771,22 @@ def main() -> None:
                 "fear_term_mean": _probe_csv(_l1p, "fear_term_mean"),
                 "dash_frac": _probe_csv(_l2p, "dash_frac"),
                 "mob_eff_mean": _probe_csv(_l2p, "mob_eff_mean"),
+                # S1 骨架（设计稿 §5.2 项 10）：尸体—食腐 + 血条读数（空壳口径，
+                # 同 result.corpse/result.wound —— S1 允许值可为 0）
+                "corpse_total": round(float(e._corpse_energy.sum()), 6),
+                "corpse_eaten": int(e._corpse_eaten_n),
+                "health_mean": (round(float(e._health[:P].mean()), 4) if P else ""),
+                "health_low_frac": (
+                    round(float((e._health[:P] < 0.5).mean()), 4) if P else ""
+                ),
+                "wound_n": int(e._wound_n),
+                "contest_n": int(e._contest_n),
+                # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率 + 血条恐惧项反退化
+                # （None ⇒ 空串 = 未适用，R120 口径）
+                "contest_win_by_holder_frac": _probe_csv(
+                    e.wound_probe(), "contest_win_by_holder_frac"),
+                "fear_health_flat_frac": _probe_csv(
+                    e.wound_probe(), "fear_health_flat_frac"),
             })
             fh.flush()
             last = t
@@ -769,6 +884,27 @@ def main() -> None:
             "w_seek_max": float(e.config.simulation.w_seek_max),
             "w_fear": float(e.config.simulation.w_fear),
             "l1_prey_mode": str(e.config.simulation.l1_prey_mode),
+            # ---- S1 骨架（设计稿 §三/§5.2 项 9）：尸体—食腐 + 血条（C4 读回）----
+            # 臂间差（B/C/D/E 臂）就落在这几个键上 ⇒ 缺席 ⇒ 外复核只能靠 preset 名
+            # （R136 §一 增量 2 的同型缺口）。
+            "corpse_enabled": bool(e.config.corpse_wound.corpse_enabled),
+            "corpse_energy_frac": float(e.config.corpse_wound.corpse_energy_frac),
+            "corpse_decay_ticks": int(e.config.corpse_wound.corpse_decay_ticks),
+            "corpse_to_plant_frac": float(e.config.corpse_wound.corpse_to_plant_frac),
+            "corpse_patch_boost": float(e.config.corpse_wound.corpse_patch_boost),
+            "corpse_cap_per_cell": int(e.config.corpse_wound.corpse_cap_per_cell),
+            "scav_gate": float(e.config.corpse_wound.scav_gate),
+            "scav_s": float(e.config.corpse_wound.scav_s),
+            "wound_enabled": bool(e.config.corpse_wound.wound_enabled),
+            "wound_base": float(e.config.corpse_wound.wound_base),
+            "wound_heal_rate": float(e.config.corpse_wound.wound_heal_rate),
+            "wound_heal_energy_cost": float(e.config.corpse_wound.wound_heal_energy_cost),
+            "contest_enabled": bool(e.config.corpse_wound.contest_enabled),
+            "holder_adv": float(e.config.corpse_wound.holder_adv),
+            "escalation_gap": float(e.config.corpse_wound.escalation_gap),
+            "contest_cost_energy": float(e.config.corpse_wound.contest_cost_energy),
+            "w_fear_health": float(e.config.corpse_wound.w_fear_health),
+            "need_aggression_k": float(e.config.corpse_wound.need_aggression_k),
             # L2 几何/成本参数（「参数制造分化」的可核查性）
             "dash_min_energy_frac": float(e.config.organisms.dash_min_energy_frac),
             "dash_cost_kappa": float(e.config.organisms.dash_cost_kappa),
@@ -839,6 +975,9 @@ def main() -> None:
             "l1": e.l1_probe(),
             "l2": e.l2_probe(),
             "bounds": e.state_bounds_check(),
+            # S1 骨架（设计稿 §5.2 项 9）：尸体—食腐 + 血条读数块（**空壳**，值可为 0）
+            "corpse": e.corpse_probe(),
+            "wound": e.wound_probe(),
             # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
             "energy_ledger": e.energy_ledger(),
             # R135 第 -1 步③：t=0 基因组基线（搭车诊断）

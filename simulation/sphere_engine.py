@@ -187,10 +187,11 @@ EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
 # R141/R138：真决斗三级拆分的键（**顺序固定**；全部预置 0 ⇒ 输出不随事件有无而变）
 #   nominal = len(attackers)：名义攻击者（= `cannibalism.n_attacks`，旧口径的分母）
 #   skip_*  = 三类"根本没出手"的原因；real_attempts = 真出手 = nominal − 三类 skip
+#   wounds   = 出手成功但**未致死**（血条模式：health 未归零；S2，wound_enabled 时累加）
 #   kills   = 致死（= `cannibalism.n_kills`）
 # ⇒ **真实出手成功率 = kills / real_attempts**（旧口径 kills / nominal 会低估）
 DUEL_KEYS = ("skip_no_energy", "skip_no_prey", "skip_already_eaten",
-             "real_attempts", "kills")
+             "real_attempts", "wounds", "kills")
 
 
 def _genome_summary(genes) -> dict:
@@ -344,6 +345,14 @@ class SphereEngine:
         # R146/R149 L1 感知追击（本段 = [所有者·天平] 线 = B1）：两项逐候选 + 反退化计数
         "_seek_term_sum", "_seek_term_n", "_seek_flat_n", "_seek_zero_n",
         "_fear_term_sum", "_fear_term_n", "_fear_flat_n", "_fear_ind_n", "_l1_dec_n",
+        # S1 骨架（设计稿 §5.2 项 1/9）：尸体格数组 + 个体血条数组 + 空壳读数计数器
+        # ⚠️ __slots__ 是硬约束：新属性必须在此登记，否则运行期 AttributeError
+        "_corpse_energy", "_corpse_age", "_health",
+        # S2 主机制（设计稿 §5.3 项 3）：腐烂处资源 +50% 的 boost 剩余 tick 格数组
+        "_corpse_boost",
+        "_corpse_eaten_n", "_wound_n", "_contest_n",
+        # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率计数 + 血条恐惧项反退化计数
+        "_contest_holder_win_n", "_fearh_flat_n", "_fearh_dec_n",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -502,6 +511,19 @@ class SphereEngine:
             raise NotImplementedError(
                 "L1/L2 尚未下沉 Rust：use_sim_core=True 时开启 l1_seek/l1_fear/l2_dash 会"
                 "**静默走旧路径**（= dash PR 的翻车形态）⇒ 硬报错。请设 use_sim_core=False。"
+            )
+        # ── H3（设计稿 §5.1 / §2.5）：尸体—食腐 + 血条开关开启时必须 **fail-loud** ────
+        # 本任务全程 Python 路径（§14.7：新机制/非确定性 ⇒ 强制 Python，不动 Rust）⇒
+        # use_sim_core=True 时开启 corpse/wound/contest 会**静默走旧路径**（开关开了
+        # 行为却不变 = 静默 no-op 的同族形态）⇒ 构造期硬报错，禁止静默忽略。
+        _cwc = getattr(config, "corpse_wound", None)
+        _cw_any = bool(getattr(_cwc, "corpse_enabled", False)) or bool(
+            getattr(_cwc, "wound_enabled", False)) or bool(getattr(_cwc, "contest_enabled", False))
+        if _scfg0.use_sim_core and _cw_any:
+            raise NotImplementedError(
+                "尸体—食腐/血条尚未下沉 Rust（本任务全程 Python 路径，设计稿 §5.1）⇒ "
+                "use_sim_core=True 时开启 corpse_enabled/wound_enabled/contest_enabled 会"
+                "**静默走旧路径** ⇒ 硬报错。请设 use_sim_core=False。"
             )
 
         n = config.population.initial_count
@@ -761,6 +783,25 @@ class SphereEngine:
         # R141/R138：真决斗三级拆分（键预置 ⇒ 输出稳定，不随是否有事件而缺列）
         self._duel = Counter({k: 0 for k in DUEL_KEYS})
 
+        # ---- S1 骨架（设计稿 §5.2 项 1）：尸体格数组 + 个体血条数组 ----
+        # 🔴 机制一律**不接线**（S2/S3 才接线）：本段只建数据结构 + 空壳读数，
+        #    默认全关 ⇒ 与旧行为逐位一致（C7 digest 钉死 (573985, 8171.692943)）。
+        # 格数组：corpse_energy = 每格尸体能量（初值 0）；corpse_age = 每格尸体存续 tick。
+        self._corpse_energy = np.zeros(self.world.n_cells, dtype=np.float64)
+        self._corpse_age = np.zeros(self.world.n_cells, dtype=np.int64)
+        # S2 主机制（设计稿 §5.3 项 3）：腐烂处资源 +50% 的 boost 剩余 tick（初值 0）
+        self._corpse_boost = np.zeros(self.world.n_cells, dtype=np.int64)
+        # 个体数组：health ∈ [0,1]，初值 1.0（H1）；随生死扩容/压缩（与 _energy 同节拍）。
+        self._health = np.ones(n, dtype=np.float64)
+        # S1 空壳读数计数器（设计稿 §5.2 项 9；值可为 0 —— S2/S3 接线后才累加）
+        self._corpse_eaten_n = 0
+        self._wound_n = 0
+        self._contest_n = 0
+        # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率分子 + 血条恐惧项反退化计数
+        self._contest_holder_win_n = 0
+        self._fearh_flat_n = 0
+        self._fearh_dec_n = 0
+
     def cannibalism_stats(self) -> dict:
         """互捕结构量化（R135 第 -1 步④；F「去互捕」的前置证据）。
 
@@ -785,11 +826,14 @@ class SphereEngine:
                 "skip_no_prey": int(self._duel["skip_no_prey"]),
                 "skip_already_eaten": int(self._duel["skip_already_eaten"]),
                 "real_attempts": real,
+                # S2（wound_enabled）：成功命中但未致死 = 血条消耗战（一击必杀 → 分期付款）
+                "wounds": int(self._duel["wounds"]),
                 # 🔴 两个成功率口径**必须分开报**：旧口径的低估是真实存在的
                 "success_rate_nominal": (round(kills / nominal, 4) if nominal else None),
                 "success_rate_real": (round(kills / real, 4) if real else None),
                 "note": "nominal=含未出手；real=真出手（排除能量不足/无猎物/已被吃）"
-                        "⇒ 旧口径 kills/nominal 会**低估**成功率",
+                        "⇒ 旧口径 kills/nominal 会**低估**成功率；"
+                        "wounds=血条模式下命中未致死（S2，wound_enabled 时才有）",
             }
         return {
             "duel": duel,
@@ -803,6 +847,183 @@ class SphereEngine:
             "delta_g16": (round(ma - mp, 4) if (ma is not None and mp is not None) else None),
             "note": "g16 区间 [0,1] 均分 5 bin；n=None 表示本批没有该事件（不可读作 0）",
         }
+
+    # ---- S2 尸体—食腐通道（设计稿 §5.3；`corpse_enabled`）----------------------
+
+    def _deposit_corpse(self, dead: NDArray[np.bool_], energy: NDArray[np.float64]) -> None:
+        """死亡投放尸体：三处死因共用（S2 项 2）。
+
+        对 dead 个体：`corpse_energy[cell] += 剩余能量 × corpse_energy_frac`，
+        并重置 `corpse_age[cell] = 0`（新尸体腐烂计时从 0 起）。
+        **老死个体能量已耗尽 ⇒ 尸体自然很轻**（设计稿 §一，不做特判）。
+
+        🔴 确定性数值（无 RNG 消费）⇒ 关档零开销、零轨迹影响（C7）。
+        🔴 单格能量上限 `corpse_cap_per_cell` 钳制（防极点/聚集处无界堆叠）。
+        """
+        _cwc = self.config.corpse_wound
+        cells = self._flat[: len(dead)][dead]
+        if cells.size == 0:
+            return
+        deposit = energy[dead] * float(_cwc.corpse_energy_frac)
+        # 🔴 饿死个体能量 ≤ 0 ⇒ deposit 可为负 ⇒ 钳到 ≥0（"老死/饿死自然很轻"= 0，
+        #    不得写成负数污染格上总量）。
+        deposit = np.maximum(0.0, deposit)
+        # 🔴 R161 P1-3 修复：必须用 `np.add.at` **累加** —— 同格多具尸体时
+        #    `arr[idx] = f(arr[idx])` 的 fancy-index 读-改-写**只保留最后一次写入**
+        #    （实测：同格 2 具各 deposit 9.0 ⇒ 只存 9.0，丢失 50%；死亡越聚集丢得越多，
+        #     恰好砍在尸源最富的格上）。
+        np.add.at(self._corpse_energy, cells, deposit)
+        # 单格上限钳制（整数组布尔就地钳制 ⇒ 无重复索引问题）
+        _cap = float(_cwc.corpse_cap_per_cell)
+        np.clip(self._corpse_energy, 0.0, _cap, out=self._corpse_energy)
+        self._corpse_age[cells] = 0
+
+    def _step_corpse_decay(self) -> None:
+        """每 tick 腐烂：衰减 + 归还植物池 + patch_boost（S2 项 3；`corpse_enabled`）。
+
+        - 有尸体的格：`corpse_age += 1`；达 `corpse_decay_ticks` ⇒ 腐烂
+        - 腐烂：`corpse_to_plant_frac × corpse_energy` 归还植物池（受容量上限），
+          其余为分解损失（能量黑洞 → 由归还率控制非 1 的部分）
+        - 腐烂处 `corpse_patch_boost`：`corpse_boost[c] = 2000`（持续 2000 tick 的
+          +50% 再生加成），本函数同时把 `corpse_boost` 递减并应用加成到资源格
+
+        🔴 确定性数值（无 RNG 消费）⇒ 关档零开销、零轨迹影响（C7）。
+        """
+        _cwc = self.config.corpse_wound
+        has = self._corpse_energy > 0.0
+        if has.any():
+            self._corpse_age[has] += 1
+            ripe = has & (self._corpse_age >= int(_cwc.corpse_decay_ticks))
+            if ripe.any():
+                cells = np.flatnonzero(ripe)
+                # 归还植物池（受容量上限）
+                ret = self._corpse_energy[cells] * float(_cwc.corpse_to_plant_frac)
+                room = np.maximum(
+                    0.0, self.resources._capacity[cells] - self.resources._grid[cells]
+                )
+                put = np.minimum(ret, room)
+                self.resources._grid[cells] += put
+                # 腐烂处 patch_boost：+50% 持续 2000 tick
+                self._corpse_boost[cells] = 2000
+                self._corpse_energy[cells] = 0.0
+                self._corpse_age[cells] = 0
+        # patch_boost 生效：对 corpse_boost>0 的格补 +50% 再生（受容量上限），并递减
+        bo = self._corpse_boost > 0
+        if bo.any():
+            boost_amt = (
+                self.resources._regrowth_amount(self._tick)
+                * float(_cwc.corpse_patch_boost)
+            )
+            room = np.maximum(
+                0.0, self.resources._capacity[bo] - self.resources._grid[bo]
+            )
+            self.resources._grid[bo] += np.minimum(boost_amt[bo], room)
+            self._corpse_boost[bo] -= 1
+
+    def _step_scavenging(self, P: int, stomach, stomach_cap, genes) -> None:
+        """食腐：按 `scav_mult(g16)`（Hill 平滑，**无硬门槛**）从所在格取尸体**入胃**（S2 项 4）。
+
+        `scav_mult = g16^s / (g16^s + gate^s)`（设计稿 §一；`scav_gate` 是半效点不是门槛）。
+        取食量 = `eat_amount × scav_mult`（受胃容量限），从格上 `corpse_energy` 扣减。
+
+        🔴 **写胃、不直接写能量**（复用 `stomach` ⇒ 天然限速，防暴富，设计稿 §三）。
+        🔴 确定性数值（无 RNG 消费）⇒ 关档零开销、零轨迹影响（C7）。
+        """
+        _cwc = self.config.corpse_wound
+        g16 = np.clip(genes[:P, Gene.AGGRESSION], 0.0, 1.0)
+        _s = float(_cwc.scav_s)
+        _g = float(_cwc.scav_gate)
+        scav_mult = g16 ** _s / (g16 ** _s + _g ** _s + 1e-12)
+        # 胃容量余量
+        room = np.maximum(0.0, stomach_cap[:P] - stomach[:P])
+        want = np.minimum(
+            self.config.organisms.eat_amount * scav_mult,
+            room,
+        )
+        if not (want > 0.0).any():
+            return
+        # 🔴 R161 P1-2 修复：**按格汇总需求 → 按格上存量分配**，防"同格多体各自按全量取"
+        #    的超发（原实现实测：格上 1.0 + 同格 12 个体 ⇒ 拿走 4.78、格上变 **−3.78**
+        #    ⇒ 凭空生成能量、破坏守恒）。现改为**逐格守恒**：Σ取 ≤ 格存量，且格上恒 ≥ 0。
+        cells = self._flat[:P]
+        n_cells = self.world.n_cells
+        demand = np.bincount(cells, weights=want, minlength=n_cells)
+        supply = np.maximum(0.0, self._corpse_energy)
+        alloc = np.minimum(demand, supply)          # 每格实际可分配总量
+        # 个体按"格内需求占比"取（demand>0 处；其余 scale=1 免得 0 除）
+        scale = np.ones(n_cells, dtype=np.float64)
+        nz = demand > 0.0
+        scale[nz] = alloc[nz] / demand[nz]
+        take = want * scale[cells]
+        if (alloc > 0.0).any():
+            # 扣减 = 每格分配总量（整数组运算 ⇒ 无重复索引问题；且已保证 ≤ 存量）
+            self._corpse_energy -= alloc
+            stomach[:P] += take
+            self._corpse_eaten_n += int(np.count_nonzero(take > 1e-12))
+
+    def _step_contest(self, P: int, eaters, genes, energy) -> None:
+        """S3 争夺食物战（设计稿 §2.3 H3/H4 项 6；`contest_enabled`）。
+
+        触发：**同一格（或邻格）已有他人正在取食**（果实或尸体，`eaters` = 本 tick 取食者）
+        ⇒ 高 g16 者可发起驱逐战。判定用 **RHP**：
+            `RHP = health × (0.3+g16) × (energy/max_energy)`（初值 a=b=c=1）
+            **取食方 ×(1+holder_adv)**（Parker 持有者优势）
+        - **H4 升级规则**：`|RHP_A − RHP_B| > escalation_gap` ⇒ 弱方**立即撤退**（不进入多轮，
+          败者仍扣血条——"撤退"= 放弃该格；自动省机时）
+        - 差距小 ⇒ 进入战斗：RHP 高者胜；**败者 health −= wound_base** + 被迫离开该格
+          （放弃取食机会 = 下 tick 移动决策自然离开）；**胜者 energy −= contest_cost_energy**
+
+        🔴 确定性数值（**零 RNG**）⇒ 关档零开销、开档不新增 RNG 抽取（C7 保底）。
+        🔴 记录 `contest_n` 总数 + `contest_holder_win_n`（持有者胜率分子，判据 ④）。
+        """
+        _cwc = self.config.corpse_wound
+        max_e = max(float(self.config.organisms.max_energy), 1e-9)
+        flat = self._flat[:P]
+        g16 = np.clip(genes[:P, Gene.AGGRESSION], 0.0, 1.0)
+        _gap = float(_cwc.escalation_gap)
+        _adv = float(_cwc.holder_adv)
+        _lose = float(_cwc.wound_base)          # 败者扣血（复用血条量级，Δ_loser）
+        _cost = float(_cwc.contest_cost_energy) # 胜者代价
+        for i in eaters:
+            cell = int(flat[i])
+            nb = np.asarray(self.world.neighbors(cell))
+            nb_mask = np.isin(flat, nb) & (np.arange(P) != i)
+            same = flat == cell
+            same = same.copy()
+            same[i] = False
+            rivals = np.flatnonzero(nb_mask | same)
+            if rivals.size == 0:
+                continue
+            # 挑战者 = 同格/邻格中 g16 最高者（高 g16 者可发起驱逐）
+            j = int(rivals[int(np.argmax(g16[rivals]))])
+            if g16[j] <= g16[i]:
+                continue                       # 挑战者攻击性不比持有者高 ⇒ 不驱逐
+            rhp_i = (
+                float(self._health[i]) * (0.3 + g16[i])
+                * (float(energy[i]) / max_e)
+            ) * (1.0 + _adv)
+            rhp_j = (
+                float(self._health[j]) * (0.3 + g16[j])
+                * (float(energy[j]) / max_e)
+            )
+            self._contest_n += 1
+            # H4：RHP 差距大 ⇒ 弱方立即撤退（不进入多轮）
+            if abs(rhp_j - rhp_i) > _gap:
+                loser = i if rhp_j > rhp_i else j
+                # 🔴 撤退也是胜负：挑战者（j）撤退 ⇒ holder 守住该格（holder 胜）
+                if loser == j:
+                    self._contest_holder_win_n += 1
+                self._health[loser] = max(0.0, float(self._health[loser]) - _lose)
+                continue
+            # 差距小 ⇒ 进入战斗：RHP 高者胜（持有者优势已含在 RHP）
+            if rhp_i >= rhp_j:
+                winner, loser = i, j
+            else:
+                winner, loser = j, i
+            if winner == i:
+                self._contest_holder_win_n += 1
+            self._health[loser] = max(0.0, float(self._health[loser]) - _lose)
+            energy[winner] -= _cost
 
     def _ec_ensure(self, n: int) -> None:
         """确保逐个体记账缓冲够长（P 会随生死/繁殖变化）。"""
@@ -1080,6 +1301,68 @@ class SphereEngine:
                     "跨候选取同值 ⇒ **逐位 no-op**（R148-1 形态）。",
         }
 
+    def corpse_probe(self) -> dict:
+        """尸体—食腐层读数（设计稿 §5.2 项 9 / §5.3）。
+
+        🔴 `corpse_enabled=False` 时 corpse_total/eaten 恒 0（机制未运行）；
+           S2 接线后开档有真实读数。**0 = 未启用**（与"测出零"区分）。
+        """
+        cwc = getattr(self.config, "corpse_wound", None)
+        return {
+            "corpse_enabled": bool(getattr(cwc, "corpse_enabled", False)),
+            "corpse_energy_frac": float(getattr(cwc, "corpse_energy_frac", 0.9)),
+            "corpse_decay_ticks": int(getattr(cwc, "corpse_decay_ticks", 600)),
+            "corpse_to_plant_frac": float(getattr(cwc, "corpse_to_plant_frac", 0.5)),
+            "corpse_patch_boost": float(getattr(cwc, "corpse_patch_boost", 0.5)),
+            "corpse_cap_per_cell": int(getattr(cwc, "corpse_cap_per_cell", 3)),
+            "scav_gate": float(getattr(cwc, "scav_gate", 0.5)),
+            "scav_s": float(getattr(cwc, "scav_s", 2.0)),
+            "corpse_total": round(float(self._corpse_energy.sum()), 6),
+            "corpse_eaten": int(self._corpse_eaten_n),
+            "corpse_age_max": (int(self._corpse_age.max())
+                               if self._corpse_age.size else 0),
+            "corpse_boost_active": int(np.count_nonzero(self._corpse_boost > 0)),
+            "note": "S2 接线后 corpse_total/eaten 反映实际尸体通道；关档恒 0（未启用）。"
+                    "corpse_boost_active = 当前处于 +50% 再生加成的格数（S2 项 3）",
+        }
+
+    def wound_probe(self) -> dict:
+        """血条—受伤层读数（设计稿 §5.2 项 9 / §5.3）。
+
+        🔴 `wound_enabled=False` 时 wound_n/contest_n 恒 0（机制未运行）；
+           health_mean 恒 1.0（未受伤）。S2 接线后开档有真实读数。
+        """
+        cwc = getattr(self.config, "corpse_wound", None)
+        P = len(self._id)
+        h = self._health[:P]
+        return {
+            "wound_enabled": bool(getattr(cwc, "wound_enabled", False)),
+            "contest_enabled": bool(getattr(cwc, "contest_enabled", False)),
+            "wound_base": float(getattr(cwc, "wound_base", 0.35)),
+            "wound_heal_rate": float(getattr(cwc, "wound_heal_rate", 0.001)),
+            "wound_heal_energy_cost": float(getattr(cwc, "wound_heal_energy_cost", 0.05)),
+            "holder_adv": float(getattr(cwc, "holder_adv", 0.3)),
+            "escalation_gap": float(getattr(cwc, "escalation_gap", 0.25)),
+            "contest_cost_energy": float(getattr(cwc, "contest_cost_energy", 0.5)),
+            "w_fear_health": float(getattr(cwc, "w_fear_health", 0.5)),
+            "need_aggression_k": float(getattr(cwc, "need_aggression_k", 0.5)),
+            "health_mean": (round(float(h.mean()), 6) if P else None),
+            "health_low_frac": (round(float(np.mean(h < 0.5)), 6) if P else None),
+            "wound_n": int(self._wound_n),
+            "contest_n": int(self._contest_n),
+            "contest_win_by_holder_frac": (
+                round(self._contest_holder_win_n / self._contest_n, 6)
+                if self._contest_n else None
+            ),
+            "fear_health_flat_frac": (
+                round(self._fearh_flat_n / self._fearh_dec_n, 6)
+                if self._fearh_dec_n else None
+            ),
+            "note": "S2 接线后 wound_n 反映血条消耗战命中数；S3 接线后 contest_n/"
+                    "contest_win_by_holder_frac（判据④）与 fear_health_flat_frac（反退化，"
+                    "应≈0）可读；关档恒 0/None（未启用）",
+        }
+
     def genome_t0_stats(self) -> dict:
         """t=0 基因组摘要（`_genome_t0` 的副本；跨批次 irreducible 的地基凭证）。
 
@@ -1190,6 +1473,12 @@ class SphereEngine:
             )
         else:
             self.resources.regrow(self._tick)
+        # S2 尸体腐烂（设计稿 §5.3 项 3；`corpse_enabled`）：衰减 + 归还植物池 + patch_boost
+        # 🔴 放资源更新段内、regrow 之后 ⇒ 腐烂归还的养分从**下一 tick** 的再生开始被利用
+        #    （不干扰本 tick 已完成的 regrow ⇒ 关档/开档的资源管线时序清晰）。
+        _cwc_tick = getattr(self.config, "corpse_wound", None)
+        if bool(getattr(_cwc_tick, "corpse_enabled", False)):
+            self._step_corpse_decay()
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
@@ -1273,6 +1562,11 @@ class SphereEngine:
 
         # 温度相关量（一次算出全种群的那份，避免反复调用）
         activity = self.light.activity_factor(self._flat, self._tick)
+
+        # S2 血条/尸体（设计稿 §2.3 H2 / §5.3）：`wound_enabled` 开关 + 参数。
+        # 构造期已由 H3 保证：开 + use_sim_core=True ⇒ 硬报错 ⇒ 此处仅在 Python 路径消费。
+        _cwc_pred = getattr(self.config, "corpse_wound", None)
+        _wound_on = bool(getattr(_cwc_pred, "wound_enabled", False))
 
         genes = self._genes[:P]
         energy = self._energy[:P]
@@ -1368,6 +1662,17 @@ class SphereEngine:
             energy -= _ch
             self._ec_add(EC_META, None, _ch)   # R141：并入 cost_meta 通道
 
+        # 2.5) S2 愈合（设计稿 §2.3 H5；`wound_enabled`）：health += heal_rate（上限 1.0），
+        #      并扣代谢能量 heal_energy_cost（愈合不免费）。
+        #      🔴 确定性数值（无 RNG 消费）⇒ 关档零开销、零轨迹影响（C7）。
+        if _wound_on:
+            _heal = self._health[:P] < 1.0
+            if _heal.any():
+                self._health[:P] = np.minimum(
+                    1.0, self._health[:P] + float(_cwc_pred.wound_heal_rate)
+                )
+                energy[_heal] -= float(_cwc_pred.wound_heal_energy_cost)
+
         # 3.5) 植物化光合增强（g19）：统一在 stage1 之后补，确保 Rust/Python 双路径一致
         #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
         _pho2 = (
@@ -1396,6 +1701,8 @@ class SphereEngine:
         stomach_cap = (
             ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
         )
+        # S2/S3 尸体—争夺（设计稿 §5.3/5.4）：开关只读一次，供 4.3/4.3b 复用
+        _cwc_scav = getattr(self.config, "corpse_wound", None)
         if (stomach < stomach_cap).any():
             eaters = np.flatnonzero(stomach < stomach_cap)
             # R135 第 3 步 A-连续（2026-09-20）：**凸 trade-off** `forage_mult = (1−g16)^k`。
@@ -1455,6 +1762,16 @@ class SphereEngine:
                 else:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
+            # 4.3b) S3 争夺食物战（设计稿 §2.3 H3/H4 项 6；`contest_enabled`）：同一格/邻格
+            #       有他人正在取食（`eaters` = 本 tick 取食者）⇒ 高 g16 者可驱逐
+            #       （RHP + 持有者优势 + 升级阈值 + 撤退）。🔴 确定性数值（零 RNG）。
+            if bool(getattr(_cwc_scav, "contest_enabled", False)):
+                self._step_contest(P, eaters, genes, energy)
+
+        # 4.3) S2 食腐（设计稿 §5.3 项 4；`corpse_enabled`）：按 g16 Hill 平滑从所在格取
+        #      尸体**入胃**（受胃容量限）。🔴 确定性数值（无 RNG 消费）⇒ 关档零轨迹影响。
+        if bool(getattr(_cwc_scav, "corpse_enabled", False)):
+            self._step_scavenging(P, stomach, stomach_cap, genes)
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
         cur_flat = self._flat[:P]
@@ -1721,7 +2038,11 @@ class SphereEngine:
                 _l1_seek_on = bool(_sim0.l1_seek)
                 _l1_fear_on = bool(_sim0.l1_fear)
                 _l1_on = _l1_seek_on or _l1_fear_on
-                if _l1_on:
+                # S3 血条恐惧项（设计稿 §2.4 项 7）也需**威胁场**（载体 = 血条），
+                # 与 L1 恐惧项独立 ⇒ 任一生效时都要算 `_agg_field`（格域聚合，零 RNG）。
+                _fearh_on = (_wound_on
+                            and float(getattr(_cwc_pred, "w_fear_health", 0.0)) > 0.0)
+                if _l1_on or _fearh_on:
                     _gate0 = float(self.config.predation.attack_gene_gate)  # 引用同一常量，不抄字面量
                     if _l1_seek_on:
                         if str(_sim0.l1_prey_mode) == "any":
@@ -1733,7 +2054,7 @@ class SphereEngine:
                             _seek_field = np.bincount(
                                 self._flat[:P][_low], minlength=self.world.n_cells
                             ).astype(np.float64)
-                    if _l1_fear_on:
+                    if _l1_fear_on or _fearh_on:
                         # 威胁强度：只取**超过门槛**的部分（弱 g16 个体不构成威胁）
                         _thr = np.maximum(0.0, genes[:P, Gene.AGGRESSION] - _gate0)
                         _agg_field = np.bincount(
@@ -1837,6 +2158,21 @@ class SphereEngine:
                                 self._fear_ind_n += 1
                                 if float(_fe.max() - _fe.min()) < 1e-12:
                                     self._fear_flat_n += 1
+                    # ── S3 血条恐惧项（设计稿 §2.4 项 7；`wound_enabled` + `w_fear_health>0`）──
+                    # 与 L1 恐惧项**独立**（载体 = 血条而非 g16）：`−w_fear_health × perc ×
+                    # (1−health) × cos(候选格 ← 威胁方向)`。低血条 ⇒ 更恐惧（能力导向）。
+                    # 🔴 确定性数值（零 RNG）⇒ 关档零轨迹影响。
+                    if _wound_on and float(getattr(_cwc_pred, "w_fear_health", 0.0)) > 0.0:
+                        self._fearh_dec_n += 1
+                        _danger_h = nb[_agg_field[nb] > 0.0]
+                        if len(_danger_h) > 0:
+                            _cos_h = self._memory_orientation_cos(
+                                int(self._flat[idx]), nb, _danger_h)
+                            _fh = (float(_cwc_pred.w_fear_health) * perc
+                                   * (1.0 - float(self._health[idx]))) * _cos_h
+                            score = score - _fh
+                            if float(_fh.max() - _fh.min()) < 1e-12:
+                                self._fearh_flat_n += 1
                     # D2-3 softmax：温度采样替代argmax（tau=0时回退argmax）
                     if d2_softmax:
                         exp_s = np.exp((score - score.max()) / ifcfg3.softmax_tau)
@@ -1966,7 +2302,11 @@ class SphereEngine:
         if pcfg.enabled:
             # PC-1 S2（R134）：`enabled=True`（默认）⇒ 原式逐位不动（RNG 消费 P 个 uniform）
             hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
-            attack_prob = attack_gene * pcfg.attack_prob_coef * hunger
+            # S3 饥饿激进项（设计稿 §2.2 项 7；`wound_enabled` + `need_aggression_k>0`）：
+            #   能量低 ⇒ 更激进（主动攻击概率↑）—— 与血条恐惧**方向相反** ⇒ 二分预测
+            #   （能力导向 vs 资产保护）。k=0（D 臂）⇒ 退化为原式（逐位不变）。
+            _need_k = float(getattr(_cwc_pred, "need_aggression_k", 0.0)) if _wound_on else 0.0
+            attack_prob = attack_gene * pcfg.attack_prob_coef * hunger * (1.0 + _need_k * hunger)
             attackers = np.flatnonzero(
                 (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
             )
@@ -2063,6 +2403,21 @@ class SphereEngine:
                         pcfg.success_floor, pcfg.success_ceil,
                     )
                     if rand_success[k] < success_rate:
+                        # S2 H2（设计稿 §2.3）：wound_enabled 时捕食 = **消耗战** ——
+                        # 成功命中 ⇒ 目标 `health −= Δ`（Δ = wound_base×(0.5+0.5×攻击性)），
+                        # `health ≤ 0` 才死（死因仍记 PREDATION）⇒ 一次咬不死、猎物变弱
+                        # 更易再被咬（分期付款）。🔴 不新增 RNG 抽取（rand_success 已在
+                        # 循环外抽好）⇒ 关档（旧路径）RNG 形状不变（C7）。
+                        if _wound_on:
+                            _delta = float(_cwc_pred.wound_base) * (
+                                0.5 + 0.5 * float(attack_gene[idx])
+                            )
+                            self._health[prey] -= _delta
+                            self._wound_n += 1
+                            self._duel["wounds"] += 1
+                            if self._health[prey] > 0.0:
+                                continue   # 未死：不转移能量（猎物保留资源，下轮可再被咬）
+                            # health ≤ 0 ⇒ 致死（走下方原击杀结算）
                         predation_mask[prey] = True
                         # R141：ΣE_prey（**击杀瞬间**的猎物能量）——解 `transfer*` 的关键输入
                         self._ec_prey_e_sum += float(energy[prey])
@@ -2154,6 +2509,15 @@ class SphereEngine:
             deaths[DeathCause.OLD_AGE] = n_expired
         if n_predation:
             deaths[DeathCause.PREDATION] = n_predation
+
+        # 7.5) S2 死亡投放尸体（设计稿 §5.3 项 2；`corpse_enabled`）
+        # 🔴 三处死因**共用一个函数**（老死自然很轻：老死个体能量已耗尽 ⇒ 尸体能量≈0，
+        #    设计稿 §一"老死也留尸体、能量低"用"剩余能量 ×0.9"自然实现，**不做特判**）。
+        # 位置：死亡判定（7）之后、死亡压缩（9）之前 —— dead 掩码此时仍对应完整 P 槽位。
+        # 🔴 确定性数值（无 RNG 消费）⇒ 关档零开销、零轨迹影响。
+        _cwc = getattr(self.config, "corpse_wound", None)
+        if bool(getattr(_cwc, "corpse_enabled", False)) and dead.any():
+            self._deposit_corpse(dead, energy)
 
         # 8) 繁殖：冷却期（g12）倒数；能量 ≥ 阈值（0.25+g2×0.65），且种群未满
         # 注意：统一用 Python 计算繁殖判定（不用 Rust 的 out_repro），
@@ -2291,6 +2655,8 @@ class SphereEngine:
             self._flat = np.concatenate([self._flat, self._flat[ri]])
             self._energy = np.concatenate([self._energy, child_energy])
             self._stomach = np.concatenate([self._stomach, child_stomach])
+            # S1 骨架：血条随子代扩容（初值 1.0，H1）；机制不接线，仅保数组同长
+            self._health = np.concatenate([self._health, np.ones(K, dtype=np.float64)])
             self._genes = np.concatenate([self._genes, child_genes])
             self._age = np.concatenate([self._age, np.zeros(K, dtype=np.int64)])
             self._repro_cooldown = np.concatenate(
@@ -2360,6 +2726,10 @@ class SphereEngine:
             )
             self._stomach = np.concatenate(
                 [self._stomach[:P][keep], self._stomach[P:]]
+            )
+            # S1 骨架：血条随死亡压缩（与 _energy 同节拍）；机制不接线，仅保数组同长
+            self._health = np.concatenate(
+                [self._health[:P][keep], self._health[P:]]
             )
             self._genes = np.concatenate([self._genes[:P][keep], self._genes[P:]])
             self._age = np.concatenate([self._age[:P][keep], self._age[P:]])
@@ -3099,6 +3469,18 @@ class SphereEngine:
         data["fruit_charge"] = self._fruit_charge[:P].copy()
         data["seed_carried"] = self._seed_carried[:P].copy()
 
+        # --- 3.6 S1 骨架：尸体格数组 + 个体血条数组（v3 追加键；旧快照加载时回退零值/初值）---
+        data["corpse_energy"] = self._corpse_energy.copy()  # (n_cells,)
+        data["corpse_age"] = self._corpse_age.copy()        # (n_cells,)
+        data["corpse_boost"] = self._corpse_boost.copy()    # (n_cells,) S2：腐烂处 +50% 计时
+        data["health"] = self._health[:P].copy()            # (P,)
+        data["corpse_eaten_n"] = np.array(self._corpse_eaten_n)
+        data["wound_n"] = np.array(self._wound_n)
+        data["contest_n"] = np.array(self._contest_n)
+        data["contest_holder_win_n"] = np.array(self._contest_holder_win_n)
+        data["fearh_flat_n"] = np.array(self._fearh_flat_n)
+        data["fearh_dec_n"] = np.array(self._fearh_dec_n)
+
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
         data["resource_capacity"] = self.resources._capacity.copy()
@@ -3275,6 +3657,36 @@ class SphereEngine:
         engine._fruit_grid = data["fruit_grid"].copy()
         engine._fruit_charge = data["fruit_charge"].copy()
         engine._seed_carried = data["seed_carried"].copy()
+
+        # --- 7.6 恢复 S1 骨架数组（旧快照缺键 ⇒ 回退零值/初值，不报错）---
+        # 格数组恒 (n_cells,)；health 恒 (P,)，P = len(_id)（恢复后 _id 已就位）。
+        engine._corpse_energy = (
+            data["corpse_energy"].copy()
+            if "corpse_energy" in data
+            else np.zeros(engine.world.n_cells, dtype=np.float64)
+        )
+        engine._corpse_age = (
+            data["corpse_age"].copy()
+            if "corpse_age" in data
+            else np.zeros(engine.world.n_cells, dtype=np.int64)
+        )
+        engine._corpse_boost = (
+            data["corpse_boost"].copy()
+            if "corpse_boost" in data
+            else np.zeros(engine.world.n_cells, dtype=np.int64)
+        )
+        engine._health = (
+            data["health"].copy()
+            if "health" in data
+            else np.ones(len(engine._id), dtype=np.float64)
+        )
+        engine._corpse_eaten_n = int(data["corpse_eaten_n"]) if "corpse_eaten_n" in data else 0
+        engine._wound_n = int(data["wound_n"]) if "wound_n" in data else 0
+        engine._contest_n = int(data["contest_n"]) if "contest_n" in data else 0
+        engine._contest_holder_win_n = int(
+            data["contest_holder_win_n"]) if "contest_holder_win_n" in data else 0
+        engine._fearh_flat_n = int(data["fearh_flat_n"]) if "fearh_flat_n" in data else 0
+        engine._fearh_dec_n = int(data["fearh_dec_n"]) if "fearh_dec_n" in data else 0
 
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()

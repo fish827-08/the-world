@@ -807,6 +807,43 @@ PRESETS = {
                  template="_rerun_logs/p06flux/C06_s{seed}.csv"),
         ],
     ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P1 尸体—食腐 + 血条—受伤（设计稿 §四；R161 修复后**首跑**）
+    # ══════════════════════════════════════════════════════════════════════════
+    # 目的：检验「尸源能否养出 2–10% 捕食者 + 消耗战能否让猎物池可持续」⇒ 主判据 = g16 **双峰**。
+    # 🔴 关键前提（R161 修复）：
+    #   · `corpse_cap_per_cell=200`（原 3 会把整具尸体钳掉；三处默认值已对齐）
+    #   · `holder_adv=1.2`（原 0.3 被 RHP 的 (0.3+g16) 淹没）
+    #   · 食腐**逐格守恒**、投尸**同格累加**（两个 bug 已修 + 回归测试）
+    # 参数与历史批对齐（max-count=3240 / 软顶 0.6 / patchy / 16 码 / cap ON）⇒ 饱和态 ≈1944，可比。
+    # `forage-tradeoff-k=0.0`：本批**不做**"压中间态"（P0 已证：捕食端不赚钱时压中间态=两端一起打死）。
+    # 5 臂：A 全关（对照+漂变零模型）｜B 只尸体｜C +血条｜D +争夺｜E 二分预测分离（need_k=0）
+    # 判读：① 双峰（两端同时有质量 + 排除门槛伪影）② 捕食端净收入转正 ③ fatal_frac<60%
+    #       ④ holder 胜率>55% ⑤ 二分预测方向 ⑥ 不崩 ⑦ 反退化（corpse_eaten>0 且不集中）
+    # 成本：20 run × 8k / 并发 12 ⇒ ≈ 2 波，15–25 min
+    "p1corpse": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/p1corpse_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="A", args=[],
+                 template="_rerun_logs/p1corpse/A_s{seed}.csv"),
+            dict(name="B", args=["corpse-enabled"],
+                 template="_rerun_logs/p1corpse/B_s{seed}.csv"),
+            dict(name="C", args=["corpse-enabled", "wound-enabled"],
+                 template="_rerun_logs/p1corpse/C_s{seed}.csv"),
+            dict(name="D", args=["corpse-enabled", "wound-enabled", "contest-enabled"],
+                 template="_rerun_logs/p1corpse/D_s{seed}.csv"),
+            dict(name="E", args=["corpse-enabled", "wound-enabled", "need-aggression-k=0"],
+                 template="_rerun_logs/p1corpse/E_s{seed}.csv"),
+        ],
+    ),
 }
 
 # ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
