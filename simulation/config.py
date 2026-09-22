@@ -534,7 +534,11 @@ class CorpseWoundConfig:
     corpse_decay_ticks: int = 600         # 尸体存续 tick（≈ 世代时间 ⇒ 脉冲可累积，Noy-Meir）
     corpse_to_plant_frac: float = 0.5     # 腐烂归还植物池比例（其余为分解损失）
     corpse_patch_boost: float = 0.5       # 腐烂处资源 +50%（持续 2000 tick）
-    corpse_cap_per_cell: int = 3          # 单格尸体能量上限（防极点/聚集处无界堆叠）
+    # 🔴 cap 由 3 → 30（2026-09-22 自行优化，fish 授权"23 自行优化"）：
+    #   原值 3 连**一具完整尸体**的能量都放不下（猎物尸体 ~126–198 能量 ⇒ 一进即被钳到 3，
+    #   corpse_total 2000 tick 仅 ~100 ⇒ 尸体通道价值被压没）；30 ≈ max_energy/10，
+    #   既能容纳完整尸体、又保留"防极点/聚集处无界堆叠"的意图。
+    corpse_cap_per_cell: int = 30         # 单格尸体能量上限（防极点/聚集处无界堆叠）
     scav_gate: float = 0.5                # 食腐 Hill 半效点（**不是硬门槛**）
     scav_s: float = 2.0                   # 食腐 Hill 陡度（scav_mult = g16^s/(g16^s+gate^s)）
 
@@ -546,7 +550,13 @@ class CorpseWoundConfig:
 
     # ---- 争夺食物战（H3；S3 接线）----
     contest_enabled: bool = False         # 总开关（默认关 = 旧行为；S3 接线）
-    holder_adv: float = 0.3               # 持有者优势（Parker 1974）
+    # 🔴 holder_adv 由 0.3 → 1.2（2026-09-22 自行优化，fish 授权"23 自行优化"）：
+    #   原值 0.3 被 RHP 中 `(0.3+g16)` 的 g16 线性放大淹没（g16 差 0.3 ⇒ RHP ~2×，
+    #   0.3 只给 1.3× ⇒ 持有者胜率实测 ~0.41，远低于判据④ >55%）；且原实现
+    #   "撤退分支不计胜负"导致读数系统性低估（已修复，loser==j 记 holder 胜）。
+    #   1.2 时**正式配置**（默认 max_count=5000）多 seed 实测持有者胜率 0.66–0.85
+    #   （判据④ >55% 达标，且保留挑战者 ~30% 胜率 ⇒ 争夺战不失去意义）。
+    holder_adv: float = 1.2               # 持有者优势（Parker 1974）
     escalation_gap: float = 0.25          # 不升级的 RHP 差阈值（只有接近才升级）
     contest_cost_energy: float = 0.5      # 驱逐战的代价（防"免费赶人"）
 

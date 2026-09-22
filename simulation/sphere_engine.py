@@ -994,6 +994,9 @@ class SphereEngine:
             # H4：RHP 差距大 ⇒ 弱方立即撤退（不进入多轮）
             if abs(rhp_j - rhp_i) > _gap:
                 loser = i if rhp_j > rhp_i else j
+                # 🔴 撤退也是胜负：挑战者（j）撤退 ⇒ holder 守住该格（holder 胜）
+                if loser == j:
+                    self._contest_holder_win_n += 1
                 self._health[loser] = max(0.0, float(self._health[loser]) - _lose)
                 continue
             # 差距小 ⇒ 进入战斗：RHP 高者胜（持有者优势已含在 RHP）

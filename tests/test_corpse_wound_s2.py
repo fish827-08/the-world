@@ -73,14 +73,15 @@ def test_deposit_on_death():
 def test_deposit_cap_per_cell():
     """单格上限钳制：deposit 超过 corpse_cap_per_cell 时被钳到 cap。"""
     e = _engine(corpse=True)
+    cap = int(e.config.corpse_wound.corpse_cap_per_cell)   # 跟配置默认走（30），不硬编码
     dead = np.zeros(len(e._id), dtype=bool)
     dead[0] = True
-    e._energy[0] = 1000.0   # 远超 cap=3
+    e._energy[0] = 1000.0   # 远超 cap
     e._corpse_energy[:] = 0.0
     e._deposit_corpse(dead, e._energy)
     nz = np.flatnonzero(e._corpse_energy > 0)
     assert nz.size >= 1, "应有尸体落格"
-    assert e._corpse_energy[nz].max() <= 3.0, "单格尸体能量超过 corpse_cap_per_cell"
+    assert e._corpse_energy[nz].max() <= cap, "单格尸体能量超过 corpse_cap_per_cell"
 
 
 def test_deposit_starvation_no_negative():
