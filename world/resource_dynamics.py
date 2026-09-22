@@ -1,0 +1,391 @@
+"""斑块"休耕—死亡—轮作"（13.4 波 2）—— 资源—消费者**负反馈**的纯逻辑模块。
+
+出处：fish 2026-09-23 01:20 构想 + `[所有者]` R176 §12（文献范式：Noy-Meir 1975 /
+Westoby 1989 状态转换理论；Klausmeier / von Hardenberg *Grazing Away the Resilience
+of Patterned Ecosystems*；Christensen 2003 内蒙古草原放牧阈值 0.49；Urad 荒漠草原 2025）。
+
+为什么需要它
+------------
+现状（`ResourceField._regrowth_amount`）的再生**只由温度驱动**：
+
+    growth = regrowth_rate × clip((温度+20)/20, 0, 1)^temp_sensitivity × (斑块 2.0 / 背景 mult)
+
+⇒ **一格今天被吃光，下一 tick 照样按温度满速恢复** ⇒ 取食压力在资源侧**没有任何反馈**。
+P0/P0.6 的诊断结论是「缺的不是参数，而是**资源可持续供给的结构**」——
+本模块提供那条缺失的负反馈：
+
+    取食压力 ↑ ⇒ 斑块死亡 ↑ ⇒ 总产能 ↓ ⇒ 种群 ↓ ⇒ 取食压力 ↓ ⇒ 死格重生 ⇒ 产能恢复
+
+本质三件事
+----------
+1. **休耕（rest）**：某格被吃过 ⇒ 之后 `rest_ticks` 内**再生为 0**（存量还不还，看引擎）。
+2. **死亡（kill）**：某格被吃**强度超过阈值** ⇒ 该格**不再生长**（斑块格同时**失去斑块加成**）。
+3. **轮作（rotation）**：死格 `dead_regen_ticks` 后**重入候选池**，同时把"斑块加成"
+   **搬到一个随机背景格**（fish 原话："等作为随机斑点生长位"）。
+   ⇒ 与文献里的"荒漠化（永久裸地 ⇒ 不可逆）"**根本不同**：这是 **shifting mosaic**，
+   空间上不断迁移的斑块镶嵌 ⇒ **可逆**。
+
+🔴 动手前实测的三条（`tools/wave2_patch_probe.py`，零 RNG，一条命令复现）
+--------------------------------------------------------------------
+**(A) `kill_denom="capacity"` 是"纬度抽奖"** —— `capacity = capacity_per_area × 格面积`，
+而格面积跨纬度差 **151 倍**（赤道 patch 格 120.0 vs 极点 patch 格 3.14）。
+每格每 tick 最大取食量 = `eat_amount(0.5) × eat_mult_max(1.5) × occ_cap(3)` = **2.25** ⇒
+阈 0.7 时**只有 1/817 个斑块格**会被杀死（且全在极区行 0/1/59），**赤道行比值仅 0.074**
+⇒ 本机制最想做的事（惩罚"停着把富格吃死"）在生命区**恰好永不触发**。
+
+**(B) 因此分母改用「当期再生量」**（= 设计稿 §2.5「格内吃>长」的同一个量）：
+斑块格 单人 0.75 / 3 人 **2.25**，背景格 单人 1.71 / 3 人 5.12 ⇒ **与纬度无关**
+⇒ 阈值有唯一物理含义：**「同格几个人的取食量超过这格当期再生」**。
+（`kill_denom="capacity"` 仍保留，供字面口径复核。）
+
+**(C) 轮作必须"同行交换"** —— 面积只依赖纬度 ⇒ 同一行内所有格面积相同。
+实测：同行交换 843 次 ⇒ `ΔΣcapacity = 0.000000e+00`（逐位）；
+**跨行交换 ⇒ `ΔΣcapacity = +1.886e+03`（相对 1%）** ⇒ 破坏 `ResourceField` 构造期的
+「Σcapacity 守恒」不变量 ⇒ 本模块**只在同一行内**交换（`rotate_same_row_only`）。
+
+契约（与 L2/Subpos 同族）
+------------------------
+* **默认关**（`enabled=False`）⇒ 所有方法**退化为 no-op**（`growth_multiplier` 返回全 1、
+  两个写方法直接返回）⇒ 引擎即使无条件调用也**不进任何新代码路径**（C7 逐位等价）。
+* **不 import 引擎**、**不持有 RNG** —— 随机性一律由调用方通过 `rand_u` 传入
+  （⇒ 模块内无隐藏抽取；同 `rand_u` ⇒ 逐位可复现）。
+* 状态量边界（R145 C9 家族）：`_mask`/`_dead`/`_rest_until` 全部可自检，见
+  `conservation_check()`（Σcapacity 与"面积加权再生倍率"两条不变量）。
+"""
+from __future__ import annotations
+
+from typing import Any, Optional
+
+import numpy as np
+
+__all__ = ["ResourceDynamics", "KILL_DENOMS"]
+
+#: `kill_denom` 可选口径（见模块 docstring (A)/(B)）
+KILL_DENOMS = ("regrowth", "capacity")
+
+
+class ResourceDynamics:
+    """斑块休耕/死亡/轮作的状态机（按格；**纯逻辑**，不依赖引擎）。
+
+    典型接线（引擎侧，三段）：
+
+    ```python
+    rd = ResourceDynamics.from_field(cfg.resource_dynamics, self.resources, self.world)
+    # ① 再生闸：growth = rf._regrowth_amount(tick) * rd.growth_multiplier()
+    # ② 取食后：rd.note_tick(cell_intake, growth, tick)        # 记休耕 + 判死
+    # ③ 每 tick 末：rd.rotate(tick, rand_u=self.rng.random(k))  # 重生 + 搬加成
+    #    （加成已搬走 ⇒ 还需把 rf._capacity 重算：rf._capacity[:] = rd.capacity_from_base(base)）
+    ```
+
+    参数
+    ----
+    n_cells : int
+        格子总数。
+    cfg : Any
+        配置对象（`ResourceDynamicsConfig`）；缺字段时按默认值回退（向前兼容）。
+    patch_mask : NDArray[bool] 或 None
+        构造期的斑块掩码（`ResourceField._patch_mask`）；None ⇒ 全背景。
+    cols : int
+        经度格数（用于把 `flat` 换算成"行"⇒ 同行交换）。
+    base_capacity : NDArray[float64]
+        **不含斑块倍率**的基准容量（= `capacity_per_area × 格面积`）。
+        ⚠️ 与 `ResourceField._capacity` 不同：后者**已含**倍率。
+    patch_capacity_mult / bg_capacity_mult : float
+        构造期两个容量倍率（`patch_capacity_mult` / 背景倍率）。
+    patch_regrowth_mult : float
+        构造期斑块再生倍率（默认 2.0）。
+    """
+
+    def __init__(
+        self,
+        n_cells: int,
+        cfg: Any,
+        *,
+        patch_mask: Optional[np.ndarray],
+        cols: int,
+        base_capacity: np.ndarray,
+        patch_capacity_mult: float,
+        bg_capacity_mult: float,
+        patch_regrowth_mult: float = 2.0,
+    ) -> None:
+        g = lambda k, d: getattr(cfg, k, d)  # noqa: E731 — 缺字段回退（向前兼容）
+        self.enabled = bool(g("enabled", False))
+        self.rest_ticks = int(g("rest_ticks", 300))
+        self.kill_frac = float(g("kill_frac", 0.7))
+        self.kill_denom = str(g("kill_denom", "regrowth"))
+        self.dead_regen_ticks = int(g("dead_regen_ticks", 2000))
+        self.dead_cell_max_frac = float(g("dead_cell_max_frac", 0.5))
+        self.kill_patch_only = bool(g("kill_patch_only", True))
+        self.rotate_same_row_only = bool(g("rotate_same_row_only", True))
+        # 🔴 `dead_regen_ticks = 0` ⇒ "永不重生" = 文献里的**不可逆荒漠化** ⇒ 硬拒绝
+        assert self.dead_regen_ticks > 0, (
+            "dead_regen_ticks=0 会让斑块永不再生（不可逆荒漠化）—— 这不是本设计要的东西；"
+            "若确实要测不可逆，请另立开关并在板上裁定"
+        )
+        assert self.kill_denom in KILL_DENOMS, f"kill_denom 必须是 {KILL_DENOMS}"
+        assert 0.0 <= self.kill_frac, "kill_frac 必须 ≥ 0"
+        assert 0.0 < self.dead_cell_max_frac <= 1.0, "dead_cell_max_frac ∈ (0,1]"
+
+        self.n_cells = int(n_cells)
+        self.cols = int(cols)
+        self._row = np.arange(self.n_cells, dtype=np.int64) // self.cols
+        self._base_capacity = np.asarray(base_capacity, dtype=np.float64)
+        assert self._base_capacity.shape == (self.n_cells,), "base_capacity 形状不符"
+        self.patch_capacity_mult = float(patch_capacity_mult)
+        self.bg_capacity_mult = float(bg_capacity_mult)
+        self.patch_regrowth_mult = float(patch_regrowth_mult)
+
+        # 掩码：初始 = 构造期斑块掩码；轮作会就地搬移（同行交换 ⇒ Σcapacity 逐位守恒）
+        if patch_mask is None:
+            self._mask = np.zeros(self.n_cells, dtype=bool)
+        else:
+            self._mask = np.array(patch_mask, dtype=bool, copy=True)
+        assert self._mask.shape == (self.n_cells,), "patch_mask 形状不符"
+
+        # 逐格计时器 / 状态
+        self._rest_until = np.full(self.n_cells, -1, dtype=np.int64)
+        self._dead = np.zeros(self.n_cells, dtype=bool)
+        self._dead_since = np.full(self.n_cells, -1, dtype=np.int64)
+        # 本 tick 刚死亡的斑块格（等待 `rotate` 把加成搬走；**必须初始化**，
+        # 否则 `note_tick` 与 `rotate` 分属两段时会出现"加成悬空"的中间态）
+        self._demoted = np.zeros(self.n_cells, dtype=bool)
+
+        # 计数器（只增）
+        self.rest_set_n = 0        # 累计"设过休耕"的 (格·次)
+        self.patch_kill_n = 0      # 累计死亡事件
+        self.patch_reborn_n = 0    # 累计"死格到期重生"事件
+        self.forced_reborn_n = 0   # 累计"反荒漠化闸"强制重生事件
+        self.promote_n = 0         # 累计"斑块加成搬迁"事件
+
+        # 构造期基线（`conservation_check` 用）
+        self._cap_total_0 = float(self.capacity_from_base().sum())
+
+    # ---- 构造（便捷入口） ---------------------------------------------------
+
+    @classmethod
+    def from_field(cls, cfg: Any, rfield: Any, world: Any) -> "ResourceDynamics":
+        """从 `ResourceField` + `SphereWorld` 读构造期常量（**只读**，不 import 引擎）。
+
+        ⚠️ 需要 `ResourceField` 的三个内部量：`_patch_mask` / `_capacity` / `distribution`。
+        它们本身就是构造期只读量（`_capacity` 只在轮作时由本模块**经引擎**重算）。
+        """
+        n = int(world.n_cells)
+        mask = getattr(rfield, "_patch_mask", None)
+        cap = np.asarray(rfield._capacity, dtype=np.float64)
+        area = np.asarray(world.cell_area(np.arange(n)), dtype=np.float64)
+        base = float(rfield.capacity_per_area) * area
+        if mask is None or not np.asarray(mask).any():
+            p_mult, b_mult = 1.0, 1.0
+        else:
+            m = np.asarray(mask, dtype=bool)
+            p_mult = float(cap[m][0] / base[m][0])
+            b_mult = float(cap[~m][0] / base[~m][0])
+        return cls(
+            n, cfg, patch_mask=mask, cols=int(world.cols),
+            base_capacity=base, patch_capacity_mult=p_mult, bg_capacity_mult=b_mult,
+            patch_regrowth_mult=float(getattr(rfield, "_patch_regrowth_mult", 2.0)),
+        )
+
+    # ---- ① 再生闸 -----------------------------------------------------------
+
+    def growth_multiplier(self) -> np.ndarray:
+        """本 tick 每格的**再生乘子**（0 = 不生长，1 = 照常）。
+
+        休耕中 或 已死 ⇒ 0。`enabled=False` ⇒ 全 1（调用方可无条件相乘）。
+        """
+        if not self.enabled:
+            return np.ones(self.n_cells, dtype=np.float64)
+        ok = ~self._dead
+        ok &= self._rest_until < 0        # 未在休耕
+        return ok.astype(np.float64)
+
+    def capacity_multiplier(self) -> np.ndarray:
+        """每格的**容量倍率**（斑块倍率 / 背景倍率）。轮作搬移会改变它。"""
+        return np.where(self._mask, self.patch_capacity_mult, self.bg_capacity_mult)
+
+    def capacity_from_base(self) -> np.ndarray:
+        """按当前掩码重算逐格容量（= `base_capacity × 倍率`）。
+
+        ⚠️ 引擎侧需要把结果写回 `ResourceField._capacity`（轮作后才生效）。
+        """
+        return self._base_capacity * self.capacity_multiplier()
+
+    # ---- ② 取食后：休耕 + 判死 ----------------------------------------------
+
+    def note_tick(self, intake: np.ndarray, growth: np.ndarray, tick: int) -> None:
+        """结算"这一 tick 被吃了多少"：设休耕 + 判死亡。
+
+        参数
+        ----
+        intake : NDArray[float64]，形状 (n_cells,)
+            每格本 tick **被吃掉的量**（质量单位，`np.bincount(flats, weights=taken)`）。
+        growth : NDArray[float64]，形状 (n_cells,)
+            每格本 tick 的**名义再生量**（未乘 `growth_multiplier`）。
+            `kill_denom="regrowth"` 时它同时是**分母**；也可用于排除"这格本来就不长"（分母 0）。
+        tick : int
+            当前时间步（休耕截止与死亡时刻按它记）。
+
+        说明
+        ----
+        * 判死的分母取 `growth`（默认）或 `base_capacity`（字面口径），见模块 docstring (A)(B)。
+        * `kill_patch_only=True`（默认）⇒ **只有斑块格会死**。
+          理由：`kill_denom="regrowth"` 下背景格"单人取食/再生"就有 1.71 ⇒ 若允许背景格死，
+          世界会被瞬间打散（大范围荒漠）；而设计意图本就是"斑块因过牧而死"。
+        """
+        if not self.enabled:
+            return
+        intake = np.asarray(intake, dtype=np.float64)
+        growth = np.asarray(growth, dtype=np.float64)
+
+        # --- 休耕：被吃过就休耕 ---
+        eaten = intake > 0.0
+        if eaten.any():
+            self._rest_until[eaten] = tick + self.rest_ticks
+            self.rest_set_n += int(eaten.sum())
+
+        # --- 判死 ---
+        if self.kill_denom == "regrowth":
+            denom = growth
+        else:
+            denom = self._base_capacity
+        valid = (denom > 0.0) & (~self._dead) & (intake > 0.0)
+        if self.kill_patch_only:
+            valid &= self._mask
+        if not valid.any():
+            return
+        ratio = np.zeros(self.n_cells, dtype=np.float64)
+        ratio[valid] = intake[valid] / denom[valid]
+        newly = valid & (ratio > self.kill_frac)
+        n_new = int(newly.sum())
+        if n_new == 0:
+            return
+        self._dead |= newly
+        self._dead_since[newly] = tick
+        self._rest_until[newly] = -1          # 死格不再论"休耕"（生长反正为 0）
+        self.patch_kill_n += n_new
+        # 斑块格死亡 ⇒ **立刻**把斑块加成搬走（同行交换；见 docstring (C)）
+        self._demoted = newly & self._mask
+        self._mask[self._demoted] = False
+
+    # ---- ③ 轮作：重生 + 搬加成 + 反荒漠化闸 ---------------------------------
+
+    def rotate(self, tick: int, rand_u: np.ndarray) -> None:
+        """死格重入候选池 + 把斑块加成搬到随机背景格 + 反荒漠化闸。
+
+        参数
+        ----
+        tick : int
+            当前时间步。
+        rand_u : NDArray[float64]
+            **调用方提供**的均匀随机数（[0,1)），长度 ≥ 本 tick 需要的抽取次数。
+            ⚠️ 模块**不持有 RNG** ⇒ 随机性来源单一、可对拍。
+        """
+        if not self.enabled:
+            return
+        rand_u = np.asarray(rand_u, dtype=np.float64).ravel()
+        used = 0
+
+        # --- ① 先补上"上一步死亡留下的搬迁"（若还没搬）---
+        if self._demoted.any():
+            for i in np.flatnonzero(self._demoted):
+                used = self._promote_same_row(int(i), rand_u, used)
+            self._demoted[:] = False
+
+        # --- ② 到期重生：死格 → 背景格（"重入候选池"）---
+        due = self._dead & ((tick - self._dead_since) >= self.dead_regen_ticks)
+        if due.any():
+            n_due = int(due.sum())
+            self._dead[due] = False
+            self._rest_until[due] = -1
+            self._dead_since[due] = -1
+            self.patch_reborn_n += n_due
+
+        # --- ③ 反荒漠化闸：死格占比超阈 ⇒ 强制重生（从最老的开始）---
+        max_dead = int(self.dead_cell_max_frac * self.n_cells)
+        n_dead = int(self._dead.sum())
+        if n_dead > max_dead:
+            need = n_dead - max_dead
+            cand = np.flatnonzero(self._dead)
+            order = cand[np.argsort(self._dead_since[cand], kind="stable")]
+            force = order[:need]
+            self._dead[force] = False
+            self._dead_since[force] = -1
+            self._rest_until[force] = -1
+            self.forced_reborn_n += int(force.size)
+
+    def _promote_same_row(self, dead_cell: int, rand_u: np.ndarray, used: int) -> int:
+        """把斑块加成搬到一个**与 `dead_cell` 同行**的随机背景格（逐位守恒）。"""
+        row = self._row
+        if self.rotate_same_row_only:
+            cand = np.flatnonzero((~self._mask) & (row == row[dead_cell]) & (~self._dead))
+        else:
+            cand = np.flatnonzero((~self._mask) & (~self._dead))
+        if cand.size == 0:
+            return used
+        u = float(rand_u[used % rand_u.size]) if rand_u.size else 0.0
+        j = int(cand[min(int(u * cand.size), cand.size - 1)])
+        self._mask[j] = True
+        self.promote_n += 1
+        return used + 1
+
+    # ---- 读数与自检 ---------------------------------------------------------
+
+    def probe(self) -> dict:
+        """四条必读读数（R176 §12.5）+ 有效产能。**关档 ⇒ None（未观测，非 0）**。"""
+        if not self.enabled:
+            return {
+                "enabled": False,
+                "dead_cell_frac": None, "resting_cell_frac": None,
+                "patch_kill_n": None, "patch_reborn_n": None,
+                "forced_reborn_n": None, "mean_capacity_effective": None,
+                "note": "未启用 ⇒ 未观测（None，非 0）；开档后才有意义",
+            }
+        cap_total = float(self.capacity_from_base().sum())
+        return {
+            "enabled": True,
+            "dead_cell_frac": round(float(self._dead.mean()), 6),
+            "resting_cell_frac": round(float((self._rest_until >= 0).mean()), 6),
+            "patch_kill_n": int(self.patch_kill_n),
+            "patch_reborn_n": int(self.patch_reborn_n),
+            "forced_reborn_n": int(self.forced_reborn_n),
+            "promote_n": int(self.promote_n),
+            "rest_set_n": int(self.rest_set_n),
+            "dead_n": int(self._dead.sum()),
+            "patch_cells": int(self._mask.sum()),
+            "mean_capacity_effective": round(cap_total / max(1, self.n_cells), 6),
+            "capacity_total_rel": round(cap_total / max(1e-12, self._cap_total_0), 9),
+            "note": ("kill_denom=" + self.kill_denom
+                     + f"｜阈值 {self.kill_frac}"
+                     + f"｜kill_patch_only={self.kill_patch_only}"
+                     + f"｜同行交换={self.rotate_same_row_only}"
+                     + "｜⚠️ 只看人口会漏掉'世界正在荒漠化但还没崩'的中间态 ⇒ 四条读数缺一不可"),
+        }
+
+    def conservation_check(self) -> dict:
+        """两条构造期不变量的自检（R145 C9 家族 / 波 2 §五）。
+
+        * `capacity_total_rel`：`Σcapacity` 相对构造期的比值 ⇒ 轮作不该改变它（应恒 = 1）
+        * `regrow_area_weighted`：`Σ(再生倍率 × 面积) / Σ面积` ⇒ 应恒 = 1.0
+          （斑块面积不变时背景倍率也不必重算；**同行交换**保证这一点）
+        """
+        if not self.enabled:
+            return {"enabled": False, "capacity_total_rel": None,
+                    "regrow_area_weighted": None, "note": "未启用（未观测）"}
+        area = self._base_capacity / max(1e-12, float(self._base_capacity.sum()))
+        pa = float(area[self._mask].sum())
+        ba = float(area[~self._mask].sum())
+        if ba > 0:
+            bg_rg = (1.0 - self.patch_regrowth_mult * pa) / ba
+        else:
+            bg_rg = 1.0
+        rg = float((np.where(self._mask, self.patch_regrowth_mult, bg_rg) * area).sum())
+        cap_total = float(self.capacity_from_base().sum())
+        return {
+            "enabled": True,
+            "capacity_total_rel": round(cap_total / max(1e-12, self._cap_total_0), 9),
+            "cap_total_now": round(cap_total, 6),
+            "cap_total_0": round(self._cap_total_0, 6),
+            "regrow_area_weighted": round(rg, 9),
+            "note": ("两条都应恒为 1；偏离 ⇒ 轮作破坏了构造期守恒 "
+                     "（先查是否跨行交换 / 面积权重口径）"),
+        }

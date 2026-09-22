@@ -747,6 +747,65 @@ class SubposConfig:
 
 
 @dataclass
+class ResourceDynamicsConfig:
+    """斑块"休耕—死亡—轮作"（13.4 波 2；fish 01:20 构想 / R176 §12）。
+
+    为什么
+    ------
+    现状再生**只由温度驱动** ⇒ 一格今天被吃光，下一 tick 照样满速恢复 ⇒
+    **取食压力在资源侧没有任何反馈**。本机制给出那条缺的负反馈：
+
+        取食压力 ↑ ⇒ 斑块死亡 ↑ ⇒ 总产能 ↓ ⇒ 种群 ↓ ⇒ 取食压力 ↓ ⇒ 死格重生 ⇒ 产能恢复
+
+    ▶ 实现落在**新文件** `world/resource_dynamics.py`（纯逻辑、零引擎依赖）⇒ 本配置只是它的参数契约。
+    ▶ `enabled=False`（默认）⇒ 模块全部方法退化为 no-op ⇒ 引擎无条件调用也**不进新代码路径**
+      （与 `SubposConfig` / `L2` 同一套"C7 逐位等价"纪律）。
+
+    🔴 两个字段偏离设计稿 §12.5 字面（依据 = `tools/wave2_patch_probe.py` 的零 RNG 实测）
+    ---------------------------------------------------------------------------------
+    *(A) `kill_denom`：字面口径（`被吃量 / capacity`）是"纬度抽奖"* —— `capacity = capacity_per_area
+    × 格面积`，格面积跨纬度差 **151 倍**（赤道斑块格 120.0 vs 极点斑块格 3.14），而每格每 tick
+    最大取食量只有 `0.5 × 1.5 × 3 = 2.25` ⇒ 阈 0.7 时**只有 1/817 个斑块格**会被杀死，且全在
+    极区行（0/1/59），**赤道行比值仅 0.074** ⇒ 该机制在生命区**永不触发**（≈ no-op）。
+    ⇒ 默认改 `"regrowth"`（分母 = **当期再生量** = §2.5「格内吃>长」的同一个量）：
+      斑块格 单人 0.75 / 3 人 **2.25**、背景格 单人 1.71 / 3 人 5.12 ⇒ **与纬度无关**，
+      阈值读作「**同格几个人的取食量超过这格当期再生**」。字面口径仍可用 `"capacity"` 复核。
+
+    *(B) `kill_patch_only`：只有斑块格会死（默认 True）* —— `kill_denom="regrowth"` 下背景格
+    "单人取食/再生"就有 1.71 ⇒ 若允许背景格死，世界会被瞬间打散（大范围荒漠）；
+    而设计意图本就是"**斑块**因过牧而死"。`rotate_same_row_only` 见模块 docstring (C)：
+    **跨行交换会破坏 `Σcapacity` 守恒**（实测 +1.886e+03 = 相对 1%）⇒ 只在同行内搬加成。
+    """
+
+    enabled: bool = False            # 默认关 = 旧行为**逐位等价**（派生量全 no-op）
+    rest_ticks: int = 300            # 被吃后**休耕**：该格 N tick 内再生 = 0
+    kill_frac: float = 0.7           # 被吃强度 > 此值 ⇒ 斑块死亡（分母见 `kill_denom`）
+    kill_denom: str = "regrowth"     # 🆕 "regrowth"（默认，纬度无关）| "capacity"（设计稿字面）
+    dead_regen_ticks: int = 2000     # 死格**重入候选池**的等待（🔴 0 = 永不 ⇒ 硬拒绝：那是文献里的不可逆荒漠化）
+    dead_cell_max_frac: float = 0.5  # 🔴 **反荒漠化闸**：死格占比超过它 ⇒ 强制加速重生
+    kill_patch_only: bool = True     # 🆕 只有斑块格会死（防背景格大范围被打散）
+    rotate_same_row_only: bool = True  # 🆕 只在**同行**（同面积）交换斑块加成 ⇒ Σcapacity 逐位守恒
+
+    def __post_init__(self) -> None:
+        assert self.rest_ticks >= 0, "rest_ticks 非负"
+        assert self.kill_frac >= 0.0, "kill_frac 非负"
+        assert self.kill_denom in ("regrowth", "capacity"), (
+            "kill_denom 只允许 'regrowth' / 'capacity'（见类 docstring (A)）"
+        )
+        assert self.dead_regen_ticks > 0, (
+            "dead_regen_ticks=0 会让斑块**永不再生**（不可逆荒漠化）—— 本设计要的是可逆的"
+            " shifting mosaic；若确实要测不可逆，请另立开关并先在板上裁定"
+        )
+        assert 0.0 < self.dead_cell_max_frac <= 1.0, "dead_cell_max_frac ∈ (0,1]"
+
+
+#: `from_dict` 的字段白名单（旧存档缺键 ⇒ 回退默认；多出的键 ⇒ 忽略而非报错）
+_RESOURCE_DYNAMICS_FIELDS: frozenset = frozenset(
+    f.name for f in fields(ResourceDynamicsConfig)
+)
+
+
+@dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
 
@@ -769,6 +828,9 @@ class SimConfig:
     #   ⚠️ 挂进 SimConfig ⇒ 由 `to_dict()`/`config_fingerprint()`（= `asdict`）**自动进指纹**
     #      ⇒ "跨档续跑"会被拦（同 `signal_alphabet` 的机制）。
     subpos: SubposConfig = field(default_factory=SubposConfig)
+    # ---- 13.4 波 2：斑块"休耕—死亡—轮作"（默认关 = 旧行为逐位等价）----
+    #   实现落在新文件 `world/resource_dynamics.py`；本配置是它的参数契约。
+    resource_dynamics: ResourceDynamicsConfig = field(default_factory=ResourceDynamicsConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -838,6 +900,15 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("corpse_wound") or {}).items()
                     if k in _CORPSE_WOUND_FIELDS
+                }
+            ),
+            # 13.4 波 2：斑块动态配置；旧存档缺失 ⇒ 回退默认（enabled=False = 旧行为）。
+            #   B1 同款：用字段白名单过滤未知键（防旧存档带多余键时 TypeError）。
+            resource_dynamics=ResourceDynamicsConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("resource_dynamics") or {}).items()
+                    if k in _RESOURCE_DYNAMICS_FIELDS
                 }
             ),
             # D-8：oracle 配置；旧存档缺失时回退默认关闭（C-6/C-7 先例同 reputation_weight）。
