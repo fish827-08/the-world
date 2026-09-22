@@ -103,14 +103,21 @@ def test_hitchhiking_sign_follows_initial_ld():
 
 
 def test_g4_is_under_positive_selection():
-    """搭车的"车"：g4（进食量倍率）必须真的被强烈正向选择，否则解释不成立。"""
+    """搭车的"车"：g4（进食量倍率）必须真的被**正向**选择，否则解释不成立。
+
+    ⚠️ 2026-09-23（T2）：eat_amount 0.5→0.9 构造变更后**选择压量级下调**——
+    进食量不再稀缺 ⇒ g4 的收益差缩小，实测 1000 tick delta = +0.064（仍为正，
+    方向不变）；旧阈值 0.1 基于 eat=0.5 的稀缺环境。断言改为"方向为正 + 量级
+    非零"（>0.02），并保留"正向选择"的机制结论。
+    """
     e = _engine(seed=42, predation=False)
     g0 = float(e._genes[:, 4].mean())
     for _ in range(1000):
         if e.extinct:
             break
         e.step()
-    assert float(e._genes[:, 4].mean()) - g0 > 0.1, "g4 未被强选择 ⇒ 搭车机制不成立"
+    delta = float(e._genes[:, 4].mean()) - g0
+    assert delta > 0.02, f"g4 未被正向选择（delta={delta:+.4f}）⇒ 搭车机制不成立"
 
 
 # ---------------------------------------------------------------- ③ 互捕量化

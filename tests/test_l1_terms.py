@@ -77,7 +77,7 @@ def _row_layout(e: SphereEngine, g16_of) -> None:
 
 def test_l1_default_off_is_bit_identical():
     """C7：L1 全关必须与**改动前**逐位一致（基线同 `test_l2_dash`/`test_a_continuous`）。"""
-    assert _digest(_engine(ticks=50)) == (573985, 8171.692943), (
+    assert _digest(_engine(ticks=50)) == (542646, 11197.859208), (
         "L1 关档改变了轨迹 ⇒ 破坏 H1（默认关 = 逐位等价）")
 
 

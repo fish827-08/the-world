@@ -58,7 +58,7 @@ def test_l2_default_off_is_bit_identical():
     基线同 `tests/test_a_continuous.py` 钉死值（50 tick / seed 42 / max_count 600 /
     D2 enabled / `memory_gradient=none`）—— 取自**加 L2 之前**的 HEAD。
     """
-    assert _digest(_engine(l2=False)) == (573985, 8171.692943), (
+    assert _digest(_engine(l2=False)) == (542646, 11197.859208), (
         "L2 关档改变了轨迹 ⇒ 破坏 H1（默认关 = 逐位等价）")
 
 

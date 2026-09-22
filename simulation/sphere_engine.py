@@ -64,6 +64,8 @@ from world.subpos import (
     init_from_flat as _sub_init,
     speed_steps as _sub_steps,
 )
+# 13.4 波 2A：斑块休耕—死亡—轮作（T2，本线 = [云端·开发]）。收编件（0207aa5），纯逻辑、零引擎依赖。
+from world.resource_dynamics import ResourceDynamics as _ResourceDynamics
 
 
 def codebook_init_rows(n_rows: int, alphabet: str) -> NDArray[np.uint8]:
@@ -378,6 +380,11 @@ class SphereEngine:
         "_run_slow_n",        # Σ 移动者中 steps==0（"白移动"）的个体数
         "_run_mover_sub_n",   # Σ 移动者数（分母）
         "_steps_hist",        # 各步长档计数（形状 subdiv+1）
+        # ---- 13.4 波 2A：资源动态（T2，本线 = [云端·开发]）----
+        # 🔴 __slots__ 硬约束：新属性必须登记（加在块尾，减少同文件并发冲突面）。
+        "_rd",                # ResourceDynamics 实例（收编件 world/resource_dynamics.py）
+        "_rd_intake_sum",     # 本 tick 每格被吃量累计（note_tick 输入，逐 tick 重建）
+        "_rd_growth_sum",     # 本 tick 每格名义再生量累计（note_tick 输入，逐 tick 重建）
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -561,6 +568,18 @@ class SphereEngine:
                     "两个读数互相污染 ⇒ 归因不干净。请二选一"
                     "（建议 subpos：speed_max=2.0 已包含 L2 的冲刺语义）。"
                 )
+        # ── H3（13.4 波 2A）：资源动态（休耕—死亡—轮作）开启时必须 **fail-loud** ────
+        # 本机制只在 Python 路径实现（§14.7：新机制/非确定性强制 Python，不动 Rust）⇒
+        # use_sim_core=True 时开启会**静默走旧再生路径**（开关开了行为却不变 = 静默
+        # no-op 的同族形态）⇒ 构造期硬报错。
+        _rdcfg0 = getattr(config, "resource_dynamics", None)
+        if _scfg0.use_sim_core and bool(getattr(_rdcfg0, "enabled", False)):
+            raise NotImplementedError(
+                "resource_dynamics（斑块休耕—死亡—轮作）尚未下沉 Rust："
+                "use_sim_core=True 时开启会**静默走旧再生路径**（开关开了行为却不变"
+                " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
+                "（§14.7：新机制强制 Python 路径）。"
+            )
         # ── H3（设计稿 §5.1 / §2.5）：尸体—食腐 + 血条开关开启时必须 **fail-loud** ────
         # 本任务全程 Python 路径（§14.7：新机制/非确定性 ⇒ 强制 Python，不动 Rust）⇒
         # use_sim_core=True 时开启 corpse/wound/contest 会**静默走旧路径**（开关开了
@@ -587,6 +606,14 @@ class SphereEngine:
         self._run_slow_n = 0          # Σ 移动者中 steps==0（"白移动"）的个体数
         self._run_mover_sub_n = 0     # Σ 移动者数（主判据分母）
         self._steps_hist = np.zeros(_subdiv0 + 1, dtype=np.int64)
+        # ---- 13.4 波 2A：资源动态（T2，本线 = [云端·开发]）----
+        # 构造期从 ResourceField 读斑块掩码/容量/倍率（**只读**，不碰引擎状态）。
+        # 关档时 `_rd.enabled=False` ⇒ 全部方法 no-op ⇒ 引擎无条件调用也不进新路径（C7）。
+        _rdcfg0 = getattr(config, "resource_dynamics", None)
+        self._rd = _ResourceDynamics.from_field(
+            _rdcfg0, self.resources, self.world)
+        self._rd_intake_sum = np.zeros(self.world.n_cells, dtype=np.float64)
+        self._rd_growth_sum = np.zeros(self.world.n_cells, dtype=np.float64)
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
         )
@@ -1373,6 +1400,29 @@ class SphereEngine:
             "steps_frac": ([round(float(x) / tot, 6) for x in hist] if tot else None),
         }
 
+    # ---- 13.4 波 2A：资源动态读数（T2，本线 = [云端·开发]）-------------------
+
+    def resource_dynamics_probe(self) -> dict | None:
+        """斑块休耕—死亡—轮作读数（R176 §12.5 四条 + conservation 自检）。
+
+        🔴 **关档返回 `None`（未适用），不是 0**（R120 口径铁律：没测到 ≠ 测出零）。
+        由 `world.resource_dynamics.ResourceDynamics.probe()` 提供四条：
+        `dead_cell_frac` / `resting_cell_frac` / `patch_kill_n` / `patch_reborn_n`
+        + `mean_capacity_effective`；`conservation_check()` 随 summary 落盘（恒应过）。
+        """
+        if not bool(getattr(self._rd, "enabled", False)):
+            return None
+        return self._rd.probe()
+
+    def resource_dynamics_conservation(self) -> dict | None:
+        """两条构造期守恒自检（Σcapacity 与面积加权再生倍率，应恒 ≈1）。
+
+        关档 ⇒ None（未适用）。随 summary 落盘供 `[所有者]` 事后抽验。
+        """
+        if not bool(getattr(self._rd, "enabled", False)):
+            return None
+        return self._rd.conservation_check()
+
     def l2_probe(self) -> dict | None:
         """L2 机动层读数（R150 B4；本段 = [本地开发] 线）。
 
@@ -1631,7 +1681,16 @@ class SphereEngine:
         # 顺序契约：先资源再生，再种群行动
         # uniform：Rust regrow（3.2）；patchy：Rust regrow_patchy（L7e，含空间倍率守恒）。
         #   旧版 .pyd 没有 regrow_patchy 时特性检测回退 Python，保证双路径不炸。
-        if self._use_sim_core and self.resources.distribution == "uniform":
+        _rd_on = bool(getattr(self._rd, "enabled", False))
+        if _rd_on:
+            # 13.4 波 2A（T2）：资源动态**强制 Python 路径**（H3 已拦 use_sim_core）。
+            # 再生闸：休耕/死亡格再生乘子 = 0；其余 = 1（enabled=False ⇒ 全 1 = 逐位等价）。
+            self._rd_intake_sum[:] = 0.0          # 逐 tick 重建 intake（note_tick 输入）
+            self._rd_growth_sum = self.resources._regrowth_amount(self._tick)
+            growth = self._rd_growth_sum * self._rd.growth_multiplier()
+            np.minimum(self.resources._capacity, self.resources._grid + growth,
+                       out=self.resources._grid)
+        elif self._use_sim_core and self.resources.distribution == "uniform":
             # 3.4：资源再生长沉到 Rust（与 ResourceField.regrow 逐位等价，
             # 默认 temp_sensitivity=1.0 时严格一致；≠1 有 ≤1-ULP 差异）
             self._sim_core.regrow(
@@ -1670,6 +1729,19 @@ class SphereEngine:
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
+        # 13.4 波 2A（T2）：每 tick 末轮作（死格重入候选池 + 斑块加成同行搬移 + 反荒漠化闸）
+        # + 按当前掩码**重算** `_capacity`（`_capacity` 是基准 ⇒ 动态折扣走 `capacity_multiplier`）。
+        # 🔴 `rand_u` 消费只在开档发生（关档 rotate 直接返回 ⇒ 零 RNG 影响）。
+        if _rd_on:
+            n_patch = int(self.resources._patch_mask.sum()) if (
+                self.resources._patch_mask is not None) else 0
+            self._rd.rotate(self._tick, self.rng.random(max(1, n_patch)))
+            self.resources._capacity[:] = self._rd.capacity_from_base()
+            # 🔴 轮作会搬移斑块掩码 ⇒ 必须回写 `ResourceField._patch_mask`，
+            #    否则 `_regrowth_amount` 的斑块倍率 / 尸体 patch_boost 仍用旧掩码
+            #    （双掩码漂移 = I2 同族：两处规则不一致 ⇒ 归因不干净）。
+            if self.resources._patch_mask is not None:
+                self.resources._patch_mask[:] = self._rd._mask
         # 能量封顶（R144；`7516ba9` 引入 → 2026-09-21 补开关/测试/冒烟/纪元声明）
         # 关（默认）⇒ **与 E-017~E-031/calib1 逐位一致**（旧纪元）；开 ⇒ 新纪元（禁跨比）。
         if self.config.organisms.energy_cap_enabled:
@@ -1909,6 +1981,8 @@ class SphereEngine:
         )
         # S2/S3 尸体—争夺（设计稿 §5.3/5.4）：开关只读一次，供 4.3/4.3b 复用
         _cwc_scav = getattr(self.config, "corpse_wound", None)
+        # 13.4 波 2A（T2）：资源动态开关（note_tick/取食累计用；关档 = 零轨迹影响）
+        _rd_on = bool(getattr(self._rd, "enabled", False))
         if (stomach < stomach_cap).any():
             eaters = np.flatnonzero(stomach < stomach_cap)
             # R135 第 3 步 A-连续（2026-09-20）：**凸 trade-off** `forage_mult = (1−g16)^k`。
@@ -1937,6 +2011,10 @@ class SphereEngine:
             else:
                 taken = self.resources.consume_many(self._flat[eaters], want)
             stomach[eaters] += taken
+            # 13.4 波 2A（T2）：每格被吃量**质量**累计（note_tick 的 intake 输入；
+            # 关档 `_rd_intake_sum` 不消费 ⇒ 零轨迹影响）。
+            if _rd_on:
+                np.add.at(self._rd_intake_sum, self._flat[eaters], taken)
             # 内评 §三 观察项 1（接收侧净能量效应）：**实测**成交落点上的摄入，并同时
             # 记「全体进食者」的平均摄入作基线（= "不通信者"的参照）。
             # ⚠️ 按 **cell** 键控（非个体）：同格多人时会把他们的摄入一并计入 ⇒ 属近似，
@@ -1968,6 +2046,9 @@ class SphereEngine:
                 else:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
+                # 13.4 波 2A（T2）：邻格取食同样计入 per-cell intake（质量单位）。
+                if _rd_on:
+                    np.add.at(self._rd_intake_sum, targets, taken2)
             # 4.3b) S3 争夺食物战（设计稿 §2.3 H3/H4 项 6；`contest_enabled`）：同一格/邻格
             #       有他人正在取食（`eaters` = 本 tick 取食者）⇒ 高 g16 者可驱逐
             #       （RHP + 持有者优势 + 升级阈值 + 撤退）。🔴 确定性数值（零 RNG）。
@@ -1978,6 +2059,13 @@ class SphereEngine:
         #      尸体**入胃**（受胃容量限）。🔴 确定性数值（无 RNG 消费）⇒ 关档零轨迹影响。
         if bool(getattr(_cwc_scav, "corpse_enabled", False)):
             self._step_scavenging(P, stomach, stomach_cap, genes)
+
+        # 4.3c) 13.4 波 2A（T2）：取食结算后记 `note_tick`（休耕 + 判死）。
+        #       `_rd_intake_sum` = 本 tick 每格**被吃量**（质量单位；果实+邻格取食累加，
+        #       食腐写胃不入 note_tick —— 尸体不是"本格活再生"的取食压力）。
+        #       🔴 与 `_rd_growth_sum`（regrow 段已存的本 tick 名义再生）配对。
+        if _rd_on:
+            self._rd.note_tick(self._rd_intake_sum, self._rd_growth_sum, self._tick)
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
         cur_flat = self._flat[:P]
@@ -3800,6 +3888,17 @@ class SphereEngine:
             if self.resources._patch_mask is not None
             else np.zeros(0, dtype=bool)
         )
+        # --- 4.1 13.4 波 2A：资源动态状态（T2；关档 = 全零/初值 ⇒ 与旧快照兼容）---
+        data["rd_mask"] = self._rd._mask.copy()
+        data["rd_dead"] = self._rd._dead.copy()
+        data["rd_rest_until"] = self._rd._rest_until.copy()
+        data["rd_dead_since"] = self._rd._dead_since.copy()
+        data["rd_demoted"] = self._rd._demoted.copy()
+        data["rd_kill_n"] = np.array(self._rd.patch_kill_n)
+        data["rd_reborn_n"] = np.array(self._rd.patch_reborn_n)
+        data["rd_forced_reborn_n"] = np.array(self._rd.forced_reborn_n)
+        data["rd_promote_n"] = np.array(self._rd.promote_n)
+        data["rd_rest_set_n"] = np.array(self._rd.rest_set_n)
         data["resource_bg_regrowth_mult"] = np.array(self.resources._bg_regrowth_mult)
         data["resource_patch_regrowth_mult"] = np.array(self.resources._patch_regrowth_mult)
         data["signal_marks"] = self.signals._marks.copy()
@@ -4025,6 +4124,25 @@ class SphereEngine:
         engine.resources._capacity = data["resource_capacity"].copy()
         _pm = data["resource_patch_mask"]
         engine.resources._patch_mask = _pm.copy() if _pm.size > 0 else None
+        # --- 8.0 恢复资源动态状态（T2；旧快照缺键 ⇒ 由当前掩码重建 = 语义正确）---
+        if "rd_mask" in data and data["rd_mask"].size == engine.world.n_cells:
+            engine._rd._mask = data["rd_mask"].copy()
+            engine._rd._dead = data["rd_dead"].copy()
+            engine._rd._rest_until = data["rd_rest_until"].copy()
+            engine._rd._dead_since = data["rd_dead_since"].copy()
+            engine._rd._demoted = data["rd_demoted"].copy()
+            engine._rd.patch_kill_n = int(data["rd_kill_n"])
+            engine._rd.patch_reborn_n = int(data["rd_reborn_n"])
+            engine._rd.forced_reborn_n = int(data["rd_forced_reborn_n"])
+            engine._rd.promote_n = int(data["rd_promote_n"])
+            engine._rd.rest_set_n = int(data["rd_rest_set_n"])
+        else:
+            # 旧快照（13.4 前）：rd 状态 = 构造期默认（掩码随 resources._patch_mask 走）
+            engine._rd._mask = (
+                engine.resources._patch_mask.copy()
+                if engine.resources._patch_mask is not None
+                else np.zeros(engine.world.n_cells, dtype=bool)
+            )
         engine.resources._bg_regrowth_mult = float(data["resource_bg_regrowth_mult"])
         engine.resources._patch_regrowth_mult = float(data["resource_patch_regrowth_mult"])
         engine.signals._marks = data["signal_marks"].copy()
