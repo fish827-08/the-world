@@ -718,7 +718,12 @@ class SubposConfig:
     #                                  初值 4.0：`mob_eff` 实测均值 ≈0.27 ⇒ 0.27×4 ≈ 1.08 格，
     #                                  贴近历史 `1 + dash_frac`（1.12–1.24）⇒ 跨格频率不塌（§2.2）
     speed_max: float = 2.0           # 速度上限（格/tick）；=2 使 subpos **包含** L2 的冲刺语义
-    min_energy_frac: float = 0.2     # 移动能量门槛（**纯能量阈值**，沿用 L2 口径，不另造一套）
+    min_energy_frac: float = 0.05    # 移动能量门槛（**纯能量阈值**；0.05 × max_energy = 15）
+    #  🔴 初值是 0.2（沿用 L2 的 `dash_min_energy_frac`），**实测证明用错了口径**：
+    #     L2 的门槛管的是"**冲刺**"（额外行为，门槛高合理）；而 subpos 管的是"**移动**"本身
+    #     （基本行为）。0.2 × 300 = **60**，恰好等于 `initial_energy`(60)，而维持消耗 0.6/tick
+    #     ⇒ 几十 tick 后**全体低于门槛** ⇒ 实测 **97.87% 的移动者走 0 步**（自检 `_run_slow_n`）。
+    #  ⇒ 降到 0.05（=15 能量）：只拦"真的要饿死"的个体，不拦正常觅食移动。
     lat_floor: float = 0.3           # 极区移速折减下限：
     #                                  speed_cap = speed_max × (lat_floor + (1−lat_floor)·cos 纬度)
     #                                  ⇒ 赤道 100%、极区 30%（fish 00:30"极区移速更慢"）

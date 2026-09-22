@@ -57,6 +57,13 @@ from world.light_and_temperature import LightAndTemperature
 from world.resource_field import ResourceField
 from world.signal_field import SignalField
 from world.sphere_world import SphereWorld
+# 13.4 波 1：亚格连续坐标（本线 = [所有者·天平]）。纯几何工具，零状态 ⇒ 导入无副作用。
+from world.subpos import (
+    advance_sub as _sub_advance,
+    flat_of_sub as _sub_flat,
+    init_from_flat as _sub_init,
+    speed_steps as _sub_steps,
+)
 
 
 def codebook_init_rows(n_rows: int, alphabet: str) -> NDArray[np.uint8]:
@@ -362,6 +369,15 @@ class SphereEngine:
         "_corpse_scav_e", "_corpse_decayed_e",
         # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率计数 + 血条恐惧项反退化计数
         "_contest_holder_win_n", "_fearh_flat_n", "_fearh_dec_n",
+        # ---- 13.4 波 1：亚格连续坐标（本线 = [所有者·天平]）----
+        # 🔴 __slots__ 是硬约束：新属性**必须**登记，否则运行期 AttributeError。
+        # 位置约定：**加在块尾**（与 [本地开发] 的波 0 段分开，减少同文件并发冲突面）。
+        "_sub_r", "_sub_c",
+        # 读数（B4 口径；关档全部不累加 ⇒ 探针返回 None 或 0 的口径见 subpos_probe）
+        "_run_flat_move_n",   # Σ 真正**换格**的个体数（= 主判据 mean_flat_moves 的分子）
+        "_run_slow_n",        # Σ 移动者中 steps==0（"白移动"）的个体数
+        "_run_mover_sub_n",   # Σ 移动者数（分母）
+        "_steps_hist",        # 各步长档计数（形状 subdiv+1）
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -521,6 +537,30 @@ class SphereEngine:
                 "L1/L2 尚未下沉 Rust：use_sim_core=True 时开启 l1_seek/l1_fear/l2_dash 会"
                 "**静默走旧路径**（= dash PR 的翻车形态）⇒ 硬报错。请设 use_sim_core=False。"
             )
+        # ── H3（13.4 波 1）：亚格坐标的两条 fail-loud（本线 = [所有者·天平]）─────────
+        # (a) subpos ∧ use_sim_core：坐标改造**只在 Python 路径**实现（§14.7：新机制强制 Python）
+        #     ⇒ Rust 路径仍用**旧整数格移动** ⇒ 开关开了行为却不变（静默 no-op 同族）⇒ 硬报错。
+        # (b) subpos ∧ l2_dash：**语义互斥** —— 两者都是「走多远」的乘子：
+        #       L2 = 1/2 两档、概率闸 + **盲选** far 环目标（`rand_choice % 100` / `// 100`）；
+        #       subpos = 0/0.25/…/speed_max 多档、**沿用 score 选出的方向**、由 mob_eff 确定性给出。
+        #     同开 ⇒ 同一个体可能"被 L2 判冲刺换了目标"且"被 subpos 判走 0.5 格"，
+        #     语义冲突；且 `dash_frac` 与 `steps` 两个读数互相污染 ⇒ 归因不干净。
+        _subcfg0 = config.subpos
+        if bool(getattr(_subcfg0, "enabled", False)):
+            if _scfg0.use_sim_core:
+                raise NotImplementedError(
+                    "subpos（亚格坐标）尚未下沉 Rust：use_sim_core=True 时开启会"
+                    "**静默走旧整数格移动路径**（开关开了行为却不变 = 静默 no-op 的同族形态）"
+                    "⇒ 硬报错。请设 use_sim_core=False（§14.7：新机制强制 Python 路径）。"
+                )
+            if bool(getattr(_scfg0, "l2_dash", False)):
+                raise NotImplementedError(
+                    "subpos 与 l2_dash **语义互斥**：两者都是「走多远」的乘子 —— "
+                    "L2 是 1/2 两档且盲选目标，subpos 是它的一般化（0/0.25/…/speed_max，"
+                    "且沿用 score 选出的方向）。同开会语义冲突，且 dash_frac 与 steps "
+                    "两个读数互相污染 ⇒ 归因不干净。请二选一"
+                    "（建议 subpos：speed_max=2.0 已包含 L2 的冲刺语义）。"
+                )
         # ── H3（设计稿 §5.1 / §2.5）：尸体—食腐 + 血条开关开启时必须 **fail-loud** ────
         # 本任务全程 Python 路径（§14.7：新机制/非确定性 ⇒ 强制 Python，不动 Rust）⇒
         # use_sim_core=True 时开启 corpse/wound/contest 会**静默走旧路径**（开关开了
@@ -537,6 +577,16 @@ class SphereEngine:
 
         n = config.population.initial_count
         self._flat = np.zeros(n, dtype=np.int64)
+        # ---- 13.4 波 1：亚格坐标初始化（本线）----
+        # 关档时这两个数组**仍然存在**且恒等于由 `_flat` 推出的**格中心**
+        # ⇒ I2（`_flat` 与亚格恒一致）从第一步就成立，不需要"关档特判"（少一个特例 = 少一个坑）。
+        _subdiv0 = int(getattr(config.subpos, "subdiv", 4))
+        self._sub_r, self._sub_c = _sub_init(self._flat, _subdiv0, self.world)
+        # 读数计数器（关档不累加 ⇒ `subpos_probe()` 返回 None = "未适用"，不是 0）
+        self._run_flat_move_n = 0     # Σ 真正换格的个体数（主判据分子）
+        self._run_slow_n = 0          # Σ 移动者中 steps==0（"白移动"）的个体数
+        self._run_mover_sub_n = 0     # Σ 移动者数（主判据分母）
+        self._steps_hist = np.zeros(_subdiv0 + 1, dtype=np.int64)
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
         )
@@ -717,6 +767,17 @@ class SphereEngine:
         self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
             np.int64
         )
+        # 🔴 13.4 波 1：**撒点之后必须重新同步亚格坐标** ——
+        # 上面 `_flat = np.zeros(n)` 时做的 `_sub_init` 是基于"全 0"的，而撒点把 `_flat`
+        # 整体替换成随机格 ⇒ 不同步就会**脱钩**（I2 被破坏：亚格指向格 0、`_flat` 指向随机格）。
+        # 实测教训：这正是 E4/E6 两条引擎级单测第一次跑时抓到的形态。
+        self._sub_r, self._sub_c = _sub_init(self._flat, _subdiv0, self.world)
+        if bool(getattr(config.subpos, "enabled", False)):
+            # ⚠️ **极点行**的撒点可能落在"冗余槽位"：`flat_to_rc` 与 `rc_to_flat` 在极点行
+            #    **不互逆**（该行所有 col 物理上坍缩为一格，`neighbour` 返回的是整行 col）。
+            #    ⇒ 开档时把 `_flat` 也**规范化**，让 I2（`_flat` ≡ 亚格派生）**逐位**成立。
+            #    只在开档做 ⇒ 关档路径一个字节都不动（I1 逐位等价不受影响）。
+            self._flat = _sub_flat(self._sub_r, self._sub_c, _subdiv0, self.world)
 
         self._tick = 0
         self._extinct = False
@@ -2060,7 +2121,32 @@ class SphereEngine:
                                     self._interpret[idx, m] -= lr * (1.0 + self._interpret[idx, m])
                                 self._learning_count[idx] += 1
         else:
-            moved = self.rng.random(P) < move_prob
+            # ---- 13.4 波 1：亚格坐标 —— 移动语义反转（本线 = [所有者·天平]）------------
+            # 老语义：`moved = u < move_prob` ⇒ **默认不动**、以概率移动。
+            # 新语义（fish 00:30）：**默认走、以概率停**，且"停"由 **基因惰性 + 状态/信息**驱动：
+            #     stay_prob_eff = clip(stay_base + 惰性项 + 本格余粮 + 收到信号, 0, stay_max)
+            #   🔴 `stay_max < 1` 是**硬性反退化闸**（config 断言保证）：任何个体都有下限移动概率
+            #      ⇒ 防"一群不动的生物"（R171 §十 的构造巧合 + 文献 Andersson 1981 的 pause-travel）。
+            #   ⚠️ `stay_fear_k`（邻域有威胁 ⇒ 停）**本波不接**：它依赖"威胁感知"，而那是波 2 的
+            #      `perception_span` 的事。参数已在 config，探针会报其读回值（防"死参数"）。
+            #   ⚠️ RNG 形状（I3）：仍恰好消费 `rng.random(P)` **一次/个体** ⇒ 与关档同形。
+            _subcfg = self.config.subpos
+            _sub_on = bool(getattr(_subcfg, "enabled", False))
+            if _sub_on:
+                _own_cells = self._flat[:P]
+                _fr_all = self.resources._grid / np.maximum(self.resources._capacity, 1e-9)
+                _stay_gene = (1.0 - genes[:, Gene.MOVE_PROB]) * (1.0 - genes[:, Gene.ROOTING])
+                _stay_eff = np.clip(
+                    float(_subcfg.stay_base)
+                    + _stay_gene * (1.0 - _stay)
+                    + float(_subcfg.stay_food_k) * np.clip(_fr_all[_own_cells], 0.0, 1.0)
+                    + float(_subcfg.stay_signal_k)
+                    * (self.signals._marks[_own_cells] > 0).astype(np.float64),
+                    0.0, float(_subcfg.stay_max),
+                )
+                moved = self.rng.random(P) >= _stay_eff
+            if not _sub_on:
+                moved = self.rng.random(P) < move_prob
             moved &= energy >= move_cost_ind  # 付得起才走
             Nm = int(moved.sum())
             # ── R146/R149 L2：人口口径读数（B4；本段 = [本地开发] 线）─────────────
@@ -2332,16 +2418,65 @@ class SphereEngine:
                         _fl = int(self._far_len[_c])
                         targets[i] = int(self._far_cells[
                             int(self._far_off[_c]) + int(rand_choice[i] // 100) % _fl])
-                self._flat[mi] = targets
-                if _l2_on:
-                    # L2：按实际步数计费（d=1 ×1，d=2 ×(1+κ(2^p−1))）
-                    _cost = move_cost_ind[mi] * _mult
+                if _sub_on:
+                    # ── 亚格位移：方向沿用 score 选出的方向，步长由 g18×年龄**确定性**给出 ──
+                    # 🔴 速度必须确定性（I3）：每 tick 抽取数与关档一致。`rand_choice` 已被 L2
+                    #    的位域契约占用（`%100` / `//100`），再抽一次就破坏随机流形状。
+                    _cr, _cc = self.world.flat_to_rc(self._flat[mi])
+                    _tr, _tc = self.world.flat_to_rc(targets)
+                    _drow = np.sign(_tr - _cr).astype(np.int64)
+                    # 经度差取**最短路**（环绕）后再取符号：跨 0/cols 边界不能直接相减
+                    _dcw = (((_tc - _cc) + self.world.cols // 2) % self.world.cols
+                            - self.world.cols // 2)
+                    _dcol = np.sign(_dcw).astype(np.int64)
+                    _ocs = self.config.organisms
+                    _ls = self._lifespan(genes[mi, Gene.LIFE_GENE])
+                    _agef = self._age[mi].astype(np.float64)
+                    _af = np.ones_like(_agef)
+                    _af[_agef < _ocs.maturity_fraction * _ls] = _ocs.young_mob_mult
+                    _af[_agef >= _ocs.senile_fraction * _ls] = _ocs.old_mob_mult
+                    # 🔴 纬度调速（fish 00:30「极区移速更慢」）：
+                    #    speed_cap = speed_max × (lat_floor + (1−lat_floor)·cos φ)
+                    _coslat = np.cos(self.world.latitude_of(_cr))
+                    _cap = float(_subcfg.speed_max) * (
+                        float(_subcfg.lat_floor)
+                        + (1.0 - float(_subcfg.lat_floor)) * np.maximum(_coslat, 0.0))
+                    _spd = np.clip(genes[mi, Gene.DEFENSE] * _af
+                                   * float(_subcfg.speed_gain), 0.0, _cap)
+                    _subdiv = int(_subcfg.subdiv)
+                    _st = _sub_steps(_spd, _subdiv)
+                    # 纯能量门槛（沿用 L2 口径）：能量不够 ⇒ 走 0 步（原地）
+                    _st = np.where(
+                        energy[mi] >= float(_subcfg.min_energy_frac) * _ocs.max_energy,
+                        _st, np.int64(0))
+                    _sr2, _sc2 = _sub_advance(self._sub_r[mi], self._sub_c[mi],
+                                              _drow, _dcol, _st, _subdiv, self.world)
+                    self._sub_r[mi] = _sr2
+                    self._sub_c[mi] = _sc2
+                    _nf = _sub_flat(_sr2, _sc2, _subdiv, self.world)
+                    # 读数（B4）：🔴 主判据 = **真正换格**（mean_flat_moves），**不是 steps**
+                    # —— 位移 0.75 格在 steps 上有值、在 flat 上等于没动（设计稿 §2.2）
+                    self._run_mover_sub_n += int(len(mi))
+                    self._run_flat_move_n += int(np.count_nonzero(_nf != self._flat[mi]))
+                    self._run_slow_n += int(np.count_nonzero(_st == 0))
+                    self._steps_hist += np.bincount(
+                        np.clip(_st, 0, _subdiv), minlength=_subdiv + 1)[:_subdiv + 1]
+                    self._flat[mi] = _nf
+                    # 计费：按**实际步数**比例（走 0 步 ⇒ 不扣费 ⇒ "停"真的省钱）
+                    _cost = move_cost_ind[mi] * (_st.astype(np.float64) / float(_subdiv))
                     energy[mi] -= _cost
                     self._ec_add(EC_MOVE, mi, _cost)
                 else:
-                    energy[mi] -= move_cost_ind[mi]
-                    # R141 P0：cost_move 通道（只记 Python 路径；Rust 路径在 Rust 内扣费）
-                    self._ec_add(EC_MOVE, mi, move_cost_ind[mi])
+                    self._flat[mi] = targets
+                    if _l2_on:
+                        # L2：按实际步数计费（d=1 ×1，d=2 ×(1+κ(2^p−1))）
+                        _cost = move_cost_ind[mi] * _mult
+                        energy[mi] -= _cost
+                        self._ec_add(EC_MOVE, mi, _cost)
+                    else:
+                        energy[mi] -= move_cost_ind[mi]
+                        # R141 P0：cost_move 通道（只记 Python 路径；Rust 路径在 Rust 内扣费）
+                        self._ec_add(EC_MOVE, mi, move_cost_ind[mi])
                 # 5.6) 信任学习
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
@@ -2767,6 +2902,10 @@ class SphereEngine:
             self._stomach = np.concatenate([self._stomach, child_stomach])
             self._stomach_scav = np.concatenate(
                 [self._stomach_scav, child_stomach_scav])
+            # 13.4 波 1：亚格坐标随子代扩容 —— **与 `_flat` 完全同型**：
+            # 子代继承亲代的格（`_flat[ri]`）⇒ 同时继承亲代的亚格位置（连写法都对齐，便于复核）。
+            self._sub_r = np.concatenate([self._sub_r, self._sub_r[ri]])
+            self._sub_c = np.concatenate([self._sub_c, self._sub_c[ri]])
 
             # S1 骨架：血条随子代扩容（初值 1.0，H1）；机制不接线，仅保数组同长
             self._health = np.concatenate([self._health, np.ones(K, dtype=np.float64)])
@@ -2843,6 +2982,10 @@ class SphereEngine:
             self._stomach_scav = np.concatenate(
                 [self._stomach_scav[:P][keep], self._stomach_scav[P:]]
             )
+            # 13.4 波 1：亚格坐标随死亡压缩（**与 `_flat` 同一 `keep` 掩码**，
+            # 用切片赋值而非拼接 ⇒ 与上面 `[:P][keep]` 的语义逐位一致）。
+            self._sub_r = np.concatenate([self._sub_r[:P][keep], self._sub_r[P:]])
+            self._sub_c = np.concatenate([self._sub_c[:P][keep], self._sub_c[P:]])
             # S1 骨架：血条随死亡压缩（与 _energy 同节拍）；机制不接线，仅保数组同长
             self._health = np.concatenate(
                 [self._health[:P][keep], self._health[P:]]
@@ -3556,6 +3699,10 @@ class SphereEngine:
         # --- 1. 种群 SoA 数组（只保存有效部分 [:P]）---
         data["id"] = self._id[:P].copy()
         data["flat"] = self._flat[:P].copy()
+        # 13.4 波 1：亚格坐标（缺键回退见 `load_snapshot`；关档时恒为格中心 ⇒ 与 flat 冗余但无害，
+        # 存它是为了让"开档续跑"读到正确亚格位置，而不是被重置到格中心）。
+        data["sub_r"] = self._sub_r[:P].copy()
+        data["sub_c"] = self._sub_c[:P].copy()
         data["energy"] = self._energy[:P].copy()
         data["stomach"] = self._stomach[:P].copy()
         data["stomach_scav"] = self._stomach_scav[:P].copy()   # R165 0-2 归因
@@ -3787,6 +3934,16 @@ class SphereEngine:
             if "stomach_scav" in data
             else np.zeros(len(engine._id), dtype=np.float64)
         )
+        # 13.4 波 1：亚格坐标。**旧快照缺键 ⇒ 由 `_flat` 回推格中心**（语义正确：13.3 及以前的
+        # 个体都"站在格中心"）⇒ 不报错，保持"旧快照仍可读"（S1 阶段的兼容承诺）。
+        if "sub_r" in data and "sub_c" in data:
+            engine._sub_r = data["sub_r"].copy()
+            engine._sub_c = data["sub_c"].copy()
+        else:
+            engine._sub_r, engine._sub_c = _sub_init(
+                engine._flat, int(getattr(engine.config.subpos, "subdiv", 4)),
+                engine.world,
+            )
         engine._corpse_energy = (
             data["corpse_energy"].copy()
             if "corpse_energy" in data
