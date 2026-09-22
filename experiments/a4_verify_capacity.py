@@ -684,7 +684,9 @@ def main() -> None:
               # （关档 = 空壳读数：corpse_total/corpse_eaten/wound_n/contest_n 恒 0，
               #   health_mean 恒 1.0 —— S2/S3 接线后才非平凡）
               "corpse_total", "corpse_eaten",
-              "health_mean", "health_low_frac", "wound_n", "contest_n"]
+              "health_mean", "health_low_frac", "wound_n", "contest_n",
+              # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率 + 血条恐惧项反退化
+              "contest_win_by_holder_frac", "fear_health_flat_frac"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -779,6 +781,12 @@ def main() -> None:
                 ),
                 "wound_n": int(e._wound_n),
                 "contest_n": int(e._contest_n),
+                # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率 + 血条恐惧项反退化
+                # （None ⇒ 空串 = 未适用，R120 口径）
+                "contest_win_by_holder_frac": _probe_csv(
+                    e.wound_probe(), "contest_win_by_holder_frac"),
+                "fear_health_flat_frac": _probe_csv(
+                    e.wound_probe(), "fear_health_flat_frac"),
             })
             fh.flush()
             last = t

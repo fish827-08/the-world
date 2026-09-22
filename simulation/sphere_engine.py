@@ -351,6 +351,8 @@ class SphereEngine:
         # S2 主机制（设计稿 §5.3 项 3）：腐烂处资源 +50% 的 boost 剩余 tick 格数组
         "_corpse_boost",
         "_corpse_eaten_n", "_wound_n", "_contest_n",
+        # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率计数 + 血条恐惧项反退化计数
+        "_contest_holder_win_n", "_fearh_flat_n", "_fearh_dec_n",
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -795,6 +797,10 @@ class SphereEngine:
         self._corpse_eaten_n = 0
         self._wound_n = 0
         self._contest_n = 0
+        # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率分子 + 血条恐惧项反退化计数
+        self._contest_holder_win_n = 0
+        self._fearh_flat_n = 0
+        self._fearh_dec_n = 0
 
     def cannibalism_stats(self) -> dict:
         """互捕结构量化（R135 第 -1 步④；F「去互捕」的前置证据）。
@@ -938,6 +944,67 @@ class SphereEngine:
             np.subtract.at(self._corpse_energy, self._flat[:P], take)
             stomach[:P] += take
             self._corpse_eaten_n += int(np.count_nonzero(take > 1e-12))
+
+    def _step_contest(self, P: int, eaters, genes, energy) -> None:
+        """S3 争夺食物战（设计稿 §2.3 H3/H4 项 6；`contest_enabled`）。
+
+        触发：**同一格（或邻格）已有他人正在取食**（果实或尸体，`eaters` = 本 tick 取食者）
+        ⇒ 高 g16 者可发起驱逐战。判定用 **RHP**：
+            `RHP = health × (0.3+g16) × (energy/max_energy)`（初值 a=b=c=1）
+            **取食方 ×(1+holder_adv)**（Parker 持有者优势）
+        - **H4 升级规则**：`|RHP_A − RHP_B| > escalation_gap` ⇒ 弱方**立即撤退**（不进入多轮，
+          败者仍扣血条——"撤退"= 放弃该格；自动省机时）
+        - 差距小 ⇒ 进入战斗：RHP 高者胜；**败者 health −= wound_base** + 被迫离开该格
+          （放弃取食机会 = 下 tick 移动决策自然离开）；**胜者 energy −= contest_cost_energy**
+
+        🔴 确定性数值（**零 RNG**）⇒ 关档零开销、开档不新增 RNG 抽取（C7 保底）。
+        🔴 记录 `contest_n` 总数 + `contest_holder_win_n`（持有者胜率分子，判据 ④）。
+        """
+        _cwc = self.config.corpse_wound
+        max_e = max(float(self.config.organisms.max_energy), 1e-9)
+        flat = self._flat[:P]
+        g16 = np.clip(genes[:P, Gene.AGGRESSION], 0.0, 1.0)
+        _gap = float(_cwc.escalation_gap)
+        _adv = float(_cwc.holder_adv)
+        _lose = float(_cwc.wound_base)          # 败者扣血（复用血条量级，Δ_loser）
+        _cost = float(_cwc.contest_cost_energy) # 胜者代价
+        for i in eaters:
+            cell = int(flat[i])
+            nb = np.asarray(self.world.neighbors(cell))
+            nb_mask = np.isin(flat, nb) & (np.arange(P) != i)
+            same = flat == cell
+            same = same.copy()
+            same[i] = False
+            rivals = np.flatnonzero(nb_mask | same)
+            if rivals.size == 0:
+                continue
+            # 挑战者 = 同格/邻格中 g16 最高者（高 g16 者可发起驱逐）
+            j = int(rivals[int(np.argmax(g16[rivals]))])
+            if g16[j] <= g16[i]:
+                continue                       # 挑战者攻击性不比持有者高 ⇒ 不驱逐
+            rhp_i = (
+                float(self._health[i]) * (0.3 + g16[i])
+                * (float(energy[i]) / max_e)
+            ) * (1.0 + _adv)
+            rhp_j = (
+                float(self._health[j]) * (0.3 + g16[j])
+                * (float(energy[j]) / max_e)
+            )
+            self._contest_n += 1
+            # H4：RHP 差距大 ⇒ 弱方立即撤退（不进入多轮）
+            if abs(rhp_j - rhp_i) > _gap:
+                loser = i if rhp_j > rhp_i else j
+                self._health[loser] = max(0.0, float(self._health[loser]) - _lose)
+                continue
+            # 差距小 ⇒ 进入战斗：RHP 高者胜（持有者优势已含在 RHP）
+            if rhp_i >= rhp_j:
+                winner, loser = i, j
+            else:
+                winner, loser = j, i
+            if winner == i:
+                self._contest_holder_win_n += 1
+            self._health[loser] = max(0.0, float(self._health[loser]) - _lose)
+            energy[winner] -= _cost
 
     def _ec_ensure(self, n: int) -> None:
         """确保逐个体记账缓冲够长（P 会随生死/繁殖变化）。"""
@@ -1264,8 +1331,17 @@ class SphereEngine:
             "health_low_frac": (round(float(np.mean(h < 0.5)), 6) if P else None),
             "wound_n": int(self._wound_n),
             "contest_n": int(self._contest_n),
-            "note": "S2 接线后 wound_n 反映血条消耗战命中数（S3 才接线 contest_n）；"
-                    "关档恒 0（未启用）",
+            "contest_win_by_holder_frac": (
+                round(self._contest_holder_win_n / self._contest_n, 6)
+                if self._contest_n else None
+            ),
+            "fear_health_flat_frac": (
+                round(self._fearh_flat_n / self._fearh_dec_n, 6)
+                if self._fearh_dec_n else None
+            ),
+            "note": "S2 接线后 wound_n 反映血条消耗战命中数；S3 接线后 contest_n/"
+                    "contest_win_by_holder_frac（判据④）与 fear_health_flat_frac（反退化，"
+                    "应≈0）可读；关档恒 0/None（未启用）",
         }
 
     def genome_t0_stats(self) -> dict:
@@ -1606,6 +1682,8 @@ class SphereEngine:
         stomach_cap = (
             ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
         )
+        # S2/S3 尸体—争夺（设计稿 §5.3/5.4）：开关只读一次，供 4.3/4.3b 复用
+        _cwc_scav = getattr(self.config, "corpse_wound", None)
         if (stomach < stomach_cap).any():
             eaters = np.flatnonzero(stomach < stomach_cap)
             # R135 第 3 步 A-连续（2026-09-20）：**凸 trade-off** `forage_mult = (1−g16)^k`。
@@ -1665,10 +1743,14 @@ class SphereEngine:
                 else:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
+            # 4.3b) S3 争夺食物战（设计稿 §2.3 H3/H4 项 6；`contest_enabled`）：同一格/邻格
+            #       有他人正在取食（`eaters` = 本 tick 取食者）⇒ 高 g16 者可驱逐
+            #       （RHP + 持有者优势 + 升级阈值 + 撤退）。🔴 确定性数值（零 RNG）。
+            if bool(getattr(_cwc_scav, "contest_enabled", False)):
+                self._step_contest(P, eaters, genes, energy)
 
         # 4.3) S2 食腐（设计稿 §5.3 项 4；`corpse_enabled`）：按 g16 Hill 平滑从所在格取
         #      尸体**入胃**（受胃容量限）。🔴 确定性数值（无 RNG 消费）⇒ 关档零轨迹影响。
-        _cwc_scav = getattr(self.config, "corpse_wound", None)
         if bool(getattr(_cwc_scav, "corpse_enabled", False)):
             self._step_scavenging(P, stomach, stomach_cap, genes)
 
@@ -1937,7 +2019,11 @@ class SphereEngine:
                 _l1_seek_on = bool(_sim0.l1_seek)
                 _l1_fear_on = bool(_sim0.l1_fear)
                 _l1_on = _l1_seek_on or _l1_fear_on
-                if _l1_on:
+                # S3 血条恐惧项（设计稿 §2.4 项 7）也需**威胁场**（载体 = 血条），
+                # 与 L1 恐惧项独立 ⇒ 任一生效时都要算 `_agg_field`（格域聚合，零 RNG）。
+                _fearh_on = (_wound_on
+                            and float(getattr(_cwc_pred, "w_fear_health", 0.0)) > 0.0)
+                if _l1_on or _fearh_on:
                     _gate0 = float(self.config.predation.attack_gene_gate)  # 引用同一常量，不抄字面量
                     if _l1_seek_on:
                         if str(_sim0.l1_prey_mode) == "any":
@@ -1949,7 +2035,7 @@ class SphereEngine:
                             _seek_field = np.bincount(
                                 self._flat[:P][_low], minlength=self.world.n_cells
                             ).astype(np.float64)
-                    if _l1_fear_on:
+                    if _l1_fear_on or _fearh_on:
                         # 威胁强度：只取**超过门槛**的部分（弱 g16 个体不构成威胁）
                         _thr = np.maximum(0.0, genes[:P, Gene.AGGRESSION] - _gate0)
                         _agg_field = np.bincount(
@@ -2053,6 +2139,21 @@ class SphereEngine:
                                 self._fear_ind_n += 1
                                 if float(_fe.max() - _fe.min()) < 1e-12:
                                     self._fear_flat_n += 1
+                    # ── S3 血条恐惧项（设计稿 §2.4 项 7；`wound_enabled` + `w_fear_health>0`）──
+                    # 与 L1 恐惧项**独立**（载体 = 血条而非 g16）：`−w_fear_health × perc ×
+                    # (1−health) × cos(候选格 ← 威胁方向)`。低血条 ⇒ 更恐惧（能力导向）。
+                    # 🔴 确定性数值（零 RNG）⇒ 关档零轨迹影响。
+                    if _wound_on and float(getattr(_cwc_pred, "w_fear_health", 0.0)) > 0.0:
+                        self._fearh_dec_n += 1
+                        _danger_h = nb[_agg_field[nb] > 0.0]
+                        if len(_danger_h) > 0:
+                            _cos_h = self._memory_orientation_cos(
+                                int(self._flat[idx]), nb, _danger_h)
+                            _fh = (float(_cwc_pred.w_fear_health) * perc
+                                   * (1.0 - float(self._health[idx]))) * _cos_h
+                            score = score - _fh
+                            if float(_fh.max() - _fh.min()) < 1e-12:
+                                self._fearh_flat_n += 1
                     # D2-3 softmax：温度采样替代argmax（tau=0时回退argmax）
                     if d2_softmax:
                         exp_s = np.exp((score - score.max()) / ifcfg3.softmax_tau)
@@ -2182,7 +2283,11 @@ class SphereEngine:
         if pcfg.enabled:
             # PC-1 S2（R134）：`enabled=True`（默认）⇒ 原式逐位不动（RNG 消费 P 个 uniform）
             hunger = np.clip(1.0 - energy / max(ocfg.max_energy, 1e-9), 0.0, 1.0)
-            attack_prob = attack_gene * pcfg.attack_prob_coef * hunger
+            # S3 饥饿激进项（设计稿 §2.2 项 7；`wound_enabled` + `need_aggression_k>0`）：
+            #   能量低 ⇒ 更激进（主动攻击概率↑）—— 与血条恐惧**方向相反** ⇒ 二分预测
+            #   （能力导向 vs 资产保护）。k=0（D 臂）⇒ 退化为原式（逐位不变）。
+            _need_k = float(getattr(_cwc_pred, "need_aggression_k", 0.0)) if _wound_on else 0.0
+            attack_prob = attack_gene * pcfg.attack_prob_coef * hunger * (1.0 + _need_k * hunger)
             attackers = np.flatnonzero(
                 (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
             )
@@ -3353,6 +3458,9 @@ class SphereEngine:
         data["corpse_eaten_n"] = np.array(self._corpse_eaten_n)
         data["wound_n"] = np.array(self._wound_n)
         data["contest_n"] = np.array(self._contest_n)
+        data["contest_holder_win_n"] = np.array(self._contest_holder_win_n)
+        data["fearh_flat_n"] = np.array(self._fearh_flat_n)
+        data["fearh_dec_n"] = np.array(self._fearh_dec_n)
 
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
@@ -3556,6 +3664,10 @@ class SphereEngine:
         engine._corpse_eaten_n = int(data["corpse_eaten_n"]) if "corpse_eaten_n" in data else 0
         engine._wound_n = int(data["wound_n"]) if "wound_n" in data else 0
         engine._contest_n = int(data["contest_n"]) if "contest_n" in data else 0
+        engine._contest_holder_win_n = int(
+            data["contest_holder_win_n"]) if "contest_holder_win_n" in data else 0
+        engine._fearh_flat_n = int(data["fearh_flat_n"]) if "fearh_flat_n" in data else 0
+        engine._fearh_dec_n = int(data["fearh_dec_n"]) if "fearh_dec_n" in data else 0
 
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()

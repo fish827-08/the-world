@@ -754,7 +754,7 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`corpse_enabled` / `corpse_energy_frac` / `corpse_decay_ticks` / `corpse_to_plant_frac` / `corpse_patch_boost` / `corpse_cap_per_cell` / `scav_gate` / `scav_s` / `wound_enabled` / `wound_base` / `wound_heal_rate` / `wound_heal_energy_cost` / `contest_enabled` / `holder_adv` / `escalation_gap` / `contest_cost_energy` / `w_fear_health` / `need_aggression_k`；`result`：`corpse` / `wound` 两读数块（**S1 空壳：值可为 0**，S2/S3 接线后才有真实读数） |
 | **纪律** | 🔴 **禁跨纪元比较**：本纪元改的是**捕食口径**（一击必杀 → 扣血条）⇒ 旧批的 **捕食致死率 / 成功率口径**（`d_pred` / `fatal_frac` / `cannibalism` 的 kill 语义）**不可与新批直接比**（设计稿 §2.5 明文） |
 | **默认与路径** | 🔴 **全部默认关**（`corpse_enabled=False` / `wound_enabled=False` / `contest_enabled=False`）⇒ 旧行为逐位一致（C7 基线 `(573985, 8171.692943)` 钉死）；**全程 Python 路径**（§14.7），不动 Rust；开 + `use_sim_core=True` ⇒ **构造期硬报错**（H3 fail-loud） |
-| **状态（2026-09-22 更新）** | 🚧 **S1 骨架 ✅ + S2 主机制实施中**（`[云端·开发]`，分支 `dev/corpse-health-s1`）：S1 = 数据结构（`_corpse_energy`/`_corpse_age`/`_health`）+ `switches` 读回 + `result.corpse`/`result.wound` + CSV 6 列 + C7 关档等价测试 + H3 硬报错；S2 = 投尸（三处死因共用 `_deposit_corpse`）/ 腐烂归还 + patch_boost / 食腐入胃（Hill 平滑）/ 血条消耗战（`_duel` 拆 attempt/wound/kill）/ 愈合耗能。S3（争夺战 + 血条恐惧项）待 `[所有者]` 放行 |
+| **状态（2026-09-22 更新）** | 🚧 **S1 ✅ + S2 ✅ + S3 实施中**（`[云端·开发]`，分支 `dev/corpse-health-s1`）：S1 = 数据结构 + `switches` 读回 + CSV 6 列 + C7 关档等价 + H3；S2 = 投尸 / 腐烂归还 + patch_boost / 食腐入胃 / 血条消耗战（`_duel` 拆 attempt/wound/kill）/ 愈合；S3 = 争夺食物战（RHP + 持有者优势 + 升级阈值 + 撤退）+ 血条恐惧项（`w_fear_health`，与 L1 独立）+ 饥饿激进项（`need_aggression_k`，二分预测）。S4 调参不在派工范围 |
 
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 
