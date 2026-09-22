@@ -385,6 +385,16 @@ class SphereEngine:
         "_rd",                # ResourceDynamics 实例（收编件 world/resource_dynamics.py）
         "_rd_intake_sum",     # 本 tick 每格被吃量累计（note_tick 输入，逐 tick 重建）
         "_rd_growth_sum",     # 本 tick 每格名义再生量累计（note_tick 输入，逐 tick 重建）
+        # ---- 13.4 波 2B（T3，本线 = [云端·开发]）：F1 修复 / span / cap ----
+        "_nb_len",            # 每格**实际邻居数**（F1 修复的分母；span=1 语义）
+        "_nb_norm",           # densities 归一化除数（"auto"=逐格实际邻居数，数字=冻结常量）
+        "_span_table",        # span=2 邻居表（ring1+ring2 合并；span=1 = None）
+        "_span_len",          # 每格 span 候选数（span=1 = 实际邻居数）
+        "_span_eff2",         # 每格是否生效 2 圈（F3 闸：>cap ⇒ False = 降级 1 圈）
+        "_span_cap",          # F3 闸阈值（perception_cap）
+        # cap 读数（T3）：满格剔除计数 / 留本格兜底计数
+        "_cap_blocked_n",     # Σ 因满格被剔除的候选选择（cap 生效时的决策数）
+        "_cap_stay_n",        # Σ 全候选满 ⇒ 留本格的个体数（兜底）
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -505,6 +515,50 @@ class SphereEngine:
         for c in range(n_cells):
             nbs = self.world.neighbors(c)
             self._nb_table[c, :len(nbs)] = nbs
+        # 🔴 F1 修复（任务书 T3，C9 型缺陷）：**每格实际邻居数**（span=1 语义）。
+        #   此前 `densities` 用 `_nb_table.shape[1]`（= stride 120）当分母 ⇒ 社交项被
+        #   静默弱化 15×（注释写"0~8"但代码除 120）。改为逐格实际邻居数（众数 8、
+        #   极区 120）⇒ 社交项恢复应有量级 = **构造级变更**（digest 变，须同步测试）。
+        #   ⚠️ 只在 `social_norm="auto"` 时生效；数字串 ⇒ 冻结常量（兼容设计稿提议）。
+        self._nb_len = np.array(
+            [int((self._nb_table[c] >= 0).sum()) for c in range(n_cells)],
+            dtype=np.float64,
+        )
+        _snorm0 = str(getattr(config.simulation, "social_norm", "auto"))
+        if _snorm0 != "auto":
+            try:
+                self._nb_norm = np.full(
+                    n_cells, float(_snorm0), dtype=np.float64)
+            except ValueError:
+                self._nb_norm = self._nb_len.copy()
+        else:
+            self._nb_norm = self._nb_len.copy()
+        # ── 13.4 波 2B（T3）：span 感知邻居表（perception_span=2 ⇒ ring1+ring2 合并）──
+        # span=1（默认）⇒ **不建表、走原路径**（逐位等价）；span=2 ⇒ 两圈候选（球面跳数，
+        # 普通格 24、极区 240 —— 后者由 `_perception_cap` 降级为 1 圈，见移动段）。
+        # 🔴 只被 Python 移动分支消费；use_sim_core + span=2 ⇒ 构造期 H3 硬报错。
+        _span0 = int(getattr(config.simulation, "perception_span", 1))
+        self._span_table = None
+        if _span0 == 2:
+            _span_rows: list[np.ndarray] = []
+            for c in range(n_cells):
+                one = [int(x) for x in self.world.neighbors(c)]
+                two: set[int] = set(one)
+                for d in one:
+                    two.update(int(x) for x in self.world.neighbors(d))
+                two.discard(c)
+                _span_rows.append(np.fromiter(sorted(two), dtype=np.int64))
+            _span_stride = max(int(max(len(r) for r in _span_rows)), 8)
+            self._span_table = np.full((n_cells, _span_stride), -1, dtype=np.int64)
+            for c, r in enumerate(_span_rows):
+                self._span_table[c, :len(r)] = r
+            self._span_len = np.array([len(r) for r in _span_rows], dtype=np.int64)
+            # F3 闸（设计稿 §一）：ring1+2 规模 > cap ⇒ 该格 `span_eff=1`（降级不是报错）
+            self._span_cap = int(getattr(config.simulation, "perception_cap", 32))
+            self._span_eff2 = self._span_len <= self._span_cap
+        else:
+            self._span_len = self._nb_len.astype(np.int64)
+            self._span_eff2 = np.ones(n_cells, dtype=bool)
 
         # ── R146/R149 L2：**strict 2 圈**候选表（CSR；构造期一次）──────────────────
         # 语义：2 跳可达、去掉自身与 1 圈（球面拓扑用**跳数**，**不套 5×5 方窗**；
@@ -580,6 +634,16 @@ class SphereEngine:
                 " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
                 "（§14.7：新机制强制 Python 路径）。"
             )
+        # ── H3（13.4 波 2B，T3）：perception_span=2 开启时必须 **fail-loud** ──────
+        # span=2 需要两圈邻居表（`_span_table`），只在 Python 移动路径实现 ⇒
+        # use_sim_core=True 时开启会**静默走 1 圈旧路径**（开关开了视野却没扩 = 静默
+        # no-op 的同族形态）⇒ 构造期硬报错。
+        if _scfg0.use_sim_core and int(getattr(_scfg0, "perception_span", 1)) == 2:
+            raise NotImplementedError(
+                "perception_span=2（两圈感知）尚未下沉 Rust：use_sim_core=True 时开启"
+                "会**静默走 1 圈旧路径**（开关开了视野却没扩 = 静默 no-op 的同族形态）"
+                "⇒ 硬报错。请设 use_sim_core=False（§14.7：新机制强制 Python 路径）。"
+            )
         # ── H3（设计稿 §5.1 / §2.5）：尸体—食腐 + 血条开关开启时必须 **fail-loud** ────
         # 本任务全程 Python 路径（§14.7：新机制/非确定性 ⇒ 强制 Python，不动 Rust）⇒
         # use_sim_core=True 时开启 corpse/wound/contest 会**静默走旧路径**（开关开了
@@ -614,6 +678,9 @@ class SphereEngine:
             _rdcfg0, self.resources, self.world)
         self._rd_intake_sum = np.zeros(self.world.n_cells, dtype=np.float64)
         self._rd_growth_sum = np.zeros(self.world.n_cells, dtype=np.float64)
+        # 13.4 波 2B（T3）：cap 读数计数器（关档不累加 ⇒ probe None/0 口径）
+        self._cap_blocked_n = 0
+        self._cap_stay_n = 0
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
         )
@@ -1423,6 +1490,36 @@ class SphereEngine:
             return None
         return self._rd.conservation_check()
 
+    # ---- 13.4 波 2B：视野/单格上限读数（T3，本线 = [云端·开发]）----------------
+
+    def wave2b_probe(self) -> dict:
+        """T3 读数：span 降级 / cap 触发 / 候选数（关档口径 = 0 或 None 区分）。
+
+        🔴 关档（span=1 且 cap 关）⇒ 计数恒 0（未观测），与"测到 0"分开：
+        `span_downgrade_frac` 关档返回 None（未适用）；`cap_blocked_n`/`cap_stay_n`
+        恒 0（未触发即 0，因 cap 开关默认关 ⇒ 路径不进）。
+        """
+        P = len(self._id)
+        _sim = self.config.simulation
+        _span2 = int(getattr(_sim, "perception_span", 1)) == 2
+        _cap_on = bool(getattr(_sim, "cell_occupancy_cap_enabled", False))
+        return {
+            "perception_span": int(getattr(_sim, "perception_span", 1)),
+            "cell_occupancy_cap": int(getattr(_sim, "cell_occupancy_cap", 3)),
+            "cell_occupancy_cap_enabled": _cap_on,
+            "social_norm": str(getattr(_sim, "social_norm", "auto")),
+            "span_downgrade_frac": (
+                round(float((~self._span_eff2).mean()), 6) if _span2 else None
+            ),
+            "cap_blocked_n": int(self._cap_blocked_n) if _cap_on else 0,
+            "cap_stay_n": int(self._cap_stay_n) if _cap_on else 0,
+            "mean_candidates_per_decision": (
+                round(float(self._span_len.mean()), 3) if _span2 else None
+            ),
+            "note": "span=1 ⇒ span_downgrade/mean_candidates = None（未适用）；"
+                    "cap 关 ⇒ blocked/stay = 0（路径不进，非测出零）",
+        }
+
     def l2_probe(self) -> dict | None:
         """L2 机动层读数（R150 B4；本段 = [本地开发] 线）。
 
@@ -1822,6 +1919,13 @@ class SphereEngine:
 
         # 温度相关量（一次算出全种群的那份，避免反复调用）
         activity = self.light.activity_factor(self._flat, self._tick)
+        # 13.4 波 2B（T3）：span/cap 开关在**函数级**定义（移动段 Nm=0 时也需捕食段可用）
+        _span2_on = (int(getattr(self.config.simulation,
+                                 "perception_span", 1)) == 2)
+        _cap_on = bool(getattr(self.config.simulation,
+                               "cell_occupancy_cap_enabled", False))
+        _cap_val = int(getattr(self.config.simulation,
+                               "cell_occupancy_cap", 3))
 
         # S2 血条/尸体（设计稿 §2.3 H2 / §5.3）：`wound_enabled` 开关 + 参数。
         # 构造期已由 H3 保证：开 + use_sim_core=True ⇒ 硬报错 ⇒ 此处仅在 Python 路径消费。
@@ -2192,13 +2296,12 @@ class SphereEngine:
                     self.resources._capacity, 1e-9
                 )
                 sig_present = (self.signals._marks > 0).astype(np.float64)
-                # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
-                # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
-                # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                # D0 修复：群居项量纲归一化 + 🔴 F1 修复（T3）：分母 = **每格实际邻居数**
+                # （`_nb_norm`），不再是 stride(120)。注释此前写"0~8"但代码除 120 ⇒ 社交项
+                # 被静默弱化 15×（C9 型缺陷）。构造级变更（digest 变，已同步测试）。
                 # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
-                nb_max = float(self._nb_table.shape[1])
                 smw = self.config.simulation.social_move_weight
-                densities = occ.astype(np.float64) / nb_max * smw
+                densities = occ.astype(np.float64) / self._nb_norm * smw
                 signal_marks = self.signals._marks.astype(np.uint8)
                 # 预生成随机选择（得分无差异时用），按移动个体顺序
                 rand_choice = self.rng.integers(
@@ -2298,13 +2401,11 @@ class SphereEngine:
                     self.resources._capacity, 1e-9
                 )
                 sig_present = (self.signals._marks > 0).astype(np.float64)
-                # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
-                # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
-                # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                # D0 修复：群居项量纲归一化 + 🔴 F1 修复（T3）：分母 = **每格实际邻居数**
+                # （`_nb_norm`），不再是 stride(120)。同上（Python 移动分支）。
                 # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
-                nb_max = float(self._nb_table.shape[1])
                 smw = self.config.simulation.social_move_weight
-                densities = occ.astype(np.float64) / nb_max * smw
+                densities = occ.astype(np.float64) / self._nb_norm * smw
                 rand_choice = self.rng.integers(
                     0, 1_000_000, size=Nm, dtype=np.int64
                 )
@@ -2383,6 +2484,13 @@ class SphereEngine:
                 d2_asym = ifcfg3.enabled and ifcfg3.perception_radius == 4
                 d2_noise = ifcfg3.enabled and ifcfg3.perception_noise > 0
                 d2_softmax = ifcfg3.enabled and ifcfg3.softmax_tau > 0
+                # 13.4 波 2B（T3）：span=2 开关（只 Python 路径，H3 已拦 Rust）+ cap 开关
+                _span2_on = (int(getattr(self.config.simulation,
+                                         "perception_span", 1)) == 2)
+                _cap_on = bool(getattr(self.config.simulation,
+                                       "cell_occupancy_cap_enabled", False))
+                _cap_val = int(getattr(self.config.simulation,
+                                       "cell_occupancy_cap", 3))
                 # B1：R2 声誉权重（0=关闭 → sig_weight 恒 0.5，与旧版逐位一致）
                 rep_w = ifcfg3.reputation_weight if ifcfg3.enabled else 0.0
                 # A′ 记忆朝向梯度（2026-09-19）：**不**受 `enabled` 门控 —— 与 ⑥ 探针同规格，
@@ -2395,10 +2503,17 @@ class SphereEngine:
                     # ⚠️ 禁用 nb[:4]：8 邻列序以 [上左,上,上右,左] 打头，取"前4个"
                     # 实际只保留"北+西" → 个体永不能向南/东移动，种群被单向驱赶至极区、
                     # 招募崩塌（见 docs/决策与评审/A4-崩溃溯源报告-20260912.md）。
-                    if d2_asym:
-                        nb = self.world.neighbors_von_neumann(int(self._flat[idx]))
+                    # 13.4 波 2B（T3）：span=2 ⇒ 候选 = ring1+ring2（`_span_table`）；
+                    #   F3 闸：该格 ring1+2 > cap ⇒ 降级为 1 圈（`_span_eff2` 为 False）。
+                    #   span=1（默认）⇒ **走原路径**（逐位等价）。
+                    _cell_i = int(self._flat[idx])
+                    if _span2_on and self._span_eff2[_cell_i]:
+                        _row = self._span_table[_cell_i]
+                        nb = _row[_row >= 0]
+                    elif d2_asym:
+                        nb = self.world.neighbors_von_neumann(_cell_i)
                     else:
-                        nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                        nb = np.asarray(self.world.neighbors(_cell_i))
                     if len(nb) == 1:
                         targets[i] = nb[0]
                         continue
@@ -2492,6 +2607,22 @@ class SphereEngine:
                             score = score - _fh
                             if float(_fh.max() - _fh.min()) < 1e-12:
                                 self._fearh_flat_n += 1
+                    # ── 13.4 波 2B（T3）：单格个体上限（score 层剔除满格）──────
+                    # 🔴 三条硬约束（任务书 T3 / 设计稿 §2.4）：
+                    #   1. **只约束"进入"，不约束"留在"**：候选 = 本格（steps=0）不受限。
+                    #      ⚠️ 本段 `nb` 不含自身（移动候选从邻居取）⇒ 天然满足。
+                    #   2. 满格候选 score = −inf；**若全部候选 −inf ⇒ 留本格**（兜底，
+                    #      计 `_cap_stay_n`，不收移动费）⇒ cap 永不因"平局回退"被破坏。
+                    #   3. `occ` = 移动前占用（信号段已算）⇒ 零额外成本。
+                    if _cap_on:
+                        _crowded = occ[nb] >= _cap_val
+                        if _crowded.any():
+                            score = np.where(_crowded, -np.inf, score)
+                            self._cap_blocked_n += 1
+                        if not np.isfinite(score).any():
+                            targets[i] = _cell_i       # 全满 ⇒ 留本格（兜底）
+                            self._cap_stay_n += 1
+                            continue
                     # D2-3 softmax：温度采样替代argmax（tau=0时回退argmax）
                     if d2_softmax:
                         exp_s = np.exp((score - score.max()) / ifcfg3.softmax_tau)
@@ -2545,7 +2676,10 @@ class SphereEngine:
                     # 位置：**在 score/softmax 之后** ⇒ `u = self.rng.random()` 仍按个体消费
                     # ⇒ 每 tick 随机抽取数与关档**逐字一致**（H2/H1 的形状要求）。
                     # 代价：冲刺者白算一次 score（换取随机流形状不变 —— 值得）。
-                    if _l2_on and dash[i]:
+                    # 🔴 13.4 波 2B（T3）去两段式盲选（R148 偏离 2 的前提消失）：
+                    #   span=2 ⇒ ring2 已纳入候选、按 score 选过 ⇒ **跳过盲选覆盖**
+                    #   （保留 score 选出的目标）；span=1 ⇒ 维持旧盲选（逐位等价）。
+                    if _l2_on and dash[i] and not _span2_on:
                         _c = int(self._flat[idx])
                         _fl = int(self._far_len[_c])
                         targets[i] = int(self._far_cells[
@@ -2675,9 +2809,35 @@ class SphereEngine:
             #   （能力导向 vs 资产保护）。k=0（D 臂）⇒ 退化为原式（逐位不变）。
             _need_k = float(getattr(_cwc_pred, "need_aggression_k", 0.0)) if _wound_on else 0.0
             attack_prob = attack_gene * pcfg.attack_prob_coef * hunger * (1.0 + _need_k * hunger)
-            attackers = np.flatnonzero(
-                (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
-            )
+            # 🔴 13.4 波 2B（T3）"看见才出手"：span=2 ⇒ 出手须**视野内有猎物**。
+            #   猎物代理 = 低 g16（≤ attack_gene_gate）个体；视野 = span 圈（`_span_table`
+            #   聚合，降级格用 1 圈）。⚠️ 只在 span=2 生效（span=1 逐位等价）。
+            #   `_vis` 是格域 bincount ⇒ 零新增 RNG 抽取（H2 保持：`rng.random(P)` 仍全量消费）。
+            if _span2_on:
+                # 视野内猎物场（格域）：每个低 g16 个体把 +1 加到"能看见它的格"
+                # （= 它所在格的 span 圈邻居；降级格用 1 圈）。零新增 RNG。
+                _seen = np.zeros(self.world.n_cells, dtype=np.int64)
+                _low16 = genes[:P, Gene.AGGRESSION] <= float(pcfg.attack_gene_gate)
+                _low_cells = self._flat[:P][_low16]
+                for c in np.unique(_low_cells):
+                    if self._span_eff2[c]:
+                        r = self._span_table[c]
+                        nb_c = r[r >= 0]
+                    else:
+                        nb_c = np.asarray(self.world.neighbors(int(c)))
+                    np.add.at(_seen, nb_c, int((_low_cells == c).sum()))
+                _vis = _seen
+            if _span2_on:
+                attackers = np.flatnonzero(
+                    (attack_gene > pcfg.attack_gene_gate)
+                    & (self.rng.random(P) < attack_prob)
+                    & (_vis[self._flat[:P]] > 0)
+                )
+            else:
+                attackers = np.flatnonzero(
+                    (attack_gene > pcfg.attack_gene_gate)
+                    & (self.rng.random(P) < attack_prob)
+                )
         else:
             # S2 off（PC-1 单营养级构造）：**跳过攻击者选择**（连 RNG 抽取一起跳过 ⇒
             # 新配置的 RNG 轨迹，与 enabled=True 的 run 不逐位可比——预期，非缺陷）。

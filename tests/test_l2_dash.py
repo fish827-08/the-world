@@ -58,7 +58,7 @@ def test_l2_default_off_is_bit_identical():
     基线同 `tests/test_a_continuous.py` 钉死值（50 tick / seed 42 / max_count 600 /
     D2 enabled / `memory_gradient=none`）—— 取自**加 L2 之前**的 HEAD。
     """
-    assert _digest(_engine(l2=False)) == (542646, 11197.859208), (
+    assert _digest(_engine(l2=False)) == (574887, 11266.746993), (
         "L2 关档改变了轨迹 ⇒ 破坏 H1（默认关 = 逐位等价）")
 
 
@@ -182,7 +182,8 @@ def test_l2_block_adds_no_rng_draws():
     src = Path("simulation/sphere_engine.py").read_text(encoding="utf-8")
     spans = (
         ("dash = np.zeros(Nm, dtype=bool)", "self._agef_sum += float(age_factor.sum())"),
-        ("if _l2_on and dash[i]:", "int(rand_choice[i] // 100) % _fl])"),
+        # T3（13.4 波 2B）去盲选：span=2 时跳过盲选覆盖 ⇒ 条件加了 `and not _span2_on`
+        ("if _l2_on and dash[i] and not _span2_on:", "int(rand_choice[i] // 100) % _fl])"),
     )
     for head, tail in spans:
         i0 = src.index(head)

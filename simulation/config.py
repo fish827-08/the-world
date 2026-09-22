@@ -225,10 +225,36 @@ class SimulationConfig:
     l1_prey_mode: str = "lowagg"
     social_move_weight: float = 1.0 # 移动决策群居项权重（D0 修复：densities 按邻居上限归一化后与感知项同量级，此项可扫描 0~2）
     stay_prob: float = 0.0          # 停驻率（战役参数：move_prob × (1-stay_prob)，0=旧行为每tick必移判定；配合D2感知半径4=等效扩世界）
+    # ===== 13.4 波 2B：感知范围 / 单格上限 / 社交归一化（T3；**默认 = 旧行为**）=====
+    # 🔴 `perception_span` 是**跳数**（1 = 现状；2 = 两圈），与 `perception_radius`（邻居
+    #   个数 {4,8}）是**两个正交维度**（设计稿 §一 F2）—— 前者扩距离、后者换形状。
+    # ⚠️ span=2 需重建 `_nb_table` ⇒ **构造级**（digest 变，须同步测试）；span=1 逐位等价。
+    perception_span: int = 1         # 感知半径（跳数）：1（默认=旧行为）/ 2
+    perception_cap: int = 32         # F3 闸（设计稿 §一）：ring1+2 规模 > cap ⇒ 该格降级为 1 圈
+    # 🔴 F1 修复（任务书 T3）：`densities` 归一化除数由 stride(120) 改**实际邻居数** ⇒
+    #    社交项增强 ~15 倍（C9 型缺陷修复）＝ 构造级变更（digest 变）。保留显式常量
+    #    语义：`social_norm` 仅在 span=1 时 = 实际邻居数；改它 = 改社交项量级 = 构造级。
+    # ⚠️ 与波 2 设计稿（[本地开发] 建议冻结 120）冲突 —— 任务书（[所有者]）裁定改实际
+    #    邻居数，本字段 = 裁定落点（默认 "auto" ⇒ 每格实际邻居数）。
+    social_norm: str = "auto"        # "auto"=每格实际邻居数（F1 修复）| 数字=冻结常量
+    cell_occupancy_cap: int = 3      # 单格个体上限（默认 3；score 层剔除满格，落本格不受限）
+    #   🔴 默认 3 但**不进新路径**（cap 只在 `_cap_on` 时生效 ⇒ 默认关 = 旧行为逐位等价）
+    cell_occupancy_cap_enabled: bool = False   # 🔴 独立开关：默认关（旧行为），T3 接线
+    # 🔴 "看见才出手"（T3）：`perception_span` 统一供给资源/信号/猎物/威胁感知；
+    #    `attack_range` 独立恒 1 格（看得见 ≠ 够得着）。该开关随 `perception_span=2` 生效。
+    attack_range: int = 1            # 攻击射程（恒 1，独立于感知范围）
 
     def __post_init__(self) -> None:
         assert self.ticks >= 1, "至少跑一个 tick"
         assert 0.0 <= self.stay_prob < 0.95, "stay_prob 在 [0, 0.95)"
+        assert self.perception_span in (1, 2), "perception_span 只许 1/2（跳数，与 radius 正交）"
+        assert self.cell_occupancy_cap >= 1, "cell_occupancy_cap ≥ 1"
+        if self.social_norm not in ("auto",):
+            try:
+                float(self.social_norm)
+            except ValueError:
+                raise AssertionError("social_norm 须是 'auto' 或数字字符串")
+        assert self.attack_range >= 1, "attack_range ≥ 1"
 
 
 @dataclass

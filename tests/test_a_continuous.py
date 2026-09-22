@@ -156,7 +156,7 @@ def test_k0_is_bitwise_equivalent_to_baseline():
     # D2 enabled / memory_gradient=none。
     # ⚠️ 勿与 `test_memory_gradient.py` 的 (532906, 7954.475077) 混淆——那条是
     # `enabled=False + orientation` 的配置，与本文不同（我第一版就抄错了，测试当场挂）。
-    assert d == (542646, 11197.859208), (
+    assert d == (574887, 11266.746993), (
         f"k=0 的 50 tick digest 变了（{d}）⇒ **破坏了与历史批的逐位可比性**，"
         "默认分支必须严格保持原式"
     )

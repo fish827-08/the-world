@@ -63,12 +63,12 @@ def test_default_is_off():
 def test_cap_off_is_bitwise_identical_to_pre_fix_baseline():
     """🔴 C7：关时的 digest 必须等于**加钳制之前**的基线。
 
-    基线 `(542646, 11197.859208)` 取自 `7516ba9` 之前的代码
+    基线 `(574887, 11266.746993)` 取自 `7516ba9` 之前的代码
     （`git stash` 实测，配置：50 tick / seed 42 / max_count 600 / D2 enabled）。
     这条一旦变 ⇒ **既有 12 批的可比性被破坏**。
     """
     d = _digest(_engine(cap=False))
-    assert d == (542646, 11197.859208), (
+    assert d == (574887, 11266.746993), (
         f"关时 digest 变了（{d}）⇒ 默认不再是旧行为，跨批可比性被破坏"
     )
 

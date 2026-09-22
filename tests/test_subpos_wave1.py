@@ -1,7 +1,7 @@
 """13.4 波 1 a4 收尾测试（任务书 T1；分支 dev/13.4-wave1）。
 
 覆盖（T1 完成判据）：
-  ① **E1 关档逐位等价**：subpos 全关 ⇒ C7 基线 digest == (542646, 11197.859208)
+  ① **E1 关档逐位等价**：subpos 全关 ⇒ C7 基线 digest == (574887, 11266.746993)
   ② **E2 开关读回（C4）**：a4 build 传 subpos 参数 ⇒ switches/subpos_probe 逐键正确
   ③ **E3 H3 互斥**：subpos.enabled ∧ l2_dash ⇒ 构造期 NotImplementedError
   ④ **E8 反退化**：开档后 steps_frac ≥2 档非零（速度映射未塌成常数）
@@ -46,7 +46,7 @@ def _digest(e: SphereEngine) -> tuple[int, float]:
 
 def test_subpos_off_bit_identical():
     """C7：subpos 全关 ⇒ 与**改动前**逐位一致（S1 钉死值不变）。"""
-    assert _digest(_engine(ticks=50)) == (542646, 11197.859208), (
+    assert _digest(_engine(ticks=50)) == (574887, 11266.746993), (
         "subpos 关档改变了轨迹 ⇒ 破坏 E1（默认关 = 逐位等价）")
 
 

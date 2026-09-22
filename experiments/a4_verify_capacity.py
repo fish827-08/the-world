@@ -187,7 +187,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           rest_ticks: int = 300, kill_frac: float = 10.0,
           kill_denom: str = "regrowth", dead_regen_ticks: int = 2000,
           dead_cell_max_frac: float = 0.5,
-          kill_patch_only: bool = True, rotate_same_row_only: bool = True) -> SphereEngine:
+          kill_patch_only: bool = True, rotate_same_row_only: bool = True,
+          # 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化（默认 = 旧行为）
+          perception_span: int = 1, cell_occupancy_cap: int = 3,
+          cell_occupancy_cap_enabled: bool = False,
+          social_norm: str = "auto") -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -267,6 +271,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         kill_patch_only=bool(kill_patch_only),
         rotate_same_row_only=bool(rotate_same_row_only),
     )
+    # 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化（默认 = 旧行为）
+    c.simulation.perception_span = int(perception_span)
+    c.simulation.cell_occupancy_cap = int(cell_occupancy_cap)
+    c.simulation.cell_occupancy_cap_enabled = bool(cell_occupancy_cap_enabled)
+    c.simulation.social_norm = str(social_norm)
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
     # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
@@ -538,6 +547,17 @@ def main() -> None:
     ap.add_argument("--rotate-same-row-only", dest="rotate_same_row_only", default="true",
                     choices=("true", "false"),
                     help="只在同行交换斑块加成（跨行破坏 Σcapacity 守恒）")
+    # ---- 13.4 波 2B（T3）：视野 2 格 / 单格上限 / 社交归一化 ----
+    ap.add_argument("--perception-span", dest="perception_span", type=int, default=1,
+                    choices=(1, 2),
+                    help="感知半径（跳数）：1=默认（旧行为）/ 2=两圈（构造级）")
+    ap.add_argument("--cell-occupancy-cap", dest="cell_occupancy_cap", type=int, default=3,
+                    help="单格个体上限（score 层剔除满格；落本格不受限）")
+    ap.add_argument("--cell-occupancy-cap-enabled", dest="cell_occupancy_cap_enabled",
+                    action="store_true",
+                    help="单格上限开关（默认关 = 旧行为，逐位等价）")
+    ap.add_argument("--social-norm", dest="social_norm", default="auto",
+                    help="社交项归一化除数：auto=每格实际邻居数（F1 修复）/ 数字=冻结常量")
     ap.add_argument("--init-g16-clusters", dest="init_g16_clusters", default="",
                     help="R141 P0-2：g16 初始投放（逗号分隔，按簇等分人口）；"
                          "空=旧行为。校准批用 \"0.05,0.5,0.9\"")
@@ -691,6 +711,11 @@ def main() -> None:
                   dead_cell_max_frac=args.dead_cell_max_frac,
                   kill_patch_only=(args.kill_patch_only == "true"),
                   rotate_same_row_only=(args.rotate_same_row_only == "true"),
+                  # 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化
+                  perception_span=args.perception_span,
+                  cell_occupancy_cap=args.cell_occupancy_cap,
+                  cell_occupancy_cap_enabled=bool(args.cell_occupancy_cap_enabled),
+                  social_norm=args.social_norm,
                   # R152/P0：捕食生态位结构 6 参
                   attack_cost=args.attack_cost, transfer_ratio=args.transfer_ratio,
                   attack_gene_gate=args.attack_gene_gate,
@@ -795,7 +820,9 @@ def main() -> None:
               "subpos_flat_moves", "subpos_slow_frac",
               # 13.4 波 2A（T2，R176 §12.5 四条）：资源动态读数（关档 ⇒ 空串 = 未适用）
               "dead_cell_frac", "resting_cell_frac",
-              "patch_kill_n", "patch_reborn_n", "mean_capacity_effective"]
+              "patch_kill_n", "patch_reborn_n", "mean_capacity_effective",
+              # 13.4 波 2B（T3）：视野/单格上限读数（关档 ⇒ 空串 = 未适用）
+              "span_downgrade_frac", "cap_blocked_n", "cap_stay_n"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -910,6 +937,11 @@ def main() -> None:
                     e.resource_dynamics_probe(), "patch_reborn_n"),
                 "mean_capacity_effective": _probe_csv(
                     e.resource_dynamics_probe(), "mean_capacity_effective"),
+                # 13.4 波 2B（T3）：视野/单格上限（关档 ⇒ None ⇒ 空串）
+                "span_downgrade_frac": _probe_csv(
+                    e.wave2b_probe(), "span_downgrade_frac"),
+                "cap_blocked_n": _probe_csv(e.wave2b_probe(), "cap_blocked_n"),
+                "cap_stay_n": _probe_csv(e.wave2b_probe(), "cap_stay_n"),
             })
             fh.flush()
             last = t
@@ -1056,6 +1088,13 @@ def main() -> None:
             "kill_patch_only": bool(e.config.resource_dynamics.kill_patch_only),
             "rotate_same_row_only": bool(
                 e.config.resource_dynamics.rotate_same_row_only),
+            # ---- 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化（C4 读回）----
+            "perception_span": int(e.config.simulation.perception_span),
+            "perception_cap": int(getattr(e.config.simulation, "perception_cap", 32)),
+            "cell_occupancy_cap": int(e.config.simulation.cell_occupancy_cap),
+            "cell_occupancy_cap_enabled": bool(
+                e.config.simulation.cell_occupancy_cap_enabled),
+            "social_norm": str(e.config.simulation.social_norm),
             # L2 几何/成本参数（「参数制造分化」的可核查性）
             "dash_min_energy_frac": float(e.config.organisms.dash_min_energy_frac),
             "dash_cost_kappa": float(e.config.organisms.dash_cost_kappa),
@@ -1134,6 +1173,8 @@ def main() -> None:
             # 13.4 波 2A：资源动态读数（关档 ⇒ None = 未适用）+ 守恒自检（恒应过）
             "resource_dynamics": e.resource_dynamics_probe(),
             "resource_dynamics_conservation": e.resource_dynamics_conservation(),
+            # 13.4 波 2B（T3）：视野/单格上限读数
+            "wave2b": e.wave2b_probe(),
             # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
             "energy_ledger": e.energy_ledger(),
             # R135 第 -1 步③：t=0 基因组基线（搭车诊断）

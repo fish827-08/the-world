@@ -131,7 +131,7 @@ def test_none_path_digest_pinned():
     ⚠️ 该 digest 取自 A′ 落地**之后**：`none` 分支与改动前**逐字相同**（`0.3 * perc * mem_in_nb`），
     故它同时是"原式未变"的回归锚点；与改动前的等价性另由全量回归中的既有对拍测试覆盖。
     """
-    assert _digest(_engine(mode="none")) == (493827, 11724.467975, 80)
+    assert _digest(_engine(mode="none")) == (525667, 11893.889994, 80)
 
 
 def test_orientation_reports_counters_and_none_is_na():
