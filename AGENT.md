@@ -756,6 +756,17 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **默认与路径** | 🔴 **全部默认关**（`corpse_enabled=False` / `wound_enabled=False` / `contest_enabled=False`）⇒ 旧行为逐位一致（C7 基线 `(573985, 8171.692943)` 钉死）；**全程 Python 路径**（§14.7），不动 Rust；开 + `use_sim_core=True` ⇒ **构造期硬报错**（H3 fail-loud） |
 | **状态（2026-09-22 更新）** | 🚧 **S1 ✅ + S2 ✅ + S3 实施中**（`[云端·开发]`，分支 `dev/corpse-health-s1`）：S1 = 数据结构 + `switches` 读回 + CSV 6 列 + C7 关档等价 + H3；S2 = 投尸 / 腐烂归还 + patch_boost / 食腐入胃 / 血条消耗战（`_duel` 拆 attempt/wound/kill）/ 愈合；S3 = 争夺食物战（RHP + 持有者优势 + 升级阈值 + 撤退）+ 血条恐惧项（`w_fear_health`，与 L1 独立）+ 饥饿激进项（`need_aggression_k`，二分预测）。S4 调参不在派工范围 |
 
+### 13.4 「13.4 生态重构」纪元（2026-09-23 起；依据 fish 09-23 01:38 裁定 + R178 裁定；**实施中：T1–T5 `[云端·开发]`**）
+
+| 项 | 内容 |
+|---|---|
+| **触发变更** | ① 波 1 亚格连续坐标（`SubposConfig`，0.25 格粒度 + 停留策略）② 波 2A 资源动态（斑块休耕—死亡—轮作，`ResourceDynamicsConfig`）+ `eat_amount 0.5→0.9`（R178）③ 波 2B 视野 2 格（`perception_span`）+ 单格上限（`cell_occupancy_cap`）+ F1 社交归一化修复 + 去盲选 + 看见才出手 ④ 波 3 血条语义反转（成功一击毙命 → 能量进尸体；失败扣血条）+ 血条恐惧带门槛（`wound_fear_threshold`） |
+| **⚠️ 纪元号** | 🔴 **纪元号（正式命名/编号）由 `[所有者]` 给定**；`[云端·开发]` 已按「13.4」先行登记本占位（2026-09-23），正式号回板确认后回填 |
+| **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`subpos_enabled` / `perception_span` / `cell_occupancy_cap(_enabled)` / `social_norm` / `resource_dynamics_enabled` / `eat_amount` / `wound_fear_threshold` 等（见 a4 switches）；`result`：`subpos` / `resource_dynamics` / `wave2b` / `wound` 读数块 |
+| **纪律** | 🔴 **禁跨纪元比较**：本纪元改的是**捕食口径**（13.3 的"扣血条消耗战" → 13.4 的"成功即死、失败致伤"）＋ **社交项量级**（F1 修复 ×15）＋ **食物丰度**（eat 0.9）⇒ 旧批的 **捕食致死率 / 成功率 / g16 搭车位移 / g4 选择压** 口径**不可与新批直接比** |
+| **默认与路径** | 🔴 **新机制全部默认关** ⇒ 关档 = 13.4 构造基线（C7 digest `(574887, 11266.746993)`，F1+eat 叠加后钉死）；**全程 Python 路径**（§14.7），不动 Rust；开 + `use_sim_core=True` ⇒ **构造期硬报错**（H3 fail-loud） |
+| **状态（2026-09-23 更新）** | 🚧 **T1 ✅ + T2 ✅ + T3 ✅ + T4 实施中**（`[云端·开发]`，分支 `dev/13.4-wave1`）：T1 = 波 1 a4 收尾 + w1subpos preset；T2 = 资源动态接线 + eat 0.9 + kill_mult 10；T3 = 修 F1 + span=2 + cap + 去盲选 + 看见才出手；T4 = 血条语义反转 + 恐惧门槛；T5 = 实验准备 |
+
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 
 > **背景**：本项目进入"结构改造 + 短实验"高频迭代期（R152–R157）。为把机时与开发解耦，fish 裁定：

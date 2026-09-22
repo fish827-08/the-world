@@ -604,6 +604,9 @@ class CorpseWoundConfig:
 
     # ---- 恐惧/激进项（S3；方向相反，各自开关）----
     w_fear_health: float = 0.5            # 血条恐惧项权重（低血条 ⇒ 更恐惧；能力导向）
+    # 🔴 13.4 波 3（T4）：血条恐惧**带门槛连续**（fish 01:20 批准）—— `1−health < 0.3`
+    #    不触发（受轻伤不恐惧，重伤才怕）。
+    wound_fear_threshold: float = 0.3     # 血条恐惧触发门槛（1−health ≥ 此值才生效）
     need_aggression_k: float = 0.5        # 饥饿激进项强度（固定 0.5；D 臂设 0 = 关"饥饿更激进"）
 
     def __post_init__(self) -> None:

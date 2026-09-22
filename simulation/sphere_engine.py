@@ -1931,6 +1931,9 @@ class SphereEngine:
         # 构造期已由 H3 保证：开 + use_sim_core=True ⇒ 硬报错 ⇒ 此处仅在 Python 路径消费。
         _cwc_pred = getattr(self.config, "corpse_wound", None)
         _wound_on = bool(getattr(_cwc_pred, "wound_enabled", False))
+        # 13.4 波 3（T4）：击杀能量进尸体的门控 = `corpse_enabled`（T4 反转后
+        # 捕食收益走尸体通道；corpse 关 ⇒ 旧 transfer 兜底守恒）
+        _corpse_on_tick = bool(getattr(_cwc_pred, "corpse_enabled", False))
 
         genes = self._genes[:P]
         energy = self._energy[:P]
@@ -2602,11 +2605,15 @@ class SphereEngine:
                         if len(_danger_h) > 0:
                             _cos_h = self._memory_orientation_cos(
                                 int(self._flat[idx]), nb, _danger_h)
-                            _fh = (float(_cwc_pred.w_fear_health) * perc
-                                   * (1.0 - float(self._health[idx]))) * _cos_h
-                            score = score - _fh
-                            if float(_fh.max() - _fh.min()) < 1e-12:
-                                self._fearh_flat_n += 1
+                            # 🔴 13.4 波 3（T4，fish 01:20 批准）：恐惧**带门槛连续** ——
+                            #    `1 − health < 0.3` 才触发（受轻伤不恐惧，重伤才怕）。
+                            #    `_wound_fear_threshold` 默认 0.3（config 字段）。
+                            _inj = 1.0 - float(self._health[idx])
+                            if _inj >= float(getattr(_cwc_pred, "wound_fear_threshold", 0.3)):
+                                _fh = (float(_cwc_pred.w_fear_health) * perc * _inj) * _cos_h
+                                score = score - _fh
+                                if float(_fh.max() - _fh.min()) < 1e-12:
+                                    self._fearh_flat_n += 1
                     # ── 13.4 波 2B（T3）：单格个体上限（score 层剔除满格）──────
                     # 🔴 三条硬约束（任务书 T3 / 设计稿 §2.4）：
                     #   1. **只约束"进入"，不约束"留在"**：候选 = 本格（steps=0）不受限。
@@ -2931,11 +2938,30 @@ class SphereEngine:
                         pcfg.success_floor, pcfg.success_ceil,
                     )
                     if rand_success[k] < success_rate:
-                        # S2 H2（设计稿 §2.3）：wound_enabled 时捕食 = **消耗战** ——
-                        # 成功命中 ⇒ 目标 `health −= Δ`（Δ = wound_base×(0.5+0.5×攻击性)），
-                        # `health ≤ 0` 才死（死因仍记 PREDATION）⇒ 一次咬不死、猎物变弱
-                        # 更易再被咬（分期付款）。🔴 不新增 RNG 抽取（rand_success 已在
-                        # 循环外抽好）⇒ 关档（旧路径）RNG 形状不变（C7）。
+                        # 🔴 13.4 波 3（T4，fish 00:20 裁定，与 S2 相反）：血条语义反转
+                        #   **成功 ⇒ 一击毙命**（猎物能量进尸体，**不直接转移给攻击者**）；
+                        #   **失败 ⇒ 扣猎物血条**（致伤，health≤0 才死）。
+                        # 🔴 守恒（红线）：击杀能量进尸体受 `corpse_enabled` 门控 ——
+                        #    corpse 开 ⇒ 由 7.5 投尸（能量冻结为尸体，可审计）；
+                        #    corpse 关 ⇒ 沿用旧 `transfer_ratio` 转移（不消失，保持
+                        #    能量守恒审计通过）。攻击者**总是**付出手成本（循环上已扣）。
+                        predation_mask[prey] = True
+                        self._ec_prey_e_sum += float(energy[prey])
+                        self._ec_prey_kill_n += 1
+                        self._duel["kills"] += 1
+                        if not _corpse_on_tick:
+                            # corpse 关 ⇒ 旧转移（守恒兜底；T4 反转的"进尸体"不可用）
+                            _tr = float(energy[prey]) * pcfg.transfer_ratio
+                            energy[idx] += _tr
+                            _pred_i.append(idx)
+                            _pred_amt.append(_tr)
+                            stomach[idx] = np.minimum(
+                                stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
+                                ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
+                            )
+                        stomach[prey] = 0.0
+                    else:
+                        # 失败 ⇒ 扣猎物血条（致伤）；health ≤ 0 ⇒ 致死（能量进尸体）
                         if _wound_on:
                             _delta = float(_cwc_pred.wound_base) * (
                                 0.5 + 0.5 * float(attack_gene[idx])
@@ -2944,22 +2970,25 @@ class SphereEngine:
                             self._wound_n += 1
                             self._duel["wounds"] += 1
                             if self._health[prey] > 0.0:
-                                continue   # 未死：不转移能量（猎物保留资源，下轮可再被咬）
-                            # health ≤ 0 ⇒ 致死（走下方原击杀结算）
-                        predation_mask[prey] = True
-                        # R141：ΣE_prey（**击杀瞬间**的猎物能量）——解 `transfer*` 的关键输入
-                        self._ec_prey_e_sum += float(energy[prey])
-                        self._ec_prey_kill_n += 1
-                        _tr = float(energy[prey]) * pcfg.transfer_ratio
-                        energy[idx] += _tr
-                        _pred_i.append(idx)
-                        _pred_amt.append(_tr)
-                        self._duel["kills"] += 1
-                        stomach[idx] = np.minimum(
-                            stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
-                            ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
-                        )
-                        stomach[prey] = 0.0
+                                continue   # 未死：猎物保留资源，下轮可再被咬
+                            # health ≤ 0 ⇒ 致死（predation_mask 置 True，能量进尸体）
+                            predation_mask[prey] = True
+                            self._ec_prey_e_sum += float(energy[prey])
+                            self._ec_prey_kill_n += 1
+                            self._duel["kills"] += 1
+                            if not _corpse_on_tick:
+                                _tr = float(energy[prey]) * pcfg.transfer_ratio
+                                energy[idx] += _tr
+                                _pred_i.append(idx)
+                                _pred_amt.append(_tr)
+                                stomach[idx] = np.minimum(
+                                    stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
+                                    ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
+                                )
+                            stomach[prey] = 0.0
+                        else:
+                            # 旧路径（wound 关）：失败 = 无事（猎物逃过）
+                            pass
                 # R141 P0：捕食侧两条通道（出手成本 / 掠得能量）——循环外统一记账
                 if _atk_amt:
                     self._ec_add(EC_ATTACK, _atk_i, _atk_amt)

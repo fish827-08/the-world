@@ -207,24 +207,26 @@ def _force_duel(e: SphereEngine) -> None:
 
 
 def test_wound_damage_does_not_instantly_kill():
-    """血条：捕食成功 ⇒ 猎物 health 下降；wound_n 累计；不立即死。"""
+    """血条（T4 反转，fish 00:20 裁定）：**成功 ⇒ 一击毙命**；失败 ⇒ 扣血条。
+
+    ⚠️ 2026-09-23（T4）：语义与 S2 相反——成功不再"消耗战命中"，而是立即致死；
+    失败才扣血条（致伤）。本测试名保留（血条机制仍存在），断言按新语义：
+    失败致伤应发生（wound_n>0）+ 有伤者 health<1；成功致死者进尸体/转移。
+    """
     e = _engine(wound=True, ticks=0)
     _force_duel(e)
     P = len(e._id)
     e._health[:] = 1.0
-    n_kills_before = int(e._duel["kills"])
     e.step()
-    assert int(e._duel["kills"]) == n_kills_before, (
-        "wound 模式下捕食成功不应立即击杀（除非 health≤0）")
-    assert e._wound_n > 0, "wound_n 应累计（消耗战命中）"
-    assert float(e._health[:P].min()) < 1.0, "应有个体 health 下降"
+    assert e._wound_n > 0, "失败致伤应发生（wound_n 累计，T4 反转后失败才扣血）"
+    assert float(e._health[:P].min()) < 1.0, "应有个体 health 下降（失败致伤）"
 
 
 def test_wound_kill_when_health_hits_zero():
-    """血条：health ≤ 0 才死，死因仍记 PREDATION。"""
+    """血条（T4 反转）：health ≤ 0 才死（失败累积致死），死因仍记 PREDATION。"""
     e = _engine(wound=True, ticks=0)
     _force_duel(e)
-    e._health[:] = 0.05    # 很低的血条 ⇒ 一次命中即死
+    e._health[:] = 0.05    # 很低的血条 ⇒ 一次失败命中即致死
     e.step()
     assert int(e._duel["kills"]) > 0, "health 低时应致死"
     assert e.death_cause_totals().get(DeathCause.PREDATION, 0) > 0, "死因仍记 PREDATION"
@@ -253,10 +255,11 @@ def test_heal_recovers_and_costs_energy():
         free._health[:P].max(), rel=1e-9), "heal_rate 与 cost 无关（恢复量应一致）"
     n_healed = int(np.count_nonzero(free._health[:P] < 1.0))
     assert n_healed > 0, "应有个体在愈合"
-    # 对拍：仅 heal cost 不同 ⇒ 能量差恰 = cost × 愈合个体数（代谢等被消掉）
+    # ⚠️ 2026-09-23（T4 反转）：heal_cost 差异会通过**能量 → 捕食成功率**进入轨迹
+    #   （success_rate 含 energy 比值）⇒ 两引擎不再逐位一致，能量差 ≠ 恰 cost×n。
+    #   断言改为**方向性**：paid（有愈合成本）总能量 ≤ free（免费愈合）—— 愈合确实扣能。
     diff = float(free._energy[:P].sum()) - float(paid._energy[:P].sum())
-    assert diff == pytest.approx(0.05 * n_healed, rel=1e-6), (
-        f"愈合扣能不符：diff={diff} ≠ 0.05×{n_healed}={0.05 * n_healed}")
+    assert diff > 0, f"paid 愈合应扣能（diff={diff} 应为正）"
     # 上限：health=1 不再恢复、不扣能
     free2 = _engine(wound=True, ticks=0, cwc=cwc_base)
     paid2 = _engine(wound=True, ticks=0, cwc=cwc_cost)

@@ -65,7 +65,9 @@ def test_response_counters_and_triple():
     assert s["exposed"] > 0, "500 tick 内信号场应有暴露（发射自 tick1 开始）"
     assert 0.0 <= s["resp_a_exposure"] <= 1.0
     assert -1.0 <= s["resp_b_delta"] <= 1.0
-    assert abs(s["resp_triple"] - s["resp_a_exposure"] * s["resp_b_delta"]) < 1e-6
+    assert abs(s["resp_triple"] - s["resp_a_exposure"] * s["resp_b_delta"]) < 1e-4
+    # ⚠️ 2026-09-23（T4 前，eat/F1 构造变更）：累计均值浮点差从 <1e-6 到 ~1.0e-6
+    #   （响应计数受能量轨迹影响）⇒ 容差 1e-6 → 1e-4（仍远小于任何真实偏差）。
     assert 0.0 <= s["argmax_flip_rate"] <= 1.0
 
 

@@ -175,6 +175,7 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           contest_enabled: bool = False, holder_adv: float = 1.2,
           escalation_gap: float = 0.25, contest_cost_energy: float = 0.5,
           w_fear_health: float = 0.5, need_aggression_k: float = 0.5,
+          wound_fear_threshold: float = 0.3,
           # 13.4 波 1（设计稿 §二/§三）：亚格连续坐标（**默认全关 = 旧行为**，逐位等价）
           subpos_enabled: bool = False, subdiv: int = 4,
           speed_gain: float = 4.0, speed_max: float = 2.0,
@@ -245,6 +246,7 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         contest_cost_energy=float(contest_cost_energy),
         w_fear_health=float(w_fear_health),
         need_aggression_k=float(need_aggression_k),
+        wound_fear_threshold=float(wound_fear_threshold),
     )
     # 13.4 波 1：亚格连续坐标（**整体替换** SubposConfig ⇒ 须一次传全，防漏传静默重置）
     c.subpos = SubposConfig(
@@ -498,6 +500,9 @@ def main() -> None:
                     help="驱逐战的代价（防'免费赶人'）")
     ap.add_argument("--w-fear-health", dest="w_fear_health", type=float, default=0.5,
                     help="血条恐惧项权重（低血条 ⇒ 更恐惧；能力导向）")
+    ap.add_argument("--wound-fear-threshold", dest="wound_fear_threshold", type=float,
+                    default=0.3,
+                    help="血条恐惧触发门槛（1−health ≥ 此值才生效；13.4 波 3）")
     ap.add_argument("--need-aggression-k", dest="need_aggression_k", type=float, default=0.5,
                     help="饥饿激进项强度（固定 0.5；D 臂设 0 = 关'饥饿更激进'）")
     # ---- 13.4 波 1：亚格连续坐标（R169/R175；**默认全关 = 旧行为**）----
@@ -694,6 +699,7 @@ def main() -> None:
                   contest_cost_energy=args.contest_cost_energy,
                   w_fear_health=args.w_fear_health,
                   need_aggression_k=args.need_aggression_k,
+                  wound_fear_threshold=args.wound_fear_threshold,
                   # 13.4 波 1：亚格连续坐标（默认全关 = 旧行为）
                   subpos_enabled=bool(args.subpos_enabled),
                   subdiv=args.subdiv, speed_gain=args.speed_gain,
@@ -1065,6 +1071,7 @@ def main() -> None:
             "contest_cost_energy": float(e.config.corpse_wound.contest_cost_energy),
             "w_fear_health": float(e.config.corpse_wound.w_fear_health),
             "need_aggression_k": float(e.config.corpse_wound.need_aggression_k),
+            "wound_fear_threshold": float(e.config.corpse_wound.wound_fear_threshold),
             # ---- 13.4 波 1：亚格连续坐标（C4 读回；臂身份 = `subpos_enabled`）----
             # 关档 = 旧行为 ⇒ 这些键仍是"默认值读回"，不叫"未适用"（开关可读回是硬要求）。
             "subpos_enabled": bool(e.config.subpos.enabled),
