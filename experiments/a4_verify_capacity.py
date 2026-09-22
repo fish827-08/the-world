@@ -529,7 +529,7 @@ def main() -> None:
     ap.add_argument("--subpos-stay-fear-k", dest="stay_fear_k", type=float, default=0.0,
                     help="邻域有威胁 ⇒ 停（权重；本波不接线，只读回）")
     ap.add_argument("--subpos-stay-max", dest="stay_max", type=float, default=0.8,
-                    help="停留概率上限（反退化闸：任何个体至少 20% 概率移动）")
+                    help="停留概率上限（反退化闸：任何个体至少 20%% 概率移动）")
     # ---- 13.4 波 2A：资源动态（T2；**默认关 = 旧行为**）----
     ap.add_argument("--resource-dynamics-enabled", dest="resource_dynamics_enabled",
                     action="store_true",
@@ -1031,6 +1031,9 @@ def main() -> None:
             # R144/R145：能量封顶与光合必须可读回（C4；且封顶开关进指纹 ⇒ 纪元可判）
             "energy_cap_enabled": bool(e.config.organisms.energy_cap_enabled),
             "photo_max": float(e.config.organisms.photo_max),
+            # 🔴 R178（13.4 波 2A，T2）：`eat_amount 0.5→0.9` 是**构造级变更**
+            #    （C7 基线 digest 变 ⇒ 禁跨纪元比较捕食口径）⇒ 必须可从产物自证（C4）。
+            "eat_amount": float(e.config.organisms.eat_amount),
             # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
             #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
             "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),

@@ -878,6 +878,45 @@ PRESETS = {
                  template="_rerun_logs/w1subpos/D_s{seed}.csv"),
         ],
     ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # W2W3 波 2+3 完整（13.4；任务书 T5 臂表，5 臂 × 4 seed × 8k）
+    # ══════════════════════════════════════════════════════════════════════════
+    # 目的：单测 13.4 波 2/3 各机制链 —— A 全关（13.4 构造基线）/ B 只资源动态 /
+    #       C +视野2格 / D +单格上限 / E +血条反转（全开）。
+    # 🔴 逐臂累加（同 13.3 p1corpse 的可分解风格），臂间差可自证（C4）。
+    # 规模：5 臂 × 4 seed（42,7,11,13）× 8k = 20 run（两段式：达标续跑 40k）。
+    # 判读：① g16 双峰（两端有质量 + 排除门槛伪影）② 捕食端净收入转正 ③ 资源
+    #       负反馈（dead_cell_frac 受控）④ 视野/单格上限操作检查（cap_blocked>0）
+    #       ⑤ 血条反转：成功致死 vs 失败致伤（fatal_frac / wound_n）⑥ 不崩。
+    "w2w3full": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13"],
+        fixed=["mode=on", "arm=main", "ticks=8000",
+               "max-count=3240", "snapshot-every=2000",
+               "snapshot-dir=_rerun_logs/w2w3full_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="A", args=[],
+                 template="_rerun_logs/w2w3full/A_s{seed}.csv"),
+            dict(name="B", args=["resource-dynamics-enabled"],
+                 template="_rerun_logs/w2w3full/B_s{seed}.csv"),
+            dict(name="C", args=["resource-dynamics-enabled",
+                                 "perception-span=2"],
+                 template="_rerun_logs/w2w3full/C_s{seed}.csv"),
+            dict(name="D", args=["resource-dynamics-enabled",
+                                 "perception-span=2",
+                                 "cell-occupancy-cap-enabled"],
+                 template="_rerun_logs/w2w3full/D_s{seed}.csv"),
+            dict(name="E", args=["resource-dynamics-enabled",
+                                 "perception-span=2",
+                                 "cell-occupancy-cap-enabled",
+                                 "corpse-enabled", "wound-enabled"],
+                 template="_rerun_logs/w2w3full/E_s{seed}.csv"),
+        ],
+    ),
 }
 
 # ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
