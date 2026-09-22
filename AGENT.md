@@ -745,6 +745,17 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **状态（2026-09-21 23:5x 更新）** | ✅ **实施已落地**：L1 两项 + 配置字段（B1，本线）+ L2 两段式/CSR/纯能量闸/H3（B2/B3，`[本地开发]` 线）⇒ 段一 preset `l1l2seg1` 已就绪（12k × 6 seed × 5 臂）。**实测待补**（段一跑完回填） |
 | **⚠️ 改名未做（非阻塞，已登记）** | `Gene.DIET`/`Gene.DEFENSE` **枚举名暂留**（改它要动 Rust 常量名 + 重编 `sim_core.so` ⇒ 跑批前不做）；代码内已加注释指明语义 = `SEEK_TENDENCY`/`MOBILITY`。**语义变更本身已在生效**（g17/g18 从预留位变成被消费）⇒ 纪元判定**不受改名影响** |
 
+### 13.3 「尸体—食腐 + 血条—受伤」纪元（2026-09-22 起；依据 R156/R157 裁决；**实施中：S1 骨架 `[云端·开发]`**）
+
+| 项 | 内容 |
+|---|---|
+| **触发变更** | ① 尸体—食腐通道（死亡投尸 / 腐烂归还植物池 / 按 g16 平滑食腐，`CorpseWoundConfig.corpse_*`）② 血条—受伤（一击必杀 → 消耗战，`health` 状态量 + `wound_*`）③ 争夺食物战 + 血条恐惧/饥饿激进项（`contest_*` / `w_fear_health` / `need_aggression_k`，S3 接线） |
+| **⚠️ 纪元号** | 🔴 **纪元号（正式命名/编号）由 `[所有者]` 给定**；`[云端·开发]` 已按「S1 骨架」先行登记本占位（2026-09-22），正式号回板确认后回填 |
+| **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`corpse_enabled` / `corpse_energy_frac` / `corpse_decay_ticks` / `corpse_to_plant_frac` / `corpse_patch_boost` / `corpse_cap_per_cell` / `scav_gate` / `scav_s` / `wound_enabled` / `wound_base` / `wound_heal_rate` / `wound_heal_energy_cost` / `contest_enabled` / `holder_adv` / `escalation_gap` / `contest_cost_energy` / `w_fear_health` / `need_aggression_k`；`result`：`corpse` / `wound` 两读数块（**S1 空壳：值可为 0**，S2/S3 接线后才有真实读数） |
+| **纪律** | 🔴 **禁跨纪元比较**：本纪元改的是**捕食口径**（一击必杀 → 扣血条）⇒ 旧批的 **捕食致死率 / 成功率口径**（`d_pred` / `fatal_frac` / `cannibalism` 的 kill 语义）**不可与新批直接比**（设计稿 §2.5 明文） |
+| **默认与路径** | 🔴 **全部默认关**（`corpse_enabled=False` / `wound_enabled=False` / `contest_enabled=False`）⇒ 旧行为逐位一致（C7 基线 `(573985, 8171.692943)` 钉死）；**全程 Python 路径**（§14.7），不动 Rust；开 + `use_sim_core=True` ⇒ **构造期硬报错**（H3 fail-loud） |
+| **状态（2026-09-22 更新）** | 🚧 **S1 ✅ + S2 ✅ + S3 实施中**（`[云端·开发]`，分支 `dev/corpse-health-s1`）：S1 = 数据结构 + `switches` 读回 + CSV 6 列 + C7 关档等价 + H3；S2 = 投尸 / 腐烂归还 + patch_boost / 食腐入胃 / 血条消耗战（`_duel` 拆 attempt/wound/kill）/ 愈合；S3 = 争夺食物战（RHP + 持有者优势 + 升级阈值 + 撤退）+ 血条恐惧项（`w_fear_health`，与 L1 独立）+ 饥饿激进项（`need_aggression_k`，二分预测）。S4 调参不在派工范围 |
+
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 
 > **背景**：本项目进入"结构改造 + 短实验"高频迭代期（R152–R157）。为把机时与开发解耦，fish 裁定：
