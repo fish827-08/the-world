@@ -1329,6 +1329,50 @@ class SphereEngine:
         return round(n_over / P, 8)
 
 
+    def subpos_probe(self) -> dict | None:
+        """亚格坐标读数（B4 口径；13.4 波 1 = `[所有者·天平]` 线）。
+
+        🔴 **关档返回 `None`（未适用），不是 0** —— 与 `l2_probe()` /
+        `memory_gradient_stats()` 同一口径铁律（R120 / §五.12）：
+        **"没测到" 与 "测到 0" 必须分开**（本项目为此专门立过纪律）。
+
+        键（分三组）：
+        * **读回（C4）**：`enabled` / `subdiv` / `speed_gain` / `speed_max` /
+          `min_energy_frac` / `lat_floor` / `stay_*` 五项。
+          ⚠️ `stay_fear_k` **本波不接线**（依赖波 2 的威胁感知）⇒ 只报读回值，
+          防它成为一个"悄悄死掉的参数"。
+        * **主判据**：`mean_flat_moves` = **真正换格**的个体占移动者的比例。
+          🔴 判据是它、**不是 steps** —— 位移 0.75 格在 `steps` 上有值、
+          在 `flat` 层面**等于没动**（设计稿 §2.2）。
+        * **反退化**：`slow_frac`（`steps==0` 的"白移动"占比）与 `steps_frac`
+          （各档占比；**只有一档非零 ⇒ 速度映射塌成常数** ⇒ 机制名存实亡）。
+        """
+        cfg = self.config.subpos
+        if not bool(getattr(cfg, "enabled", False)):
+            return None
+        mv = int(self._run_mover_sub_n)
+        hist = np.asarray(self._steps_hist, dtype=np.int64)
+        tot = int(hist.sum())
+        return {
+            "enabled": True,
+            "subdiv": int(cfg.subdiv),
+            "speed_gain": float(cfg.speed_gain),
+            "speed_max": float(cfg.speed_max),
+            "min_energy_frac": float(cfg.min_energy_frac),
+            "lat_floor": float(cfg.lat_floor),
+            "stay_base": float(cfg.stay_base),
+            "stay_food_k": float(cfg.stay_food_k),
+            "stay_signal_k": float(cfg.stay_signal_k),
+            "stay_fear_k": float(cfg.stay_fear_k),
+            "stay_max": float(cfg.stay_max),
+            "mover_n": mv,
+            "flat_move_n": int(self._run_flat_move_n),
+            "slow_n": int(self._run_slow_n),
+            "mean_flat_moves": (round(self._run_flat_move_n / mv, 6) if mv else None),
+            "slow_frac": (round(self._run_slow_n / mv, 6) if mv else None),
+            "steps_frac": ([round(float(x) / tot, 6) for x in hist] if tot else None),
+        }
+
     def l2_probe(self) -> dict | None:
         """L2 机动层读数（R150 B4；本段 = [本地开发] 线）。
 
