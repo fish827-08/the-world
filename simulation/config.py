@@ -69,8 +69,28 @@ class ResourceConfig:
     patch_count: int = 30                  # 斑块中心数（默认保守，避免覆盖过大）
     patch_radius: int = 2                  # 斑块半径（格，邻居扩散层数）
     patch_capacity_mult: float = 3.0       # 斑块格容量倍率（>1；建议 1.5~4，过大会背景容量为负）
-    patch_regrowth_mult: float = 2.0       # 斑块格再生倍率
+    patch_regrowth_mult: float = 3.0       # 斑块格再生倍率
+    # 🔴 13.5 ②（2026-09-24 派工；**2.0 → 3.0**）：**斑块再生校准**。
+    #   依据 = K 公式反推（`K = Σ名义再生 ÷ 人均需求`，R185 实测命中，误差 1–3%）：
+    #     背景归零后 Σ_斑块 名义再生 = 680（质量/tick，@倍率 2.0）
+    #     加 `assim_herb=0.4` ⇒ 人均需求 = 0.762 ÷ (3.0×0.4) = 0.635 ⇒ K ≈ 1 071（偏低）
+    #     ⇒ 斑块再生 ×1.5（倍率 2.0→3.0）⇒ Σ = 1 020 ⇒ **K ≈ 1 606** ∈ [1200,1900] ✓
+    #   ⚠️ 为什么选**倍率**而不是 `regrowth_rate`（派工单"二选一"）：后者是**全局**基准，
+    #     会一起改动所有非 patchy 预设与 13.4 复现；本字段**只作用于 patchy 分支**。
+    #   ✅ 对 C7 无影响：9 处 digest 测试全部用 `distribution="uniform"`（本字段不参与）。
+    #   ⚠️ `patch_mult × patch_frac + bg_mult × bg_frac = 1`（再生守恒式）会**自动重算** bg 倍率
+    #     ⇒ 仍守恒；但若同时开 `bg_production_zero` ⇒ 该守恒式**被有意打破**（见该字段注释）。
     background_fill: float = 0.1            # 背景格初始食物占比（压低，否则协作无收益）
+    bg_production_zero: bool = False
+    # 🔴 13.5 ①（2026-09-24 派工）：**背景产能归零**（背景格容量 0 + 再生 0）⇒ **只留斑块生产**。
+    #   依据（R183/R185）：背景格贡献了 **67.7% 的容量、78% 的再生**（Σ再生 3 153 中背景占 2 473）
+    #     ⇒ 食物丰裕到"解析 K ≈ 12 400 vs 软顶 1 944"（可撑 6.4 倍人口）⇒ **食物从不绑定**
+    #     ⇒ "位置（斑块）"因此在信息上一钱不值（E-019/E-023/E-027 的解释前提）。
+    #   默认 False = **现状**（背景照常生产）⇒ 既有 patchy 批（13.4 各批）仍可复现；
+    #   13.5 的预设显式置 True。
+    #   ⚠️ 开启后两条构造期不变量**被有意打破**（这是本机制的目的，不是缺陷）：
+    #     ① `Σcapacity` 从 183 430 降到 **32.3%**（斑块部分）；② 再生守恒式（=1）不再成立。
+    #     相关自检须按"期望值"判，不能仍按 1.0 判（见 `ResourceField.__init__` 注释）。
 
     def __post_init__(self) -> None:
         assert self.capacity_per_area > 0, "容量为正"
@@ -117,6 +137,40 @@ class OrganismConfig:
     #     ② **`g5` 的选择效应是路径依赖的** ⇒ 若将来把 g5 纳入判据，须先统一两容量（= 第三纪元）。
     #   统一方案（内评推荐 (a)，未采纳）：由 `g5` 决定**唯一**上限、所有写入路径共用。
     photo_max: float = 0.1            # 光合最大产能：光照=1（赤道正午）时每 tick 产这么多
+    # ============ 13.5 ③（2026-09-24 派工）：波 2-γ 能量标定补齐 ============
+    #   🔴 **全部默认值 = 现状行为**（关 ⇒ 逐位等价；13.5 的预设显式改值）。
+    #   ⚠️ 这批字段由 `[所有者]` 在 `sphere_engine.py` 接线（能量/取食/消化/死亡段），
+    #     `[本地开发]` 只负责让字段在此**存在**且默认不改行为（R186 §三/§四）。
+    stomach_cap_mass: float = 0.0
+    #   胃容量（"饭盒大小"，**质量**单位）。**默认 0 ⇒ 用旧派生式**：
+    #     `max_energy/eat_efficiency × 0.5 × (0.5 + g5×1.5)`（均值 ≈62.5）。
+    #   >0 ⇒ **独立胃容量**（13.5 拟 25 质量 = 75 能量 = 体能 12.5%）。
+    #   🔴 为什么必须独立（R166 §三 坑②）：否则它会跟着 `max_energy` 一起变大
+    #     （300→600 ⇒ 胃也 ×2）⇒ 把"体能↑ 胃↓"这个设计意图**静默抵消**。
+    #   ⚠️ 现状有**两条**胃容量口径（进食路径 ×0.5×cap_mult vs 捕食路径 =max/eff，
+    #     见本类 `eat_efficiency` 处声明）⇒ 本字段接管后须**明确两条路径共用哪一个**。
+    eat_threshold_frac: float = 0.0
+    #   进食阈值（"不饿不吃"）：胃 < 容量 × 此值 才进食。默认 0.0 ⇒ **永远吃**（现状）；
+    #   13.5 拟 0.6。⚠️ 与 `eat_amount` 联动：阈值会**降低**实际取食量 ⇒ 影响 K 的分子侧。
+    starve_frac: float = 0.0
+    #   **饿死**阈（占 `max_energy` 比例）：能量 < 此比例 **且** 胃≈空 ⇒ 死。
+    #   默认 0.0 ⇒ 等价现状（能量 ≤0 才死）。13.5 拟 0.30（= 180 能量 @max 600）。
+    exhaust_frac: float = 0.0
+    #   **力竭**阈：能量 < 此比例 ⇒ 死（**无论胃里有没有食**）。
+    #   默认 0.0 ⇒ 等价现状。13.5 拟 0.17（= 100 能量 @max 600）。
+    #   🔴 语义顺序（必须写进单测）：先判 exhaust（力竭，无视胃），再判 starve（饿死，需胃空）
+    #     ⇒ 防"抱着食物饿不死的僵尸态"。
+    assim_herb: float = 1.0
+    #   食草吸收率（"吃进去有多少变成能量"）。默认 1.0 ⇒ **无吸收损失**（现状：质量 ×eat_efficiency直通）；
+    #   13.5 拟 0.4（文献：食草 0.36–0.78）。
+    assim_carn: float = 1.0
+    #   食肉吸收率。默认 1.0 = 现状；13.5 拟 0.8（文献：食肉 0.47–0.92）。
+    #   ⚠️ 与 `eat_efficiency`(=3.0) 的分工：`eat_efficiency` 是**质量→能量**的固定换算（**不动**），
+    #     本对是**吸收比例**（1−assim 的部分不变成能量）。
+    assim_return_frac: float = 1.0
+    #   未吸收部分**回流到本格植物池**的比例（碎屑回流，闭环；默认 1.0 = 全回流）。
+    #   实现接口 = `ResourceField.deposit(flat, amount)`（13.5 新增，按容量封顶）。
+    #   ⚠️ `assim_*=1.0` 时没有"未吸收部分" ⇒ 本字段**不起作用**（现状等价）✓
     homeo_upkeep: float = 0.15        # 恒温个体每 tick 的额外维持费（换取低温不减速）
     maturity_fraction: float = 0.15   # 成熟年龄 = 寿命的几成 → 达到才能繁衍（防止一出生就生）
     senile_fraction: float = 0.75     # 老年年龄 = 寿命的几成 → 进入衰老期，维持费上升
@@ -152,6 +206,23 @@ class OrganismConfig:
         assert self.growth_mult >= 1.0, "幼体代谢倍率至少 1"
         assert self.senile_mult >= 1.0, "老年代谢倍率至少 1"
         assert 0.05 < self.lifespan_mult <= 8.0, "lifespan_mult 在 (0.05, 8.0]"
+        # 13.5 ③ 能量标定（默认为 0/1.0 = 现状 ⇒ 以下断言对默认值恒成立）
+        assert self.stomach_cap_mass >= 0.0, "胃容量（质量）非负；0 = 用旧派生式"
+        assert 0.0 <= self.eat_threshold_frac <= 1.0, "进食阈值是比例（0~1）"
+        assert 0.0 <= self.starve_frac <= 1.0, "饿死阈是比例（0~1）"
+        assert 0.0 <= self.exhaust_frac <= 1.0, "力竭阈是比例（0~1）"
+        assert 0.0 < self.assim_herb <= 1.0, "食草吸收率 ∈ (0,1]（1.0 = 现状无损失）"
+        assert 0.0 < self.assim_carn <= 1.0, "食肉吸收率 ∈ (0,1]（1.0 = 现状无损失）"
+        assert 0.0 <= self.assim_return_frac <= 1.0, "回流比例 ∈ [0,1]"
+        # ⚠️ 双阈值**不**强制 exhaust < starve：两者语义独立
+        #   （`exhaust_frac` = 力竭，无视胃；`starve_frac` = 饿死，需胃空）。
+        #   但若同时开启则应满足 `exhaust_frac ≤ starve_frac`（力竭先触发）——
+        #   违反时**只警告不改值**（13.5 拟 0.17 / 0.30 ✓）。
+        if self.exhaust_frac > 0.0 and self.starve_frac > 0.0:
+            assert self.exhaust_frac <= self.starve_frac, (
+                "双阈值同时开启时应 exhaust_frac ≤ starve_frac（力竭先于饿死触发）；"
+                f"现值 {self.exhaust_frac} / {self.starve_frac}"
+            )
 
 
 @dataclass

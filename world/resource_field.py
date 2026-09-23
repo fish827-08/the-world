@@ -63,6 +63,7 @@ class ResourceField:
         "_patch_mask",
         "_patch_regrowth_mult",
         "_bg_regrowth_mult",
+        "bg_production_zero",
     )
 
     def __init__(
@@ -76,10 +77,14 @@ class ResourceField:
         patch_count: int = 30,
         patch_radius: int = 2,
         patch_capacity_mult: float = 3.0,
-        patch_regrowth_mult: float = 2.0,
+        # ⚠️ 与 `ResourceConfig.patch_regrowth_mult` **同一默认值**（13.5 ② = 3.0）：
+        #   两处默认值若漂移，直接构造 ResourceField 的测试/工具会与引擎得到不同世界
+        #   （R163 §P1-1「三处默认值不一致」同族）
+        patch_regrowth_mult: float = 3.0,
         background_fill: float = 0.1,
         initial_fill: float = 0.5,
         patch_seed: int = 42,
+        bg_production_zero: bool = False,
     ) -> None:
         """铺好初始食物。
 
@@ -102,6 +107,12 @@ class ResourceField:
         background_fill : 背景格初始食物占比（0~1，建议压低）。
         initial_fill : uniform 模式的初始填充比例（0~1）。
         patch_seed : patchy 模式选中心的独立随机种子。
+        bg_production_zero : 🔴 **13.5 ①**（2026-09-24）背景产能归零 ——
+            背景格**容量与再生都置 0**（初始存量也随之为 0）⇒ 只留斑块生产。
+            目的：让"食物"第一次成为**绑定约束**（现状背景贡献 67.7% 容量 / 78% 再生 ⇒
+            解析 K ≈ 12 400 ≫ 软顶 1 944 ⇒ 食物从不绑定 ⇒ 位置无信息价值）。
+            ⚠️ 开启后**有意打破**两条构造期守恒（Σcapacity → 斑块部分 32.3%；再生守恒式 → 不成立）
+            —— 这是本机制的目的，不是缺陷。默认 False = 现状（既有 patchy 批仍可复现）。
         """
         self.world = world
         self.lt = lt
@@ -130,39 +141,51 @@ class ResourceField:
                 patch_mask[all_nb] = True
             self._patch_mask = patch_mask
             # 3) 容量守恒：patch 格 × mult，背景格 × bg_mult，Σ 与 uniform 版相等
+            #   🔴 13.5 ①（2026-09-24）：`bg_production_zero=True` ⇒ **背景容量直接归零**
+            #     （只留斑块生产）。此时**有意打破**容量守恒（Σcapacity 降到斑块部分 32.3%），
+            #     所以不能再用 `bg_cap_mult = (total − patch·mult)/bg_area` 那条守恒式，
+            #     也必须跳过下面 `bg_cap_mult <= 0` 的报错（归零是**目的**，不是参数过大的症状）。
             patch_area = float(areas[patch_mask].sum())
             bg_area = float(areas[~patch_mask].sum())
             total_area = float(areas.sum())
-            bg_cap_mult = (total_area - patch_area * patch_capacity_mult) / bg_area
-            if bg_cap_mult <= 0:
-                raise ValueError(
-                    f"斑块容量倍率过大：patch_capacity_mult={patch_capacity_mult}, "
-                    f"patch_count={patch_count} 导致背景容量为负。请调小倍率或斑块数。"
-                )
+            if bg_production_zero:
+                bg_cap_mult = 0.0
+            else:
+                bg_cap_mult = (total_area - patch_area * patch_capacity_mult) / bg_area
+                if bg_cap_mult <= 0:
+                    raise ValueError(
+                        f"斑块容量倍率过大：patch_capacity_mult={patch_capacity_mult}, "
+                        f"patch_count={patch_count} 导致背景容量为负。请调小倍率或斑块数。"
+                    )
             self._capacity = np.where(
                 patch_mask,
                 base_cap * patch_capacity_mult,
                 base_cap * bg_cap_mult,
             )
             # 4) 再生守恒：patch_mult × patch_frac + bg_mult × bg_frac = 1
+            #   ⚠️ 同上：背景归零时该守恒式**不再成立**（这是 13.5 的目的）⇒ 直接取 0.0。
             patch_frac = patch_area / total_area
             bg_frac = bg_area / total_area
             self._patch_regrowth_mult = float(patch_regrowth_mult)
-            self._bg_regrowth_mult = float(
-                (1.0 - patch_regrowth_mult * patch_frac) / bg_frac
+            self._bg_regrowth_mult = (
+                0.0 if bg_production_zero
+                else float((1.0 - patch_regrowth_mult * patch_frac) / bg_frac)
             )
             # 5) 初始填充：patch 格填满，背景格填 background_fill
+            #   ⚠️ 背景归零 ⇒ `_capacity` 为 0 ⇒ `_grid` 自动为 0（连初始存量也不给）
             self._grid = np.where(
                 patch_mask,
                 self._capacity * 1.0,
                 self._capacity * background_fill,
             )
+            self.bg_production_zero = bool(bg_production_zero)
         else:
             self._capacity = base_cap
             self._grid = self._capacity * initial_fill
             self._patch_mask = None
             self._patch_regrowth_mult = 1.0
             self._bg_regrowth_mult = 1.0
+            self.bg_production_zero = False
 
     # ---- 查询（只看不吃） ---------------------------------------------------
 
@@ -274,6 +297,39 @@ class ResourceField:
         return share
 
     # ---- 再生（食物慢慢长回来） -----------------------------------------------
+
+    def deposit(self, flat, amount) -> np.ndarray:
+        """把一批食物**放回**格子（按容量封顶；`consume_many` 的逆操作）。
+
+        通俗理解：某只生物吃进去的东西没全吸收，剩下的（碎屑）掉回地上那格。
+        放不进去的部分（超过粮仓容量）就丢了。
+
+        用途
+        ----
+        🔴 **13.5 ③**：`OrganismConfig.assim_return_frac`（未吸收部分回流植物池，闭环）。
+        供引擎在消化段调用：`actual = rf.deposit(cells, (1−assim)×digest_mass×return_frac)`。
+
+        参数
+        ----
+        flat : 标量或 NDArray[int64]
+            目标格（可传一个或一组）。
+        amount : float 或 NDArray[float64]
+            想放回的量（质量）；与 `flat` **一一对应**。
+
+        返回
+        ----
+        NDArray[float64] : 逐个体**实际**放回的量（溢出被截掉；与入参一一对应）。
+        """
+        flat = np.asarray(flat, dtype=np.int64)
+        add = np.asarray(amount, dtype=np.float64)
+        if flat.size == 0:
+            return np.zeros(0, dtype=np.float64)
+        add = np.broadcast_to(add, flat.shape).astype(np.float64, copy=False)
+        # ⚠️ 不用 `np.clip(..., out=...)`：标量入参时 `room` 是 numpy 标量（无 out 支持）
+        room = np.maximum(self._capacity[flat] - self._grid[flat], 0.0)
+        actual = np.minimum(np.maximum(add, 0.0), room)
+        np.add.at(self._grid, flat, actual)
+        return actual
 
     def regrow(self, tick: int) -> None:
         """让全世界的食物都长一点（一次性整场更新）。
