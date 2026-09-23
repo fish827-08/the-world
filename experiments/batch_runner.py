@@ -1072,6 +1072,7 @@ def poll(running: list[Run]) -> None:
         rc = r.proc.poll()
         if rc is None:
             continue
+        _clear_progress()          # R189：先清进度行，避免与"完成/失败行"叠在一起
         running.remove(r)
         r.wall = time.time() - r._t0
         # ---- F-R10：判据放宽（2026-09-15）----
@@ -1099,6 +1100,93 @@ def poll(running: list[Run]) -> None:
                 _why = "summary 为旧文件（mtime 早于本次启动）"
             r.note = f"rc={rc} {_why}"
             print(f"  ❌ {r.name}  FAILED ({r.note})  {r.wall/60:.1f} min")
+
+
+# ---------------------------------------------------------------- 进度条（R189）
+# 🔴 设计约束（本项目纪律，逐条都有先例）：
+#   ① **不刷屏**：TTY 下用**单行覆盖**（`\r` + 清行尾）；**非 TTY（重定向/日志）自动静默**
+#      ⇒ 不会污染 `*.log` 与 `_resolved_runlist.txt` 那种要留档的产物
+#   ② **ETA 禁瞬时速率外推**（教训库 #21：run 速率**非常数** —— 实测 347→250 tick/s，
+#      人口饱和后每 tick 贵约一个量级）⇒ 只用「**已完成 run 的实测墙钟中位数**」
+#   ③ 可关闭：`BATCH_PROGRESS=0`（或 false/no/空）
+#   ④ 明细只显示**运行中** run 的 tick（读该 run 的 CSV 末行；失败静默 ⇒ 绝不因进度条报错）
+def _fmt_hms(sec: float) -> str:
+    sec = max(0.0, float(sec))
+    return "%02d:%02d" % (int(sec // 60), int(sec % 60))
+
+
+def _progress_on() -> bool:
+    import os as _os
+    return str(_os.environ.get("BATCH_PROGRESS", "1")).lower() not in ("0", "false", "no", "")
+
+
+def _clear_progress() -> None:
+    try:
+        if sys.stdout.isatty():
+            sys.stdout.write("\r\x1b[K")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _csv_tick(p: Path) -> int | None:
+    """读某 run 的 CSV 末行 `tick`（"这个 run 跑到哪了"）。任何失败 ⇒ None（不抛）。"""
+    try:
+        last = None
+        with open(p, encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                last = row
+        if not last:
+            return None
+        return int(float(last.get("tick") or 0))
+    except Exception:
+        return None
+
+
+def _eta_sec(runs: list[Run], conc: int) -> float | None:
+    """剩余时间估计 = **已完成 run 的实测墙钟中位数** × ceil(剩余/并发)。见文件头纪律 ②。"""
+    import math as _m
+    fin = sorted(r.wall for r in runs if r.status == "done" and r.wall > 0)
+    left = sum(1 for r in runs if r.status in ("pending", "running"))
+    if not fin or left <= 0:
+        return None
+    return fin[len(fin) // 2] * _m.ceil(left / max(1, conc))
+
+
+def _render_progress(runs: list[Run], t_start: float, conc: int, enabled: bool) -> None:
+    """单行覆盖式进度条（TTY）。非 TTY / 关闭 ⇒ 静默。"""
+    if not enabled:
+        return
+    try:
+        import shutil as _sh
+        if not sys.stdout.isatty():
+            return
+        width = _sh.get_terminal_size((120, 24)).columns
+    except Exception:
+        return
+    n = len(runs)
+    done = sum(1 for r in runs if r.status in ("done", "skipped"))
+    failed = sum(1 for r in runs if r.status == "failed")
+    running = [r for r in runs if r.status == "running"]
+    frac = done / max(1, n)
+    barw = 22
+    fill = int(round(barw * frac))
+    bar = "█" * fill + "░" * (barw - fill)
+    eta = _eta_sec(runs, conc)
+    line = "[%s] %d/%d (%3.0f%%) 运行%d 失败%d ｜用时 %s" % (
+        bar, done, n, frac * 100, len(running), failed, _fmt_hms(time.time() - t_start))
+    if eta is not None:
+        line += " ｜剩余≈%s" % _fmt_hms(eta)
+    if running:
+        parts = []
+        for r in running:
+            tk = _csv_tick(r.out)
+            parts.append("%s:%s" % (r.name, tk if tk is not None else "…"))
+        line += " ｜" + " ".join(parts)
+    if len(line) > width - 1:
+        line = line[: max(0, width - 2)]
+    sys.stdout.write("\r\x1b[K" + line)
+    sys.stdout.flush()
 
 
 def run_batch(runs: list[Run], conc: int, retries: int, python: str, workdir: Path,
@@ -1158,8 +1246,10 @@ def run_batch(runs: list[Run], conc: int, retries: int, python: str, workdir: Pa
                 print(f"  🔁 {r.name} 重试 {r.attempt}/{retries}")
 
         if pending or running:
+            _render_progress(runs, t_start, conc, _progress_on())   # R189 进度条
             time.sleep(2.0)
 
+    _clear_progress()              # R189：收尾清掉进度行（否则完成汇总会接在它后面）
     total_wall = time.time() - t_start
     done = [r for r in runs if r.status == "done"]
     skipped = [r for r in runs if r.status == "skipped"]
