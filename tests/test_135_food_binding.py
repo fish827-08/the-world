@@ -25,6 +25,8 @@ from world.sphere_world import SphereWorld
 # 派工单 §二：人均支出（实测，R185）+ 现状 eat_efficiency
 PER_CAPITA_SPEND_E = 0.762
 EAT_EFFICIENCY = 3.0
+#: 软顶（`soft_cap_target=0.6 × max_count 3240`）—— K 必须低于它，食物才算绑定
+SOFT_CAP_LOCAL = 1944.0
 
 
 def make_world_lt():
@@ -122,31 +124,70 @@ def test_patch_regrowth_calibration_is_x1_5():
 
 # --------------------------------------------------------- ④ K 目标对账（唯一硬判据）
 
-def test_k_pred_in_range_with_assim_herb():
-    """🔴 13.5 唯一硬判据的**解析形式**：K_pred 必须 ∈ [1200,1900] 且 < 软顶 1944。
-
-    `K = Σ_斑块名义再生 ÷ 人均需求`，`人均需求 = 人均支出 ÷ (eat_efficiency × assim)`。
-    本测试把"参数选得对不对"变成**零机时**可复算的一条断言（跑批前就能拦住拍脑袋的值）。
-    """
-    rf = make_patchy(bg_production_zero=True, patch_regrowth_mult=3.0)
+def _sigma_patch(mult: float = 3.0, bg_zero: bool = True) -> float:
+    """Σ_斑块名义再生（质量/tick）。"""
+    rf = make_patchy(bg_production_zero=bg_zero, patch_regrowth_mult=mult)
     m = rf._patch_mask
-    sigma = float(rf._regrowth_amount(0)[m].sum())
-    assim = 0.4                                   # 派工单 §四 初值
-    need = PER_CAPITA_SPEND_E / (EAT_EFFICIENCY * assim)
-    k_pred = sigma / need
-    assert 1200.0 <= k_pred <= 1900.0, (
-        f"K_pred = {k_pred:.0f} 不在 [1200,1900]：Σ斑块再生={sigma:.1f}，人均需求={need:.4f}"
+    return float(rf._regrowth_amount(0)[m].sum()) if bg_zero \
+        else float(rf._regrowth_amount(0).sum())
+
+
+def _k(sigma: float, eat_eff: float, assim: float) -> float:
+    """`K = Σ ÷ 人均需求`；`人均需求 = 支出 ÷ (eat_efficiency × 吸收率)`。"""
+    return sigma / (PER_CAPITA_SPEND_E / (eat_eff * assim))
+
+
+def test_sigma_patch_is_linear_in_mult():
+    """Σ_斑块再生与倍率**严格线性**（K 校准据此外推）。"""
+    assert _sigma_patch(1.0) == pytest.approx(340.04, abs=0.5)
+    assert _sigma_patch(2.0) == pytest.approx(680.1, abs=0.5)     # 与 R185 逐值一致
+    assert _sigma_patch(3.0) == pytest.approx(1020.1, abs=0.5)
+
+
+def test_k_depends_only_on_net_absorption():
+    """🔴 **K 只由"净吸收" `eat_efficiency × 吸收率` 决定**（2026-09-24 的关键耦合）。
+
+    派工单 §二 的算术隐含「`assim_herb=0.4` 把人均需求从 0.254 抬到 0.635」⇒ K ≈ 1 606；
+    但 R187 为修"吸收率致灭绝"把 `eat_efficiency` 3.0 → **7.5**（语义 = 完全燃烧值）⇒
+    `7.5 × 0.4 = 3.0` = **现状净吸收** ⇒ 人均需求**没变** ⇒ K 变 **≈4 016**（≥ 软顶 ⇒ 不达标）。
+    ⇒ 本测试把这条耦合钉死：**改了 ③ 的净吸收就必须重算 ② 的生产校准**。
+    """
+    sig = _sigma_patch(3.0)
+    k_paper = _k(sig, 3.0, 0.4)      # 派工单 §二 口径（净吸收 1.2）
+    k_r187 = _k(sig, 7.5, 0.4)       # R187 口径（净吸收 3.0 = 现状）
+    assert k_paper == pytest.approx(1606, abs=2)
+    assert k_r187 == pytest.approx(4016, abs=3)
+    assert k_r187 / k_paper == pytest.approx(2.5, rel=1e-6), "净吸收 3.0/1.2 = 2.5 ⇒ K 同比"
+    # K 只看净吸收 ⇒ 两支"净吸收相同"的组合必须给出同一个 K
+    assert _k(sig, 3.0, 1.0) == pytest.approx(_k(sig, 7.5, 0.4), rel=1e-12)
+
+
+def test_required_mult_for_target_k():
+    """两个口径各自需要的 `patch_regrowth_mult`（**方向相反**：派工单要 ×1.5，R187 要下调）。
+
+    目标 K = 1600 ⇒ 需要 `Σ = 1600 × 人均需求`。
+    """
+    need_paper = PER_CAPITA_SPEND_E / (3.0 * 0.4)      # 0.6350
+    need_r187 = PER_CAPITA_SPEND_E / (7.5 * 0.4)       # 0.2540
+    coef = 340.04
+    assert 1600.0 * need_paper / coef == pytest.approx(2.99, abs=0.02)   # ≈ 派工单的 3.0 ✓
+    assert 1600.0 * need_r187 / coef == pytest.approx(1.195, abs=0.02)   # R187 口径要**下调**
+    assert 1600.0 * need_paper / coef > 1600.0 * need_r187 / coef, "净吸收越低 ⇒ 需求越大 ⇒ 需要更多产能"
+
+
+def test_current_default_caliber_k_is_far_above_softcap():
+    """反证（两个都钉住，防"绝对值漂移"）：
+
+    * **背景不归零**（现状）⇒ Σ=3 154 ⇒ K ≈ 12 400（> 6× 软顶）
+    * **背景归零 + mult 3.0 + R187 净吸收** ⇒ Σ=1 020 ⇒ K ≈ 4 016（仍 ≥ 软顶 ⇒ 仍不达标）
+    ⇒ 后者说明：**只做 ①②、不重算净吸收，K 达不到 [1200,1900]** —— 必须与 ③ 联动定稿。
+    """
+    k_bg_on = _k(_sigma_patch(3.0, bg_zero=False), 3.0, 1.0)
+    assert k_bg_on > 12_000.0, f"背景未归零时 K 只有 {k_bg_on:.0f}（预期 ≈12 400）"
+    k_bg_off_r187 = _k(_sigma_patch(3.0), 7.5, 0.4)
+    assert k_bg_off_r187 > SOFT_CAP_LOCAL, (
+        f"背景归零后 K={k_bg_off_r187:.0f} 已 < 软顶？与 2026-09-24 实测算不符 ⇒ 重算"
     )
-    assert k_pred < 1944.0, "K_pred 不低于软顶 ⇒ 食物仍不绑定（本批不达标）"
-
-
-def test_k_pred_without_bg_zero_is_far_above_softcap():
-    """反证：**背景不归零**时 K≈12 400 ⇒ 食物可撑 6.4 倍人口（R185 的"不绑定"根因）。"""
-    rf = make_patchy(bg_production_zero=False, patch_regrowth_mult=3.0)
-    sigma = float(rf._regrowth_amount(0).sum())
-    k1 = sigma / (PER_CAPITA_SPEND_E / EAT_EFFICIENCY)      # 现状 assim=1
-    assert k1 > 12_000.0, f"背景未归零时 K 只有 {k1:.0f}（预期 ≈12 400）"
-    assert k1 > 6.0 * 1944.0, "『可撑 6 倍人口』的反证未成立"
 
 
 # --------------------------------------------------------- ⑤ deposit（回流接口）
