@@ -1,22 +1,23 @@
 # 证据包 · S1
 
-- 生成时间：2026-09-23 18:43:09
-- 分支 / HEAD：`dev/terrain-s1` / `77f25ab`
+- 生成时间：2026-09-23 18:48:05
+- 分支 / HEAD：`dev/terrain-s1` / `0fc2162`
 - `gitee/main`：`663ca8c`
-- 未提交文件数：**1**
+- 未提交文件数：**2**
 - 当前纪元（AGENT.md §十三 末条）：**14.8 🔴 云端自审与自优化（2026-09-24 立；fish 裁定「本地无法审核」）**
-- 文件数：**55**
+- 文件数：**59**
 
 ## 说明
 
-13.6 S1（地形参数化）证据包。事实：
-① 本阶段只做参数化（a4 补 --patch-count/--patch-radius/--patch-capacity-mult + switches 读回 + 三地形 preset）；不改机制、不动 Rust。
-② 冒烟矩阵（7 run × 2k，seed42）：baseline(30/2,无13.5)=N374｜ctrl135(30/2,13.5全开)=N95｜forest(12/3,1.62)=N10（6k 续跑仍 9）｜grass(60/1,1.06)=N65｜desert(10/1,2.47)=N5｜ctrl_carm(严格C臂,30/2)=N15｜forest_carm(严格C臂)=N12 ⇒ 低 N 属 bgzero 食物绑定 regime 固有，非地形接线缺陷。
-③ 人读入口：_rerun_logs/terrain_s1_smoke/S1_SMOKE_SUMMARY.md（含读回证据、红队自审、C/B 臂歧义、哈希复核方法）。
-④ 三个 --dry-run 全文：dryrun_terrain_{forest,grass,desert}.txt（各 4 run）。
-⑤ DEL-8 变异证据：del8_L1_cli_to_build_{red,green}.txt + del8_L2_build_to_config_{red,green}.txt；del8_mutation_{red,green}.txt 是首次失败的尝试（保留作教训：单层变异+错配测试 ⇒ 假绿）。
-⑥ 哈希复核：sha256_verify.txt（54/54 OK；含 tools/self_audit.py 的 SHA256.txt 格式缺陷说明与绕过命令）。
-⑦ 快照（snap*/*.npz + rngstate.pkl）随包收录 ⇒ 可断点复现。
+13.6 S1（地形参数化）证据包（最终版；含回板全文 board_post_S1.md）。
+① 阶段范围：只做参数化（a4 补 --patch-count/--patch-radius/--patch-capacity-mult + switches 读回 + 三地形 preset）；不改机制、不动 Rust、未改任何判据/阈值。
+② 冒烟矩阵（7 run × 2k，seed42）：baseline=374｜ctrl135=95｜forest=10（6k 续跑仍 9）｜grass=65｜desert=5｜ctrl_carm(严格C臂)=15｜forest_carm(严格C臂)=12 ⇒ 低 N 属 bgzero 绑定 regime 固有，非地形接线缺陷。
+③ 人读入口：S1_SMOKE_SUMMARY.md（读回证据/红队自审/C-B 臂歧义/哈希复核方法）+ board_post_S1.md（回板 7 问全文）。
+④ 三份 --dry-run 全文：dryrun_terrain_{forest,grass,desert}.txt（各 4 run）。
+⑤ DEL-8 两层变异：del8_L1_cli_to_build_{red,green}.txt + del8_L2_build_to_config_{red,green}.txt；del8_mutation_{red,green}.txt = 首次假绿教训。
+⑥ 自审留档：self_audit_all.txt（c9/cli 绿；git 未推送=按 gitee/main 比对的分支假阳性）、self_audit_digest.txt（🟢 140 passed 基线未漂移）。
+⑦ 哈希复核：sha256_verify.txt（59/59 OK；含 tools/self_audit.py SHA256.txt 3 列格式缺陷与绕过命令）。
+⑧ 快照（snap*/*.npz + rngstate.pkl）随包 ⇒ 可断点复现。
 
 ## 文件清单（完整 sha256 见同目录 `SHA256.txt`）
 
@@ -26,7 +27,9 @@
 | `_rerun_logs/terrain_s1_smoke/baseline_s42_smoke.csv`                                   | 1,515   | 09-23 18:23 | eaddd283ca901bbb |
 | `_rerun_logs/terrain_s1_smoke/baseline_s42_smoke.progress.json`                         | 103     | 09-23 18:23 | 15973921bb794fcd |
 | `_rerun_logs/terrain_s1_smoke/baseline_s42_smoke.summary.json`                          | 19,755  | 09-23 18:23 | f39738a6e882b0b7 |
+| `_rerun_logs/terrain_s1_smoke/board_post_S1.md`                                         | 9,781   | 09-23 18:47 | 301e2f097d2efea4 |
 | `_rerun_logs/terrain_s1_smoke/commit_msg.txt`                                           | 1,944   | 09-23 18:41 | 4afe1a8b7f1d26f1 |
+| `_rerun_logs/terrain_s1_smoke/commit_msg_audit.txt`                                     | 716     | 09-23 18:43 | 6525786ff8ff4e08 |
 | `_rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.csv`                                    | 1,499   | 09-23 18:24 | 1e1055ba2fc78573 |
 | `_rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.progress.json`                          | 102     | 09-23 18:24 | 0bd9a61c6fdff74d |
 | `_rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.summary.json`                           | 19,723  | 09-23 18:24 | 211e188f97199e5d |
@@ -55,7 +58,9 @@
 | `_rerun_logs/terrain_s1_smoke/grass_s42_smoke.csv`                                      | 1,492   | 09-23 18:25 | 0f30705f85d0995c |
 | `_rerun_logs/terrain_s1_smoke/grass_s42_smoke.progress.json`                            | 102     | 09-23 18:25 | 3bac5f414048a933 |
 | `_rerun_logs/terrain_s1_smoke/grass_s42_smoke.summary.json`                             | 19,723  | 09-23 18:25 | 2a1c2ec01a3d8284 |
-| `_rerun_logs/terrain_s1_smoke/sha256_verify.txt`                                        | 1,023   | 09-23 18:42 | 653750a6236c6751 |
+| `_rerun_logs/terrain_s1_smoke/self_audit_all.txt`                                       | 5,905   | 09-23 18:43 | 36936a3784892120 |
+| `_rerun_logs/terrain_s1_smoke/self_audit_digest.txt`                                    | 1,378   | 09-23 18:46 | 094fcd869650fda5 |
+| `_rerun_logs/terrain_s1_smoke/sha256_verify.txt`                                        | 1,145   | 09-23 18:47 | 566b05e98cd32dc7 |
 | `_rerun_logs/terrain_s1_smoke/smoke_baseline_log.txt`                                   | 63      | 09-23 18:23 | cf9b4ee011453348 |
 | `_rerun_logs/terrain_s1_smoke/smoke_ctrl135_log.txt`                                    | 61      | 09-23 18:24 | cfcab7c720d45011 |
 | `_rerun_logs/terrain_s1_smoke/smoke_ctrl_carm_log.txt`                                  | 61      | 09-23 18:30 | 4b1c5faddb4d2e70 |

@@ -1,9 +1,11 @@
-# S1 证据清单 —— sha256sum 格式（生成于 2026-09-23 18:43:09）
+# S1 证据清单 —— sha256sum 格式（生成于 2026-09-23 18:48:05）
 10e947ccb542eb8e924e4e24e5dcd064f481caefa4e4e2082679f2576c7daa85         3,793  _rerun_logs/terrain_s1_smoke/S1_SMOKE_SUMMARY.md
 eaddd283ca901bbbd1bb9d35077649f0304e31b7ea3a559ce854315e83ba58e0         1,515  _rerun_logs/terrain_s1_smoke/baseline_s42_smoke.csv
 15973921bb794fcdc653af08c89259fe86d9070c4dc062c2191a2d69559ecc24           103  _rerun_logs/terrain_s1_smoke/baseline_s42_smoke.progress.json
 f39738a6e882b0b76b9188c5f85e582720ee50727cfbd7fc522c91248a0763cd        19,755  _rerun_logs/terrain_s1_smoke/baseline_s42_smoke.summary.json
+301e2f097d2efea4baebb85a996dd59836d23c7c2a1551d3e9dc411736e730f7         9,781  _rerun_logs/terrain_s1_smoke/board_post_S1.md
 4afe1a8b7f1d26f1b9bec834b424e4c76cc37b37ec089587a8956aa904d290f2         1,944  _rerun_logs/terrain_s1_smoke/commit_msg.txt
+6525786ff8ff4e08b511fb8fd77f036a3edf1a22953423a90a59284c9c55487f           716  _rerun_logs/terrain_s1_smoke/commit_msg_audit.txt
 1e1055ba2fc7857366fdb616590728dfae6bae4fb2fd61bf1703474951b973f7         1,499  _rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.csv
 0bd9a61c6fdff74d0e7de02fab6ac31188c5f072a812540d988b7e48f27167e6           102  _rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.progress.json
 211e188f97199e5d91b4f700c92f43563af43fe62e8cf303696894264744cdf8        19,723  _rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.summary.json
@@ -32,7 +34,9 @@ a348cd2559f13879343dfb3651c23e316b403644ac1bd9284a9b1a8963acf7db        19,720  
 0f30705f85d0995ced7fe06a70504f7925c078a611c0ec1bdcabb010f1a61ba9         1,492  _rerun_logs/terrain_s1_smoke/grass_s42_smoke.csv
 3bac5f414048a9330d2c17a18c7bd713bc7363c6a5af7884c0a21b3d8b2bd573           102  _rerun_logs/terrain_s1_smoke/grass_s42_smoke.progress.json
 2a1c2ec01a3d8284f2e41a114875848acaa4945ff0b5d03edb1b15149df3b5fa        19,723  _rerun_logs/terrain_s1_smoke/grass_s42_smoke.summary.json
-653750a6236c67518e15cc8899de15f59e9a49fa84d3f46da8c18d9b7152e2fc         1,023  _rerun_logs/terrain_s1_smoke/sha256_verify.txt
+36936a378489212040f6a37636ea58c3afd693974736ba12c766f073e1d57ea7         5,905  _rerun_logs/terrain_s1_smoke/self_audit_all.txt
+094fcd869650fda589c8d686371cac6d5e213d7616fff5a22317cbe6755758fa         1,378  _rerun_logs/terrain_s1_smoke/self_audit_digest.txt
+566b05e98cd32dc7aafdd4d01730bd6a1f0e1d093d3cc0db74a9349d01f00659         1,145  _rerun_logs/terrain_s1_smoke/sha256_verify.txt
 cf9b4ee0114533481409f52f294665cf1021382393616b1843fac949655381ca            63  _rerun_logs/terrain_s1_smoke/smoke_baseline_log.txt
 cfcab7c720d450119f75de93ab397a36f29da35dcd6fd767ef9fb81a8fe5e9cc            61  _rerun_logs/terrain_s1_smoke/smoke_ctrl135_log.txt
 4b1c5faddb4d2e70944b88789b8dfd9bee6c2b3418293c15f9ae33bbb6b1ec15            61  _rerun_logs/terrain_s1_smoke/smoke_ctrl_carm_log.txt
