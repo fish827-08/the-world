@@ -767,6 +767,19 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **默认与路径** | 🔴 **新机制全部默认关** ⇒ 关档 = 13.4 构造基线（C7 digest `(574887, 11266.746993)`，F1+eat 叠加后钉死）；**全程 Python 路径**（§14.7），不动 Rust；开 + `use_sim_core=True` ⇒ **构造期硬报错**（H3 fail-loud） |
 | **状态（2026-09-23 更新）** | 🚧 **T1 ✅ + T2 ✅ + T3 ✅ + T4 实施中**（`[云端·开发]`，分支 `dev/13.4-wave1`）：T1 = 波 1 a4 收尾 + w1subpos preset；T2 = 资源动态接线 + eat 0.9 + kill_mult 10；T3 = 修 F1 + span=2 + cap + 去盲选 + 看见才出手；T4 = 血条语义反转 + 恐惧门槛；T5 = 实验准备 |
 
+### 13.5 「食物绑定 + 能量标定」纪元（2026-09-24 起；依据 fish 09-24 批准"三件同批" + R188 裁定）
+
+| 项 | 内容 |
+|---|---|
+| **触发变更** | ① **背景产能归零**（`ResourceConfig.bg_production_zero`）—— 背景格容量/再生/存量三者归零 ⇒ 只留斑块生产 ② **斑块再生倍率校准**（`patch_regrowth_mult` **默认 3.0 → 本批定稿 ≈1.195**）③ **能量标定**：`stomach_cap_mass`(25) / `eat_threshold_frac`(0.6) / `starve_frac`(0.30) / `exhaust_frac`(0.17) / `assim_herb`(0.4) / `assim_carn`(0.8) / `assim_return_frac`(1.0) + `eat_efficiency` **3.0→7.5**（语义 = 完全燃烧值）+ `max_energy` 300→600 + `initial_energy` 60→300 + 关光合（`photo_max` 0） |
+| **为什么（前提告破）** | R183/R184 实测：现状 Σ再生 3153 ⇒ **K≈12 400 ≫ 软顶 1944** ⇒ **食物从不绑定** ⇒ 生物随处有食 ⇒ **"位置"无信息价值**。⇒ 依赖"位置有价值"的旧结论（**E-019 / E-023 信号内容**、**E-027 记忆→行为**、13.3/13.4 的**双峰 0/20**）**必须在新纪元重测**，其"阴性"**不可再当作"机制无效"的证据** |
+| **唯一硬判据** | 素食者实测 **K ∈ [1200,1900]** 且 < 软顶 1944（可执行形式 = `tools/verify_k.py --gate`）。**R188 实测定稿**：mult 1.195 ⇒ **K_meas 1383 ✅**；mult 3.0 ⇒ K_meas 3220 ❌ |
+| **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`bg_production_zero` / `patch_regrowth_mult` / `eat_efficiency` / `stomach_cap_mass` / `eat_threshold_frac` / `starve_frac` / `exhaust_frac` / `assim_herb` / `assim_carn` / `assim_return_frac` / `initial_energy` / `max_energy`（a4 已全接线，C4 读回 12 项） |
+| **纪律** | 🔴 **禁跨纪元比较**：本纪元同时改**食物总量**（Σ再生 3153→406）与**能量转换口径**（净吸收 `eff×assim`：3.0→素 3.0 / 肉 6.0）⇒ 旧批的 **K / 净收入 / 捕食盈利性 / 觅食成本** 口径**不可与新批直接比**。🔴 特别登记：**`assim_carn=0.8` ⇒ 食肉净吸收 = 食草 2 倍，直接改掉 E-030「捕食生态位数值上不盈利」的前提**（E-030 属旧纪元） |
+| **默认与路径** | 🔴 **`bg_production_zero` / ③ 全 7 字段默认 = 现状**（⇒ 关档仍逐位一致，C7 digest `(574887, 11266.746993)` 不动；⚠️ `patch_regrowth_mult` 默认已由 ② 改为 3.0 ⇒ **13.4 patchy 复现须显式传 `--patch-mult 2.0`**）；**全程 Python 路径**（§14.7），不动 Rust；开 + `use_sim_core=True` ⇒ 构造期硬报错（H3 fail-loud） |
+| **⚠️ 参数联动（R188 实测，必守）** | 🔴 **改死亡阈值必须同步改初始能量**：`initial_energy < starve_frac × max_energy` ⇒ **开局集体饿死**（实测 300/60 ⇒ N=10；600/300 ⇒ N=95）。任何新批改阈值前先核这一条 |
+| **状态（2026-09-24 更新）** | 🚧 实施中：老工 **①②✅**（`c93d085` bgzero + mult，含 15 例测试）+ `tools/k_calib.py`（`8d4e5e8`）；`[所有者]` **③接线✅ + ①生效接线✅ + a4 读回✅ + p135food preset✅**（`9b726ca`）；批跑 **`p135food`（3 臂 × 4 seed × 12k）待 fish 下令** |
+
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 
 > **背景**：本项目进入"结构改造 + 短实验"高频迭代期（R152–R157）。为把机时与开发解耦，fish 裁定：
