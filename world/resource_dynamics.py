@@ -291,7 +291,16 @@ class ResourceDynamics:
                 used = self._promote_same_row(int(i), rand_u, used)
             self._demoted[:] = False
 
-        # --- ② 到期重生：死格 → 背景格（"重入候选池"）---
+        # --- ② 到期休耕恢复（2026-09-23 实验：B–E 臂灭绝根因）---
+        # 🔴 `note_tick` 设 `_rest_until = tick + rest_ticks` 后，到期必须**重置 -1**
+        #    （恢复生长）。此前只有"死亡重生 / 反荒漠化闸"重置它 ⇒ 一次被吃 =
+        #    永久休耕 ⇒ resting_cell_frac 单调冲到 ~95%（w2w3full B_s42 实测
+        #    0.949 / 200552 次 rest_set）⇒ 食物枯竭、种群灭绝。到期格下一 tick 恢复。
+        expired = (self._rest_until >= 0) & (~self._dead) & (tick >= self._rest_until)
+        if expired.any():
+            self._rest_until[expired] = -1
+
+        # --- ③ 到期重生：死格 → 背景格（"重入候选池"）---
         due = self._dead & ((tick - self._dead_since) >= self.dead_regen_ticks)
         if due.any():
             n_due = int(due.sum())

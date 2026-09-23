@@ -70,6 +70,30 @@ def test_rest_stops_regrowth():
     assert rd.rest_set_n >= 1, "应记录休耕事件"
 
 
+def test_rest_expires_and_recovers():
+    """🔴 休耕**到期恢复**（2026-09-23 实验 B–E 臂灭绝根因的回归测试）。
+
+    缺陷原型：`note_tick` 设 `_rest_until = tick + rest_ticks` 后，**到期从不重置
+    -1**（只有死亡重生/反荒漠化闸重置）⇒ `growth_multiplier()` 查 `_rest_until < 0`
+    ⇒ 一次被吃 = **永久休耕** ⇒ resting_cell_frac 单调冲到 ~95% ⇒ 食物枯竭灭绝。
+    """
+    e = _engine(rd=True)
+    rd = e._rd
+    rt = int(rd.rest_ticks)                 # 默认 300
+    intake = np.zeros(e.world.n_cells)
+    intake[0] = 1.0
+    growth = np.ones(e.world.n_cells)
+    t0 = 100
+    rd.note_tick(intake, growth, t0)
+    assert rd.growth_multiplier()[0] == 0.0, "休耕中应 0"
+    # 到期前 rotate ⇒ 仍休耕（不提前恢复）
+    rd.rotate(t0 + rt - 1, np.array([0.5]))
+    assert rd.growth_multiplier()[0] == 0.0, "到期前不应恢复"
+    # 到期后 rotate ⇒ 恢复生长（rest_until 重置为 -1）
+    rd.rotate(t0 + rt, np.array([0.5]))
+    assert rd.growth_multiplier()[0] == 1.0, "到期后应恢复生长（rest_until 重置）"
+
+
 # --------------------------------------------------------------- ③ 死亡触发
 
 def test_kill_triggers_death():
