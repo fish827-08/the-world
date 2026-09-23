@@ -1,16 +1,16 @@
 # 证据包 · S1
 
-- 生成时间：2026-09-23 18:48:05
-- 分支 / HEAD：`dev/terrain-s1` / `0fc2162`
+- 生成时间：2026-09-23 18:48:47
+- 分支 / HEAD：`dev/terrain-s1` / `8323239`
 - `gitee/main`：`663ca8c`
-- 未提交文件数：**2**
+- 未提交文件数：**0**
 - 当前纪元（AGENT.md §十三 末条）：**14.8 🔴 云端自审与自优化（2026-09-24 立；fish 裁定「本地无法审核」）**
 - 文件数：**59**
 
 ## 说明
 
-13.6 S1（地形参数化）证据包（最终版；含回板全文 board_post_S1.md）。
-① 阶段范围：只做参数化（a4 补 --patch-count/--patch-radius/--patch-capacity-mult + switches 读回 + 三地形 preset）；不改机制、不动 Rust、未改任何判据/阈值。
+13.6 S1（地形参数化）证据包（终版 v2；含回板全文 board_post_S1.md 与全部自审留档）。
+① 阶段范围：只做参数化（a4 补 --patch-count/--patch-radius/--patch-capacity-mult + switches 读回 + 三地形 preset）；不改机制、不动 Rust、未改任何判据/阈值/口径。
 ② 冒烟矩阵（7 run × 2k，seed42）：baseline=374｜ctrl135=95｜forest=10（6k 续跑仍 9）｜grass=65｜desert=5｜ctrl_carm(严格C臂)=15｜forest_carm(严格C臂)=12 ⇒ 低 N 属 bgzero 绑定 regime 固有，非地形接线缺陷。
 ③ 人读入口：S1_SMOKE_SUMMARY.md（读回证据/红队自审/C-B 臂歧义/哈希复核方法）+ board_post_S1.md（回板 7 问全文）。
 ④ 三份 --dry-run 全文：dryrun_terrain_{forest,grass,desert}.txt（各 4 run）。
@@ -27,7 +27,7 @@
 | `_rerun_logs/terrain_s1_smoke/baseline_s42_smoke.csv`                                   | 1,515   | 09-23 18:23 | eaddd283ca901bbb |
 | `_rerun_logs/terrain_s1_smoke/baseline_s42_smoke.progress.json`                         | 103     | 09-23 18:23 | 15973921bb794fcd |
 | `_rerun_logs/terrain_s1_smoke/baseline_s42_smoke.summary.json`                          | 19,755  | 09-23 18:23 | f39738a6e882b0b7 |
-| `_rerun_logs/terrain_s1_smoke/board_post_S1.md`                                         | 9,781   | 09-23 18:47 | 301e2f097d2efea4 |
+| `_rerun_logs/terrain_s1_smoke/board_post_S1.md`                                         | 9,802   | 09-23 18:48 | 071c43f9a134b795 |
 | `_rerun_logs/terrain_s1_smoke/commit_msg.txt`                                           | 1,944   | 09-23 18:41 | 4afe1a8b7f1d26f1 |
 | `_rerun_logs/terrain_s1_smoke/commit_msg_audit.txt`                                     | 716     | 09-23 18:43 | 6525786ff8ff4e08 |
 | `_rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.csv`                                    | 1,499   | 09-23 18:24 | 1e1055ba2fc78573 |

@@ -1,9 +1,9 @@
-# S1 证据清单 —— sha256sum 格式（生成于 2026-09-23 18:48:05）
+# S1 证据清单 —— sha256sum 格式（生成于 2026-09-23 18:48:47）
 10e947ccb542eb8e924e4e24e5dcd064f481caefa4e4e2082679f2576c7daa85         3,793  _rerun_logs/terrain_s1_smoke/S1_SMOKE_SUMMARY.md
 eaddd283ca901bbbd1bb9d35077649f0304e31b7ea3a559ce854315e83ba58e0         1,515  _rerun_logs/terrain_s1_smoke/baseline_s42_smoke.csv
 15973921bb794fcdc653af08c89259fe86d9070c4dc062c2191a2d69559ecc24           103  _rerun_logs/terrain_s1_smoke/baseline_s42_smoke.progress.json
 f39738a6e882b0b76b9188c5f85e582720ee50727cfbd7fc522c91248a0763cd        19,755  _rerun_logs/terrain_s1_smoke/baseline_s42_smoke.summary.json
-301e2f097d2efea4baebb85a996dd59836d23c7c2a1551d3e9dc411736e730f7         9,781  _rerun_logs/terrain_s1_smoke/board_post_S1.md
+071c43f9a134b795f5768bcc4cb3004f18fb03cccd14d50956e491984308468e         9,802  _rerun_logs/terrain_s1_smoke/board_post_S1.md
 4afe1a8b7f1d26f1b9bec834b424e4c76cc37b37ec089587a8956aa904d290f2         1,944  _rerun_logs/terrain_s1_smoke/commit_msg.txt
 6525786ff8ff4e08b511fb8fd77f036a3edf1a22953423a90a59284c9c55487f           716  _rerun_logs/terrain_s1_smoke/commit_msg_audit.txt
 1e1055ba2fc7857366fdb616590728dfae6bae4fb2fd61bf1703474951b973f7         1,499  _rerun_logs/terrain_s1_smoke/ctrl135_s42_smoke.csv
