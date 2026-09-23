@@ -4086,6 +4086,7 @@ class SphereEngine:
         data["rd_rest_until"] = self._rd._rest_until.copy()
         data["rd_dead_since"] = self._rd._dead_since.copy()
         data["rd_demoted"] = self._rd._demoted.copy()
+        data["rd_damage"] = self._rd._damage.copy()   # 波2 修 v2：累计损伤（随快照走）
         data["rd_kill_n"] = np.array(self._rd.patch_kill_n)
         data["rd_reborn_n"] = np.array(self._rd.patch_reborn_n)
         data["rd_forced_reborn_n"] = np.array(self._rd.forced_reborn_n)
@@ -4323,6 +4324,12 @@ class SphereEngine:
             engine._rd._rest_until = data["rd_rest_until"].copy()
             engine._rd._dead_since = data["rd_dead_since"].copy()
             engine._rd._demoted = data["rd_demoted"].copy()
+            # 波2 修 v2：累计损伤（旧快照缺键 ⇒ 回退全零，语义 = 从未被啃食）
+            engine._rd._damage = (
+                data["rd_damage"].copy()
+                if "rd_damage" in data
+                else np.zeros(engine.world.n_cells, dtype=np.float64)
+            )
             engine._rd.patch_kill_n = int(data["rd_kill_n"])
             engine._rd.patch_reborn_n = int(data["rd_reborn_n"])
             engine._rd.forced_reborn_n = int(data["rd_forced_reborn_n"])

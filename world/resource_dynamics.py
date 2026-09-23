@@ -111,6 +111,10 @@ class ResourceDynamics:
         g = lambda k, d: getattr(cfg, k, d)  # noqa: E731 — 缺字段回退（向前兼容）
         self.enabled = bool(g("enabled", False))
         self.rest_ticks = int(g("rest_ticks", 300))
+        # 波2 修 v2（fish 批准方案 A）：累计损伤三态机阈值
+        self.rest_threshold = float(g("rest_threshold", 0.3))
+        self.death_threshold = float(g("death_threshold", 0.8))
+        self.damage_recovery = float(g("damage_recovery", 0.5))
         self.kill_frac = float(g("kill_frac", 0.7))
         self.kill_denom = str(g("kill_denom", "regrowth"))
         self.dead_regen_ticks = int(g("dead_regen_ticks", 2000))
@@ -146,6 +150,8 @@ class ResourceDynamics:
         self._rest_until = np.full(self.n_cells, -1, dtype=np.int64)
         self._dead = np.zeros(self.n_cells, dtype=bool)
         self._dead_since = np.full(self.n_cells, -1, dtype=np.int64)
+        # 波2 修 v2：**累计损伤**（= Σ(被吃量/容量)，随快照走；休耕到期按 recovery 衰减）
+        self._damage = np.zeros(self.n_cells, dtype=np.float64)
         # 本 tick 刚死亡的斑块格（等待 `rotate` 把加成搬走；**必须初始化**，
         # 否则 `note_tick` 与 `rotate` 分属两段时会出现"加成悬空"的中间态）
         self._demoted = np.zeros(self.n_cells, dtype=bool)
@@ -213,7 +219,7 @@ class ResourceDynamics:
     # ---- ② 取食后：休耕 + 判死 ----------------------------------------------
 
     def note_tick(self, intake: np.ndarray, growth: np.ndarray, tick: int) -> None:
-        """结算"这一 tick 被吃了多少"：设休耕 + 判死亡。
+        """结算"这一 tick 被吃了多少"：累计损伤 + 判休耕 + 判死亡。
 
         参数
         ----
@@ -221,51 +227,72 @@ class ResourceDynamics:
             每格本 tick **被吃掉的量**（质量单位，`np.bincount(flats, weights=taken)`）。
         growth : NDArray[float64]，形状 (n_cells,)
             每格本 tick 的**名义再生量**（未乘 `growth_multiplier`）。
-            `kill_denom="regrowth"` 时它同时是**分母**；也可用于排除"这格本来就不长"（分母 0）。
+            仅作 `kill_frac` 极端密度通道的分母；主通道分母 = 容量。
         tick : int
             当前时间步（休耕截止与死亡时刻按它记）。
 
-        说明
+        说明（波2 修 v2，fish 批准方案 A；替代旧"intake>0 即休耕"）
         ----
-        * 判死的分母取 `growth`（默认）或 `base_capacity`（字面口径），见模块 docstring (A)(B)。
-        * `kill_patch_only=True`（默认）⇒ **只有斑块格会死**。
-          理由：`kill_denom="regrowth"` 下背景格"单人取食/再生"就有 1.71 ⇒ 若允许背景格死，
-          世界会被瞬间打散（大范围荒漠）；而设计意图本就是"斑块因过牧而死"。
+        * **累计损伤** `_damage += intake / capacity`（容量 = 当期含倍率容量）：
+          "吃掉相当于几格满存量的量"。轻取食（一次 0.9 / 容量 ~50 ≈ 0.02）增速慢，
+          反复啃食（文献：反复摘叶 → 根衰减）才累积到阈值。
+        * **休耕**：`_damage ≥ rest_threshold`（默认 0.3）⇒ 进入休耕（固定
+          `rest_ticks` 时长；⚠️ **只对未休耕格设置 ⇒ 休耕期被吃不刷新** ——
+          方案 A 的核心，也是轮牧"休养期不再被啃食累积"的语义）。
+        * **判死**：主通道 = `_damage ≥ death_threshold`（默认 0.8，全格生效；
+          对应 USDA 摘叶梯度"70–90% 重伤近死"）；补充通道 = 单 tick
+          `intake/growth > kill_frac`（保留极端密度瞬间死亡；仍受 kill_patch_only）。
+        * **休耕期可被吃**（方案 A）：休耕格存量若还在，个体照常取食 ⇒ intake>0
+          ⇒ `_damage` 继续累计 ⇒ 可能推进到死亡（"被啃食的休耕地退化"）。
+        * `kill_patch_only`：仅约束**补充通道**；主通道（累计损伤）全格生效 ——
+          背景格重度退化同样可死，由反荒漠化闸（dead_cell_max_frac）兜底强制重生。
         """
         if not self.enabled:
             return
         intake = np.asarray(intake, dtype=np.float64)
         growth = np.asarray(growth, dtype=np.float64)
 
-        # --- 休耕：被吃过就休耕 ---
+        # --- 累计损伤（主通道分母 = 当期容量；容量 > 0 恒成立）---
         eaten = intake > 0.0
         if eaten.any():
-            self._rest_until[eaten] = tick + self.rest_ticks
-            self.rest_set_n += int(eaten.sum())
+            cap = self.capacity_from_base()
+            denom = np.where(cap > 0.0, cap, 1.0)
+            self._damage[eaten] += intake[eaten] / denom[eaten]
 
-        # --- 判死 ---
+        # --- 判死：主通道（累计损伤超阈，全格）+ 补充通道（单 tick 极端密度）---
+        newly = np.zeros(self.n_cells, dtype=bool)
+        if eaten.any():
+            newly |= eaten & (~self._dead) & (self._damage >= self.death_threshold)
         if self.kill_denom == "regrowth":
-            denom = growth
+            denom_k = growth
         else:
-            denom = self._base_capacity
-        valid = (denom > 0.0) & (~self._dead) & (intake > 0.0)
+            denom_k = self._base_capacity
+        valid = (denom_k > 0.0) & (~self._dead) & (intake > 0.0)
         if self.kill_patch_only:
             valid &= self._mask
-        if not valid.any():
-            return
-        ratio = np.zeros(self.n_cells, dtype=np.float64)
-        ratio[valid] = intake[valid] / denom[valid]
-        newly = valid & (ratio > self.kill_frac)
+        if valid.any():
+            ratio = np.zeros(self.n_cells, dtype=np.float64)
+            ratio[valid] = intake[valid] / denom_k[valid]
+            newly |= valid & (ratio > self.kill_frac)
         n_new = int(newly.sum())
-        if n_new == 0:
-            return
-        self._dead |= newly
-        self._dead_since[newly] = tick
-        self._rest_until[newly] = -1          # 死格不再论"休耕"（生长反正为 0）
-        self.patch_kill_n += n_new
-        # 斑块格死亡 ⇒ **立刻**把斑块加成搬走（同行交换；见 docstring (C)）
-        self._demoted = newly & self._mask
-        self._mask[self._demoted] = False
+        if n_new:
+            self._dead |= newly
+            self._dead_since[newly] = tick
+            self._rest_until[newly] = -1
+            self._damage[newly] = 0.0          # 死亡清零（重生后从 0 累计）
+            self.patch_kill_n += n_new
+            # 斑块格死亡 ⇒ **立刻**把斑块加成搬走（同行交换；见 docstring (C)）
+            self._demoted = newly & self._mask
+            self._mask[self._demoted] = False
+
+        # --- 休耕：损伤超阈且未休耕未死 ⇒ 进入休耕（固定时长，**不刷新**）---
+        enter_rest = (
+            eaten & (~self._dead) & (self._rest_until < 0)
+            & (self._damage >= self.rest_threshold)
+        )
+        if enter_rest.any():
+            self._rest_until[enter_rest] = tick + self.rest_ticks
+            self.rest_set_n += int(enter_rest.sum())
 
     # ---- ③ 轮作：重生 + 搬加成 + 反荒漠化闸 ---------------------------------
 
@@ -291,13 +318,13 @@ class ResourceDynamics:
                 used = self._promote_same_row(int(i), rand_u, used)
             self._demoted[:] = False
 
-        # --- ② 到期休耕恢复（2026-09-23 实验：B–E 臂灭绝根因）---
-        # 🔴 `note_tick` 设 `_rest_until = tick + rest_ticks` 后，到期必须**重置 -1**
-        #    （恢复生长）。此前只有"死亡重生 / 反荒漠化闸"重置它 ⇒ 一次被吃 =
-        #    永久休耕 ⇒ resting_cell_frac 单调冲到 ~95%（w2w3full B_s42 实测
-        #    0.949 / 200552 次 rest_set）⇒ 食物枯竭、种群灭绝。到期格下一 tick 恢复。
+        # --- ② 到期休耕恢复（2026-09-23 实验：B–E 臂灭绝根因 + 波2 修 v2）---
+        # 休耕到期 ⇒ `_rest_until` 重置 -1（恢复生长）+ **累计损伤按 `damage_recovery`
+        # 衰减**（文献：恢复期后损伤部分恢复）。此前只有"死亡重生 / 反荒漠化闸"
+        # 重置它 ⇒ 一次被吃 = 永久休耕 ⇒ resting_cell_frac 单调冲到 ~95%。
         expired = (self._rest_until >= 0) & (~self._dead) & (tick >= self._rest_until)
         if expired.any():
+            self._damage[expired] *= self.damage_recovery
             self._rest_until[expired] = -1
 
         # --- ③ 到期重生：死格 → 背景格（"重入候选池"）---
@@ -354,6 +381,12 @@ class ResourceDynamics:
             "enabled": True,
             "dead_cell_frac": round(float(self._dead.mean()), 6),
             "resting_cell_frac": round(float((self._rest_until >= 0).mean()), 6),
+            "rest_threshold": float(self.rest_threshold),
+            "death_threshold": float(self.death_threshold),
+            "damage_recovery": float(self.damage_recovery),
+            "mean_damage": round(float(self._damage.mean()), 6),
+            "damage_over_rest_frac": round(
+                float((self._damage >= self.rest_threshold).mean()), 6),
             "patch_kill_n": int(self.patch_kill_n),
             "patch_reborn_n": int(self.patch_reborn_n),
             "forced_reborn_n": int(self.forced_reborn_n),
@@ -363,10 +396,10 @@ class ResourceDynamics:
             "patch_cells": int(self._mask.sum()),
             "mean_capacity_effective": round(cap_total / max(1, self.n_cells), 6),
             "capacity_total_rel": round(cap_total / max(1e-12, self._cap_total_0), 9),
-            "note": ("kill_denom=" + self.kill_denom
-                     + f"｜阈值 {self.kill_frac}"
+            "note": ("波2 修 v2 三态机：damage=Σ(被吃/容量)｜休耕阈值 "
+                     + f"{self.rest_threshold}｜死亡阈值 {self.death_threshold}"
+                     + f"｜kill_frac={self.kill_frac}（极端密度补充通道）"
                      + f"｜kill_patch_only={self.kill_patch_only}"
-                     + f"｜同行交换={self.rotate_same_row_only}"
                      + "｜⚠️ 只看人口会漏掉'世界正在荒漠化但还没崩'的中间态 ⇒ 四条读数缺一不可"),
         }
 

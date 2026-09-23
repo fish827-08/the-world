@@ -799,12 +799,24 @@ class ResourceDynamicsConfig:
     """
 
     enabled: bool = False            # 默认关 = 旧行为**逐位等价**（派生量全 no-op）
-    rest_ticks: int = 300            # 被吃后**休耕**：该格 N tick 内再生 = 0
+    rest_ticks: int = 60             # 休耕时长：该格 N tick 内再生 = 0（13.4 波2 修 v2：
+                                     #   300→60，文献轮牧 30–60 天口径；配合 rest_threshold
+                                     #   只在"吃够 30% 容量"才休耕 ⇒ 60 足够恢复）
+    # 🔴 13.4 波2 修 v2（2026-09-23，fish 批准方案 A）：**累计损伤三态状态机**。
+    #   旧版"intake>0 即休耕"被实测击穿（B–E 臂 resting 82–92%，一次被吃 = 停摆 300）。
+    #   新口径 = **累计被吃量 / 容量**（damage ∈ [0,∞)）：
+    #     damage ≥ rest_threshold   ⇒ 进入休耕（固定 rest_ticks，**被吃不刷新**）
+    #     damage ≥ death_threshold  ⇒ 死亡（斑块加成搬走；与 kill_frac 极端密度通道并存）
+    #   文献锚（轮牧 Take-Half-Leave-Half / USDA 摘叶梯度：50% 轻伤 / 70% 重伤 / 90% 近死）：
+    #   rest 0.3 / death 0.8 对应"轻伤可恢复 / 重伤退化"，比行业 40–60% 保守。
+    rest_threshold: float = 0.3     # 损伤 ≥ 30% 容量 ⇒ 休耕
+    death_threshold: float = 0.8    # 损伤 ≥ 80% 容量 ⇒ 死亡
+    damage_recovery: float = 0.5    # 休耕到期损伤乘此系数（部分恢复；文献：恢复期后损伤减半）
     # 🔴 0.7 → **10.0**（13.4 波 2A，T2；R178 裁定：`kill_mult` 初值 10 =
     #    "一 tick 吃掉 **10 倍当期再生** ⇒ 死"，**禁用裸 `regrowth_rate`**——否则纬度抽奖回归）。
     #   ⚠️ 收编件字段名保留 `kill_frac`（模块读它），语义 = 再生倍数阈值（不是 <1 的比例）。
-    #   实测（eat=0.9）：patch 3 人 = 4.05/0.832 ≈ **4.87 < 10** ⇒ 正常过牧**不死**，
-    #   只有极端密度（>10×再生）才触发死亡 ⇒ 冒烟 `dead_cell_frac` 应 < 0.1。
+    #   ⚠️ 波2 修 v2：判死主通道改 `death_threshold`（累计损伤）；`kill_frac` 保留为
+    #   **极端密度瞬间死亡**的补充通道（单 tick intake/growth > 10 仍死），两通道共用死格处理。
     kill_frac: float = 10.0          # 被吃强度 > 此值（= kill_mult，当期再生倍数）⇒ 斑块死亡
     kill_denom: str = "regrowth"     # 🆕 "regrowth"（默认，纬度无关）| "capacity"（设计稿字面）
     dead_regen_ticks: int = 2000     # 死格**重入候选池**的等待（🔴 0 = 永不 ⇒ 硬拒绝：那是文献里的不可逆荒漠化）
@@ -823,6 +835,10 @@ class ResourceDynamicsConfig:
             " shifting mosaic；若确实要测不可逆，请另立开关并先在板上裁定"
         )
         assert 0.0 < self.dead_cell_max_frac <= 1.0, "dead_cell_max_frac ∈ (0,1]"
+        # 波2 修 v2 断言：阈值有序 + 恢复系数 ∈ (0,1]
+        assert 0.0 < self.rest_threshold < self.death_threshold, (
+            "rest_threshold < death_threshold（先休耕后死亡）")
+        assert 0.0 < self.damage_recovery <= 1.0, "damage_recovery ∈ (0,1]"
 
 
 #: `from_dict` 的字段白名单（旧存档缺键 ⇒ 回退默认；多出的键 ⇒ 忽略而非报错）

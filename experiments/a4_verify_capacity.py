@@ -185,7 +185,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           stay_max: float = 0.8,
           # 13.4 波 2A（T2，R178）：资源动态（斑块休耕—死亡—轮作；**默认关 = 旧行为**）
           resource_dynamics_enabled: bool = False,
-          rest_ticks: int = 300, kill_frac: float = 10.0,
+          rest_ticks: int = 60,
+          rest_threshold: float = 0.3,
+          death_threshold: float = 0.8,
+          damage_recovery: float = 0.5,
+          kill_frac: float = 10.0,
           kill_denom: str = "regrowth", dead_regen_ticks: int = 2000,
           dead_cell_max_frac: float = 0.5,
           kill_patch_only: bool = True, rotate_same_row_only: bool = True,
@@ -262,10 +266,13 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         stay_fear_k=float(stay_fear_k),
         stay_max=float(stay_max),
     )
-    # 13.4 波 2A（T2，R178）：资源动态（**整体替换** ResourceDynamicsConfig ⇒ 一次传全）
+    # 13.4 波 2A（T2，R178；波2 修 v2 三态机阈值）：资源动态（**整体替换** ResourceDynamicsConfig ⇒ 一次传全）
     c.resource_dynamics = ResourceDynamicsConfig(
         enabled=bool(resource_dynamics_enabled),
         rest_ticks=int(rest_ticks),
+        rest_threshold=float(rest_threshold),
+        death_threshold=float(death_threshold),
+        damage_recovery=float(damage_recovery),
         kill_frac=float(kill_frac),
         kill_denom=str(kill_denom),
         dead_regen_ticks=int(dead_regen_ticks),
@@ -534,8 +541,14 @@ def main() -> None:
     ap.add_argument("--resource-dynamics-enabled", dest="resource_dynamics_enabled",
                     action="store_true",
                     help="斑块休耕—死亡—轮作（默认关 = 旧行为，逐位等价；H3 拦 Rust）")
-    ap.add_argument("--rest-ticks", dest="rest_ticks", type=int, default=300,
-                    help="被吃后休耕 tick（该格 N tick 内再生=0）")
+    ap.add_argument("--rest-ticks", dest="rest_ticks", type=int, default=60,
+                    help="休耕时长（该格 N tick 内再生=0；波2 修 v2：300→60，文献轮牧 30–60）")
+    ap.add_argument("--rest-threshold", dest="rest_threshold", type=float, default=0.3,
+                    help="累计损伤 ≥ 此值（相对容量）⇒ 进入休耕（波2 修 v2 三态机）")
+    ap.add_argument("--death-threshold", dest="death_threshold", type=float, default=0.8,
+                    help="累计损伤 ≥ 此值 ⇒ 死亡（USDA 摘叶 70–90%% 重伤近死口径）")
+    ap.add_argument("--damage-recovery", dest="damage_recovery", type=float, default=0.5,
+                    help="休耕到期损伤衰减系数（∈(0,1]；恢复期后损伤部分恢复）")
     ap.add_argument("--kill-frac", dest="kill_frac", type=float, default=10.0,
                     help="被吃强度 > 此值（= kill_mult，**当期再生倍数**；R178 裁定 10）⇒ 斑块死亡")
     ap.add_argument("--kill-denom", dest="kill_denom", default="regrowth",
@@ -711,7 +724,11 @@ def main() -> None:
                   stay_max=args.stay_max,
                   # 13.4 波 2A：资源动态（默认关 = 旧行为）
                   resource_dynamics_enabled=bool(args.resource_dynamics_enabled),
-                  rest_ticks=args.rest_ticks, kill_frac=args.kill_frac,
+                  rest_ticks=args.rest_ticks,
+                  rest_threshold=args.rest_threshold,
+                  death_threshold=args.death_threshold,
+                  damage_recovery=args.damage_recovery,
+                  kill_frac=args.kill_frac,
                   kill_denom=args.kill_denom,
                   dead_regen_ticks=args.dead_regen_ticks,
                   dead_cell_max_frac=args.dead_cell_max_frac,
@@ -1118,6 +1135,10 @@ def main() -> None:
             # ---- 13.4 波 2A：资源动态（C4 读回；臂身份 = `resource_dynamics_enabled`）----
             "resource_dynamics_enabled": bool(e.config.resource_dynamics.enabled),
             "rest_ticks": int(e.config.resource_dynamics.rest_ticks),
+            # 波2 修 v2（方案 A）：累计损伤三态机阈值（C4 自证）
+            "rest_threshold": float(e.config.resource_dynamics.rest_threshold),
+            "death_threshold": float(e.config.resource_dynamics.death_threshold),
+            "damage_recovery": float(e.config.resource_dynamics.damage_recovery),
             "kill_frac": float(e.config.resource_dynamics.kill_frac),
             "kill_denom": str(e.config.resource_dynamics.kill_denom),
             "dead_regen_ticks": int(e.config.resource_dynamics.dead_regen_ticks),
