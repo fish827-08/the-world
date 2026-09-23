@@ -1374,7 +1374,10 @@ class SphereEngine:
         #    这是**既有行为**（Python 与 Rust **互相一致** ⇒ 不是双路径漂移，而是两处语义并存）
         #    ⇒ 本函数**如实报两个口径**，不擅自改行为（改了就是新纪元）。
         cap_mult = 0.5 + self._genes[:P, Gene.STOMACH_CAP] * 1.5
-        stomach_cap = ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
+        # 🔴 13.5：与取食段同口径（胃容量独立参数；0 ⇒ 旧公式）
+        _scm_pb = float(getattr(ocfg, "stomach_cap_mass", 0.0) or 0.0)
+        stomach_cap = (_scm_pb * cap_mult if _scm_pb > 0.0
+                       else ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult)
         stomach_cap_pred = ocfg.max_energy / max(1e-9, ocfg.eat_efficiency)
         out["stomach_over_eat_cap"] = int(
             np.count_nonzero(self._stomach[:P] > stomach_cap + 1e-9))
@@ -2000,8 +2003,38 @@ class SphereEngine:
             digest_rate = ocfg.base_metabolism * metab_mult * eff_activity
             # 每 tick 最多转化这么多；不得超出胃里有的
             digest = np.minimum(stomach, digest_rate)
-            _dg = digest * ocfg.eat_efficiency      # 同样食物 → 同样能量
+            # 🔴 13.5（S2）：**吸收率**（吃进去多少变成能量）+ **未吸收回流本格植物池**。
+            #   默认 `assim_herb = assim_carn = 1.0`、`assim_return_frac = 0.0`
+            #   ⇒ `_assim` 恒 1、无回流 ⇒ **与旧版逐位一致**。
+            #   归因（人话）：胃是"混合饭盒"，用 `_stomach_scav / stomach` 比例区分
+            #   "植物腿 / 尸体腿"（R165 0-2 已有该归因，此处复用，**不新增状态量**）。
+            #   ⚠️ 口径：此后 `_dg` 是**净吸收能量**（已乘吸收率）⇒ 账本 `intake_*` 同步为
+            #   净口径；"未吸收回流"目前只落回植物池、**无独立账户**（S3 前补一个计数）。
+            _ah = float(getattr(ocfg, "assim_herb", 1.0) or 1.0)
+            _ac = float(getattr(ocfg, "assim_carn", 1.0) or 1.0)
+            _ar = float(getattr(ocfg, "assim_return_frac", 0.0) or 0.0)
+            if _ah < 1.0 or _ac < 1.0:
+                _scf = np.clip(
+                    np.divide(self._stomach_scav[:P], stomach,
+                              out=np.zeros_like(stomach), where=stomach > 0.0),
+                    0.0, 1.0)
+                _assim = _ah + (_ac - _ah) * _scf
+            else:
+                _assim = 1.0
+            _dg = digest * ocfg.eat_efficiency * _assim   # 食物 → 能量（含吸收率）
             energy += _dg
+            if _ar > 0.0 and (_ah < 1.0 or _ac < 1.0):
+                _back = digest * (1.0 - _assim) * _ar     # 质量单位
+                if float(_back.sum()) > 0.0:
+                    _rfg = self.resources
+                    _dep = getattr(_rfg, "deposit", None)
+                    if callable(_dep):
+                        # 13.5 约定接口（`[本地开发]` 在 ResourceField 侧提供，按容量封顶）
+                        _dep(self._flat[:P], _back)
+                    else:
+                        # 回退：就地写入 + 按容量封顶（语义等价；供接口未就绪时先跑通）
+                        np.add.at(_rfg._grid, self._flat[:P], _back)
+                        np.minimum(_rfg._grid, _rfg._capacity, out=_rfg._grid)
             # R141 P0：`intake_forage` = **真正进入能量的量**（已乘 `eat_efficiency`）。
             # 🔴 口径坑（我第一版就踩了）：若记"进胃的原始食物量"（未乘 3.0），
             #    `net = 收入 − 支出` 会**虚假为负**（实测 −0.23/人·tick，而个体显然活着）
@@ -2083,15 +2116,26 @@ class SphereEngine:
             self._recv_pend_cells = []
         eat_mult = 0.5 + genes[:, Gene.EAT_AMOUNT] * 1.0
         cap_mult = 0.5 + genes[:, Gene.STOMACH_CAP] * 1.5
-        stomach_cap = (
-            ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
-        )
+        # 🔴 13.5（S1）：**胃容量做成独立参数** —— 否则它会跟着 `max_energy` 一起变大，
+        #   把"体能↑、胃↓"两个意图互相抵消（R166 §三 坑②）。
+        #   `stomach_cap_mass <= 0`（默认）= 旧公式 ⇒ 逐位一致。`cap_mult` 仍按基因缩放。
+        _scm = float(getattr(ocfg, "stomach_cap_mass", 0.0) or 0.0)
+        if _scm > 0.0:
+            stomach_cap = _scm * cap_mult
+        else:
+            stomach_cap = (
+                ocfg.max_energy / max(1e-9, ocfg.eat_efficiency) * 0.5 * cap_mult
+            )
+        # 🔴 13.5（S2）：**进食阈值** —— 胃低于容量的该比例才进食（"不饿不吃"）。
+        #   默认 1.0 ⇒ 旧判定 `stomach < stomach_cap`（逐位一致）。
+        _eat_frac = float(getattr(ocfg, "eat_threshold_frac", 1.0) or 1.0)
+        _eat_gate = stomach_cap * _eat_frac
         # S2/S3 尸体—争夺（设计稿 §5.3/5.4）：开关只读一次，供 4.3/4.3b 复用
         _cwc_scav = getattr(self.config, "corpse_wound", None)
         # 13.4 波 2A（T2）：资源动态开关（note_tick/取食累计用；关档 = 零轨迹影响）
         _rd_on = bool(getattr(self._rd, "enabled", False))
-        if (stomach < stomach_cap).any():
-            eaters = np.flatnonzero(stomach < stomach_cap)
+        if (stomach < _eat_gate).any():
+            eaters = np.flatnonzero(stomach < _eat_gate)
             # R135 第 3 步 A-连续（2026-09-20）：**凸 trade-off** `forage_mult = (1−g16)^k`。
             #   k=0（默认）⇒ 下面的乘子恒 1 ⇒ **与旧版逐位一致**；
             #   k>1 ⇒ g16 高的个体**吃斑块的能力加速下降**（中间态杂食者最吃亏）。
@@ -3053,10 +3097,24 @@ class SphereEngine:
                                 if cb_mask.any():
                                     self._codebook[i, cb_mask] = self._codebook[j, cb_mask]
 
-        # 7) 死亡判定：饿死（energy<=0）→ 老死（age>=寿命）→ 被捕食
+        # 7) 死亡判定：饿死 → 老死 → 被捕食
         # 注意：统一用 Python 计算（不用 Rust 的 out_starved/out_expired），
         # 因为捕食（步骤 5.5）在 Rust stage2 之后才执行，会改变 energy。
-        starved = energy <= 0.0
+        # 🔴 13.5（S2 双阈值；默认 0.0 ⇒ 与旧版逐位一致）：
+        #   * **力竭** `energy < exhaust_frac×max_energy` ⇒ 死（**无论胃里有没有食**）
+        #   * **饿死** `energy < starve_frac×max_energy` **且胃空** ⇒ 死
+        #   为什么要两个（fish 09-23）：只留"能量低且胃空"会出现"抱着一肚子食物饿不死"
+        #   的僵尸态 ⇒ 必须有一个"无论胃"的更低阈值兜底。字段见 `OrganismConfig`。
+        _exh_frac = float(getattr(ocfg, "exhaust_frac", 0.0) or 0.0)
+        _stv_frac = float(getattr(ocfg, "starve_frac", 0.0) or 0.0)
+        if _exh_frac > 0.0 or _stv_frac > 0.0:
+            _z = np.zeros_like(energy, dtype=bool)
+            _exh = (energy < _exh_frac * ocfg.max_energy) if _exh_frac > 0.0 else _z
+            _stv = ((energy < _stv_frac * ocfg.max_energy)
+                    & (self._stomach[:P] <= 1e-9)) if _stv_frac > 0.0 else _z
+            starved = _exh | _stv
+        else:
+            starved = energy <= 0.0
         expired = (~starved) & (age_f >= life_span)
         dead = starved | expired | predation_mask
         deaths: Counter = Counter()
