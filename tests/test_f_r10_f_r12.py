@@ -183,3 +183,33 @@ def test_f_r13_regression_reported_failures_are_gone(tmp_path):
         assert rc == 0
     ticks = _ticks_of(out)
     assert len(ticks) == len(set(ticks)) and all(b > a for a, b in zip(ticks, ticks[1:]))
+
+
+# ------------------------------ F-R21/C5 家族：13.4 臂身份续跑一致性（Pre-Flight 2026-09-23）
+# 缺陷原型：`load_snapshot(config=None)` 配置由快照自带 ⇒ 段二命令行漏传/传错 13.4 开关
+# 会被**静默忽略**（不报错）⇒ 段二不知不觉跑成别的臂。修法：续跑检查补
+# subpos/resource_dynamics/cap/corpse/wound/perception_span 六项（与 l1/l2 同款）。
+
+def test_resume_rejects_13_4_arm_identity_mismatch(tmp_path):
+    """段二续跑时 13.4 臂身份开关与快照不符 ⇒ 硬失败（不许静默错臂）。"""
+    out = tmp_path / "t.csv"
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    base = [PY, str(ROOT / "experiments" / "a4_verify_capacity.py"),
+            "--mode", "on", "--arm", "main", "--seed", "42", "--ticks", "100",
+            "--max-count", "300", "--log-interval", "50",
+            "--snapshot-every", "50",
+            "--snapshot-dir", str(snap), "--out", str(out)]
+    assert subprocess.call(base, cwd=str(ROOT), stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) == 0, "段一（A 臂）应跑完"
+    # 段二传 corpse-enabled（与段一 A 臂不符）⇒ 硬失败
+    r = subprocess.run(base + ["--ticks", "200", "--corpse-enabled"],
+                       cwd=str(ROOT), capture_output=True, text=True)
+    assert r.returncode != 0, "臂身份冲突必须硬失败"
+    assert "corpse_enabled 冲突" in (r.stdout + r.stderr)
+    # 段二不传（与段一一致）⇒ 正常续跑
+    assert subprocess.call(base + ["--ticks", "200"], cwd=str(ROOT),
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) == 0, "一致续跑应 rc=0"
+    ticks = _ticks_of(out)
+    assert ticks[-1] == 200, "续跑应推进到 200"

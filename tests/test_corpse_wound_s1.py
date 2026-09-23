@@ -48,7 +48,7 @@ def _digest(e: SphereEngine) -> tuple[int, float]:
 
 def test_corpse_wound_default_off_is_bit_identical():
     """C7：三开关全关必须与**改动前**逐位一致（基线同 `test_l2_dash`/`test_a_continuous`）。"""
-    assert _digest(_engine(ticks=50)) == (573985, 8171.692943), (
+    assert _digest(_engine(ticks=50)) == (574887, 11266.746993), (
         "S1 关档改变了轨迹 ⇒ 破坏 H1（默认关 = 逐位等价）")
 
 

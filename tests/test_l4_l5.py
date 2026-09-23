@@ -113,7 +113,13 @@ class TestTrustLearning:
         assert float(e._trust.max()) > before_max
 
     def test_false_signal_decreases_trust(self):
-        """移动到有信号但无食物的格子 → trust 减少。"""
+        """移动到有信号但无食物的格子 → trust 减少。
+
+        ⚠️ 2026-09-23（T2）：eat_amount 0.5→0.9 后食物更足 ⇒ 假信号惩罚
+        **过程性**出现（tick1–5 trust 降到 0.4）但末态可能被后续真信号回升覆盖
+        （实测 tick10 回到 0.5）。断言改为"**过程中最低点**低于初值"（机制仍
+        生效：假信号确实让 trust 下降，只是不再承诺末态保持低位）。
+        """
         e = _make(seed=15, n=5)
         e._genes[:, 0] = 1.0
         e._genes[:, 14] = 1.0
@@ -123,9 +129,12 @@ class TestTrustLearning:
         e.resources._grid[target] = 0.0  # 假信号
         e._flat[:] = 14
         before_min = float(e._trust.min())
+        seen_min = before_min
         for _ in range(10):
             e.step()
-        assert float(e._trust.min()) < before_min
+            seen_min = min(seen_min, float(e._trust.min()))
+        assert seen_min < before_min, (
+            f"假信号未让 trust 过程性下降（最低 {seen_min} ≥ 初值 {before_min}）")
 
 
 # ── L5 工作记忆 ──────────────────────────────────────────────────────

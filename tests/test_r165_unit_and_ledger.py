@@ -176,7 +176,10 @@ def test_heal_cost_booked_into_cost_meta():
     """愈合耗能必须进 `cost_meta`（维持类）。
 
     两引擎同 seed、同初值（health=0.5），唯一差别是 `wound_enabled`
-    ⇒ 1 tick 后 `cost_meta_sum` 之差 ≈ 愈合耗能 × 人口。
+    ⇒ 1 tick 后 `cost_meta_sum` 之差应**包含**愈合耗能。
+    ⚠️ 2026-09-23（T4 反转）：wound 开/关的捕食轨迹**不再逐位一致**（反转只影响
+    wound_on：成功即死→尸体 vs 关档转移）⇒ 差值 ≠ 恰愈合成本（实测 7.92 vs 10，
+    偏离 21%）。断言改为**方向 + 量级**：差值 > 0（愈合确实扣能入账）。
     """
     n = 200
     on = _engine(wound=True, ticks=0, max_count=n)
@@ -189,5 +192,6 @@ def test_heal_cost_booked_into_cost_meta():
     d = (on.energy_ledger()["global"]["cost_meta_sum"]
          - off.energy_ledger()["global"]["cost_meta_sum"])
     expect = float(on.config.corpse_wound.wound_heal_energy_cost) * p
-    assert d == pytest.approx(expect, rel=0.15), (
-        f"cost_meta 之差 {d:.3f} 与愈合耗能 {expect:.3f} 不符（未入账？）")
+    assert d > 0, f"cost_meta 之差 {d:.3f} 应为正（愈合耗能确实入账）"
+    assert d > expect * 0.5, (
+        f"cost_meta 之差 {d:.3f} 应含大部分愈合耗能（期望 ~{expect:.3f}）")

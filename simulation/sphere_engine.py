@@ -64,6 +64,8 @@ from world.subpos import (
     init_from_flat as _sub_init,
     speed_steps as _sub_steps,
 )
+# 13.4 波 2A：斑块休耕—死亡—轮作（T2，本线 = [云端·开发]）。收编件（0207aa5），纯逻辑、零引擎依赖。
+from world.resource_dynamics import ResourceDynamics as _ResourceDynamics
 
 
 def codebook_init_rows(n_rows: int, alphabet: str) -> NDArray[np.uint8]:
@@ -378,6 +380,21 @@ class SphereEngine:
         "_run_slow_n",        # Σ 移动者中 steps==0（"白移动"）的个体数
         "_run_mover_sub_n",   # Σ 移动者数（分母）
         "_steps_hist",        # 各步长档计数（形状 subdiv+1）
+        # ---- 13.4 波 2A：资源动态（T2，本线 = [云端·开发]）----
+        # 🔴 __slots__ 硬约束：新属性必须登记（加在块尾，减少同文件并发冲突面）。
+        "_rd",                # ResourceDynamics 实例（收编件 world/resource_dynamics.py）
+        "_rd_intake_sum",     # 本 tick 每格被吃量累计（note_tick 输入，逐 tick 重建）
+        "_rd_growth_sum",     # 本 tick 每格名义再生量累计（note_tick 输入，逐 tick 重建）
+        # ---- 13.4 波 2B（T3，本线 = [云端·开发]）：F1 修复 / span / cap ----
+        "_nb_len",            # 每格**实际邻居数**（F1 修复的分母；span=1 语义）
+        "_nb_norm",           # densities 归一化除数（"auto"=逐格实际邻居数，数字=冻结常量）
+        "_span_table",        # span=2 邻居表（ring1+ring2 合并；span=1 = None）
+        "_span_len",          # 每格 span 候选数（span=1 = 实际邻居数）
+        "_span_eff2",         # 每格是否生效 2 圈（F3 闸：>cap ⇒ False = 降级 1 圈）
+        "_span_cap",          # F3 闸阈值（perception_cap）
+        # cap 读数（T3）：满格剔除计数 / 留本格兜底计数
+        "_cap_blocked_n",     # Σ 因满格被剔除的候选选择（cap 生效时的决策数）
+        "_cap_stay_n",        # Σ 全候选满 ⇒ 留本格的个体数（兜底）
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -498,6 +515,50 @@ class SphereEngine:
         for c in range(n_cells):
             nbs = self.world.neighbors(c)
             self._nb_table[c, :len(nbs)] = nbs
+        # 🔴 F1 修复（任务书 T3，C9 型缺陷）：**每格实际邻居数**（span=1 语义）。
+        #   此前 `densities` 用 `_nb_table.shape[1]`（= stride 120）当分母 ⇒ 社交项被
+        #   静默弱化 15×（注释写"0~8"但代码除 120）。改为逐格实际邻居数（众数 8、
+        #   极区 120）⇒ 社交项恢复应有量级 = **构造级变更**（digest 变，须同步测试）。
+        #   ⚠️ 只在 `social_norm="auto"` 时生效；数字串 ⇒ 冻结常量（兼容设计稿提议）。
+        self._nb_len = np.array(
+            [int((self._nb_table[c] >= 0).sum()) for c in range(n_cells)],
+            dtype=np.float64,
+        )
+        _snorm0 = str(getattr(config.simulation, "social_norm", "auto"))
+        if _snorm0 != "auto":
+            try:
+                self._nb_norm = np.full(
+                    n_cells, float(_snorm0), dtype=np.float64)
+            except ValueError:
+                self._nb_norm = self._nb_len.copy()
+        else:
+            self._nb_norm = self._nb_len.copy()
+        # ── 13.4 波 2B（T3）：span 感知邻居表（perception_span=2 ⇒ ring1+ring2 合并）──
+        # span=1（默认）⇒ **不建表、走原路径**（逐位等价）；span=2 ⇒ 两圈候选（球面跳数，
+        # 普通格 24、极区 240 —— 后者由 `_perception_cap` 降级为 1 圈，见移动段）。
+        # 🔴 只被 Python 移动分支消费；use_sim_core + span=2 ⇒ 构造期 H3 硬报错。
+        _span0 = int(getattr(config.simulation, "perception_span", 1))
+        self._span_table = None
+        if _span0 == 2:
+            _span_rows: list[np.ndarray] = []
+            for c in range(n_cells):
+                one = [int(x) for x in self.world.neighbors(c)]
+                two: set[int] = set(one)
+                for d in one:
+                    two.update(int(x) for x in self.world.neighbors(d))
+                two.discard(c)
+                _span_rows.append(np.fromiter(sorted(two), dtype=np.int64))
+            _span_stride = max(int(max(len(r) for r in _span_rows)), 8)
+            self._span_table = np.full((n_cells, _span_stride), -1, dtype=np.int64)
+            for c, r in enumerate(_span_rows):
+                self._span_table[c, :len(r)] = r
+            self._span_len = np.array([len(r) for r in _span_rows], dtype=np.int64)
+            # F3 闸（设计稿 §一）：ring1+2 规模 > cap ⇒ 该格 `span_eff=1`（降级不是报错）
+            self._span_cap = int(getattr(config.simulation, "perception_cap", 32))
+            self._span_eff2 = self._span_len <= self._span_cap
+        else:
+            self._span_len = self._nb_len.astype(np.int64)
+            self._span_eff2 = np.ones(n_cells, dtype=bool)
 
         # ── R146/R149 L2：**strict 2 圈**候选表（CSR；构造期一次）──────────────────
         # 语义：2 跳可达、去掉自身与 1 圈（球面拓扑用**跳数**，**不套 5×5 方窗**；
@@ -561,6 +622,28 @@ class SphereEngine:
                     "两个读数互相污染 ⇒ 归因不干净。请二选一"
                     "（建议 subpos：speed_max=2.0 已包含 L2 的冲刺语义）。"
                 )
+        # ── H3（13.4 波 2A）：资源动态（休耕—死亡—轮作）开启时必须 **fail-loud** ────
+        # 本机制只在 Python 路径实现（§14.7：新机制/非确定性强制 Python，不动 Rust）⇒
+        # use_sim_core=True 时开启会**静默走旧再生路径**（开关开了行为却不变 = 静默
+        # no-op 的同族形态）⇒ 构造期硬报错。
+        _rdcfg0 = getattr(config, "resource_dynamics", None)
+        if _scfg0.use_sim_core and bool(getattr(_rdcfg0, "enabled", False)):
+            raise NotImplementedError(
+                "resource_dynamics（斑块休耕—死亡—轮作）尚未下沉 Rust："
+                "use_sim_core=True 时开启会**静默走旧再生路径**（开关开了行为却不变"
+                " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
+                "（§14.7：新机制强制 Python 路径）。"
+            )
+        # ── H3（13.4 波 2B，T3）：perception_span=2 开启时必须 **fail-loud** ──────
+        # span=2 需要两圈邻居表（`_span_table`），只在 Python 移动路径实现 ⇒
+        # use_sim_core=True 时开启会**静默走 1 圈旧路径**（开关开了视野却没扩 = 静默
+        # no-op 的同族形态）⇒ 构造期硬报错。
+        if _scfg0.use_sim_core and int(getattr(_scfg0, "perception_span", 1)) == 2:
+            raise NotImplementedError(
+                "perception_span=2（两圈感知）尚未下沉 Rust：use_sim_core=True 时开启"
+                "会**静默走 1 圈旧路径**（开关开了视野却没扩 = 静默 no-op 的同族形态）"
+                "⇒ 硬报错。请设 use_sim_core=False（§14.7：新机制强制 Python 路径）。"
+            )
         # ── H3（设计稿 §5.1 / §2.5）：尸体—食腐 + 血条开关开启时必须 **fail-loud** ────
         # 本任务全程 Python 路径（§14.7：新机制/非确定性 ⇒ 强制 Python，不动 Rust）⇒
         # use_sim_core=True 时开启 corpse/wound/contest 会**静默走旧路径**（开关开了
@@ -587,6 +670,17 @@ class SphereEngine:
         self._run_slow_n = 0          # Σ 移动者中 steps==0（"白移动"）的个体数
         self._run_mover_sub_n = 0     # Σ 移动者数（主判据分母）
         self._steps_hist = np.zeros(_subdiv0 + 1, dtype=np.int64)
+        # ---- 13.4 波 2A：资源动态（T2，本线 = [云端·开发]）----
+        # 构造期从 ResourceField 读斑块掩码/容量/倍率（**只读**，不碰引擎状态）。
+        # 关档时 `_rd.enabled=False` ⇒ 全部方法 no-op ⇒ 引擎无条件调用也不进新路径（C7）。
+        _rdcfg0 = getattr(config, "resource_dynamics", None)
+        self._rd = _ResourceDynamics.from_field(
+            _rdcfg0, self.resources, self.world)
+        self._rd_intake_sum = np.zeros(self.world.n_cells, dtype=np.float64)
+        self._rd_growth_sum = np.zeros(self.world.n_cells, dtype=np.float64)
+        # 13.4 波 2B（T3）：cap 读数计数器（关档不累加 ⇒ probe None/0 口径）
+        self._cap_blocked_n = 0
+        self._cap_stay_n = 0
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
         )
@@ -1373,6 +1467,59 @@ class SphereEngine:
             "steps_frac": ([round(float(x) / tot, 6) for x in hist] if tot else None),
         }
 
+    # ---- 13.4 波 2A：资源动态读数（T2，本线 = [云端·开发]）-------------------
+
+    def resource_dynamics_probe(self) -> dict | None:
+        """斑块休耕—死亡—轮作读数（R176 §12.5 四条 + conservation 自检）。
+
+        🔴 **关档返回 `None`（未适用），不是 0**（R120 口径铁律：没测到 ≠ 测出零）。
+        由 `world.resource_dynamics.ResourceDynamics.probe()` 提供四条：
+        `dead_cell_frac` / `resting_cell_frac` / `patch_kill_n` / `patch_reborn_n`
+        + `mean_capacity_effective`；`conservation_check()` 随 summary 落盘（恒应过）。
+        """
+        if not bool(getattr(self._rd, "enabled", False)):
+            return None
+        return self._rd.probe()
+
+    def resource_dynamics_conservation(self) -> dict | None:
+        """两条构造期守恒自检（Σcapacity 与面积加权再生倍率，应恒 ≈1）。
+
+        关档 ⇒ None（未适用）。随 summary 落盘供 `[所有者]` 事后抽验。
+        """
+        if not bool(getattr(self._rd, "enabled", False)):
+            return None
+        return self._rd.conservation_check()
+
+    # ---- 13.4 波 2B：视野/单格上限读数（T3，本线 = [云端·开发]）----------------
+
+    def wave2b_probe(self) -> dict:
+        """T3 读数：span 降级 / cap 触发 / 候选数（关档口径 = 0 或 None 区分）。
+
+        🔴 关档（span=1 且 cap 关）⇒ 计数恒 0（未观测），与"测到 0"分开：
+        `span_downgrade_frac` 关档返回 None（未适用）；`cap_blocked_n`/`cap_stay_n`
+        恒 0（未触发即 0，因 cap 开关默认关 ⇒ 路径不进）。
+        """
+        P = len(self._id)
+        _sim = self.config.simulation
+        _span2 = int(getattr(_sim, "perception_span", 1)) == 2
+        _cap_on = bool(getattr(_sim, "cell_occupancy_cap_enabled", False))
+        return {
+            "perception_span": int(getattr(_sim, "perception_span", 1)),
+            "cell_occupancy_cap": int(getattr(_sim, "cell_occupancy_cap", 3)),
+            "cell_occupancy_cap_enabled": _cap_on,
+            "social_norm": str(getattr(_sim, "social_norm", "auto")),
+            "span_downgrade_frac": (
+                round(float((~self._span_eff2).mean()), 6) if _span2 else None
+            ),
+            "cap_blocked_n": int(self._cap_blocked_n) if _cap_on else 0,
+            "cap_stay_n": int(self._cap_stay_n) if _cap_on else 0,
+            "mean_candidates_per_decision": (
+                round(float(self._span_len.mean()), 3) if _span2 else None
+            ),
+            "note": "span=1 ⇒ span_downgrade/mean_candidates = None（未适用）；"
+                    "cap 关 ⇒ blocked/stay = 0（路径不进，非测出零）",
+        }
+
     def l2_probe(self) -> dict | None:
         """L2 机动层读数（R150 B4；本段 = [本地开发] 线）。
 
@@ -1631,7 +1778,16 @@ class SphereEngine:
         # 顺序契约：先资源再生，再种群行动
         # uniform：Rust regrow（3.2）；patchy：Rust regrow_patchy（L7e，含空间倍率守恒）。
         #   旧版 .pyd 没有 regrow_patchy 时特性检测回退 Python，保证双路径不炸。
-        if self._use_sim_core and self.resources.distribution == "uniform":
+        _rd_on = bool(getattr(self._rd, "enabled", False))
+        if _rd_on:
+            # 13.4 波 2A（T2）：资源动态**强制 Python 路径**（H3 已拦 use_sim_core）。
+            # 再生闸：休耕/死亡格再生乘子 = 0；其余 = 1（enabled=False ⇒ 全 1 = 逐位等价）。
+            self._rd_intake_sum[:] = 0.0          # 逐 tick 重建 intake（note_tick 输入）
+            self._rd_growth_sum = self.resources._regrowth_amount(self._tick)
+            growth = self._rd_growth_sum * self._rd.growth_multiplier()
+            np.minimum(self.resources._capacity, self.resources._grid + growth,
+                       out=self.resources._grid)
+        elif self._use_sim_core and self.resources.distribution == "uniform":
             # 3.4：资源再生长沉到 Rust（与 ResourceField.regrow 逐位等价，
             # 默认 temp_sensitivity=1.0 时严格一致；≠1 有 ≤1-ULP 差异）
             self._sim_core.regrow(
@@ -1670,6 +1826,19 @@ class SphereEngine:
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
+        # 13.4 波 2A（T2）：每 tick 末轮作（死格重入候选池 + 斑块加成同行搬移 + 反荒漠化闸）
+        # + 按当前掩码**重算** `_capacity`（`_capacity` 是基准 ⇒ 动态折扣走 `capacity_multiplier`）。
+        # 🔴 `rand_u` 消费只在开档发生（关档 rotate 直接返回 ⇒ 零 RNG 影响）。
+        if _rd_on:
+            n_patch = int(self.resources._patch_mask.sum()) if (
+                self.resources._patch_mask is not None) else 0
+            self._rd.rotate(self._tick, self.rng.random(max(1, n_patch)))
+            self.resources._capacity[:] = self._rd.capacity_from_base()
+            # 🔴 轮作会搬移斑块掩码 ⇒ 必须回写 `ResourceField._patch_mask`，
+            #    否则 `_regrowth_amount` 的斑块倍率 / 尸体 patch_boost 仍用旧掩码
+            #    （双掩码漂移 = I2 同族：两处规则不一致 ⇒ 归因不干净）。
+            if self.resources._patch_mask is not None:
+                self.resources._patch_mask[:] = self._rd._mask
         # 能量封顶（R144；`7516ba9` 引入 → 2026-09-21 补开关/测试/冒烟/纪元声明）
         # 关（默认）⇒ **与 E-017~E-031/calib1 逐位一致**（旧纪元）；开 ⇒ 新纪元（禁跨比）。
         if self.config.organisms.energy_cap_enabled:
@@ -1750,11 +1919,21 @@ class SphereEngine:
 
         # 温度相关量（一次算出全种群的那份，避免反复调用）
         activity = self.light.activity_factor(self._flat, self._tick)
+        # 13.4 波 2B（T3）：span/cap 开关在**函数级**定义（移动段 Nm=0 时也需捕食段可用）
+        _span2_on = (int(getattr(self.config.simulation,
+                                 "perception_span", 1)) == 2)
+        _cap_on = bool(getattr(self.config.simulation,
+                               "cell_occupancy_cap_enabled", False))
+        _cap_val = int(getattr(self.config.simulation,
+                               "cell_occupancy_cap", 3))
 
         # S2 血条/尸体（设计稿 §2.3 H2 / §5.3）：`wound_enabled` 开关 + 参数。
         # 构造期已由 H3 保证：开 + use_sim_core=True ⇒ 硬报错 ⇒ 此处仅在 Python 路径消费。
         _cwc_pred = getattr(self.config, "corpse_wound", None)
         _wound_on = bool(getattr(_cwc_pred, "wound_enabled", False))
+        # 13.4 波 3（T4）：击杀能量进尸体的门控 = `corpse_enabled`（T4 反转后
+        # 捕食收益走尸体通道；corpse 关 ⇒ 旧 transfer 兜底守恒）
+        _corpse_on_tick = bool(getattr(_cwc_pred, "corpse_enabled", False))
 
         genes = self._genes[:P]
         energy = self._energy[:P]
@@ -1909,6 +2088,8 @@ class SphereEngine:
         )
         # S2/S3 尸体—争夺（设计稿 §5.3/5.4）：开关只读一次，供 4.3/4.3b 复用
         _cwc_scav = getattr(self.config, "corpse_wound", None)
+        # 13.4 波 2A（T2）：资源动态开关（note_tick/取食累计用；关档 = 零轨迹影响）
+        _rd_on = bool(getattr(self._rd, "enabled", False))
         if (stomach < stomach_cap).any():
             eaters = np.flatnonzero(stomach < stomach_cap)
             # R135 第 3 步 A-连续（2026-09-20）：**凸 trade-off** `forage_mult = (1−g16)^k`。
@@ -1937,6 +2118,10 @@ class SphereEngine:
             else:
                 taken = self.resources.consume_many(self._flat[eaters], want)
             stomach[eaters] += taken
+            # 13.4 波 2A（T2）：每格被吃量**质量**累计（note_tick 的 intake 输入；
+            # 关档 `_rd_intake_sum` 不消费 ⇒ 零轨迹影响）。
+            if _rd_on:
+                np.add.at(self._rd_intake_sum, self._flat[eaters], taken)
             # 内评 §三 观察项 1（接收侧净能量效应）：**实测**成交落点上的摄入，并同时
             # 记「全体进食者」的平均摄入作基线（= "不通信者"的参照）。
             # ⚠️ 按 **cell** 键控（非个体）：同格多人时会把他们的摄入一并计入 ⇒ 属近似，
@@ -1968,6 +2153,9 @@ class SphereEngine:
                 else:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
+                # 13.4 波 2A（T2）：邻格取食同样计入 per-cell intake（质量单位）。
+                if _rd_on:
+                    np.add.at(self._rd_intake_sum, targets, taken2)
             # 4.3b) S3 争夺食物战（设计稿 §2.3 H3/H4 项 6；`contest_enabled`）：同一格/邻格
             #       有他人正在取食（`eaters` = 本 tick 取食者）⇒ 高 g16 者可驱逐
             #       （RHP + 持有者优势 + 升级阈值 + 撤退）。🔴 确定性数值（零 RNG）。
@@ -1978,6 +2166,13 @@ class SphereEngine:
         #      尸体**入胃**（受胃容量限）。🔴 确定性数值（无 RNG 消费）⇒ 关档零轨迹影响。
         if bool(getattr(_cwc_scav, "corpse_enabled", False)):
             self._step_scavenging(P, stomach, stomach_cap, genes)
+
+        # 4.3c) 13.4 波 2A（T2）：取食结算后记 `note_tick`（休耕 + 判死）。
+        #       `_rd_intake_sum` = 本 tick 每格**被吃量**（质量单位；果实+邻格取食累加，
+        #       食腐写胃不入 note_tick —— 尸体不是"本格活再生"的取食压力）。
+        #       🔴 与 `_rd_growth_sum`（regrow 段已存的本 tick 名义再生）配对。
+        if _rd_on:
+            self._rd.note_tick(self._rd_intake_sum, self._rd_growth_sum, self._tick)
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
         cur_flat = self._flat[:P]
@@ -2104,13 +2299,12 @@ class SphereEngine:
                     self.resources._capacity, 1e-9
                 )
                 sig_present = (self.signals._marks > 0).astype(np.float64)
-                # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
-                # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
-                # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                # D0 修复：群居项量纲归一化 + 🔴 F1 修复（T3）：分母 = **每格实际邻居数**
+                # （`_nb_norm`），不再是 stride(120)。注释此前写"0~8"但代码除 120 ⇒ 社交项
+                # 被静默弱化 15×（C9 型缺陷）。构造级变更（digest 变，已同步测试）。
                 # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
-                nb_max = float(self._nb_table.shape[1])
                 smw = self.config.simulation.social_move_weight
-                densities = occ.astype(np.float64) / nb_max * smw
+                densities = occ.astype(np.float64) / self._nb_norm * smw
                 signal_marks = self.signals._marks.astype(np.uint8)
                 # 预生成随机选择（得分无差异时用），按移动个体顺序
                 rand_choice = self.rng.integers(
@@ -2210,13 +2404,11 @@ class SphereEngine:
                     self.resources._capacity, 1e-9
                 )
                 sig_present = (self.signals._marks > 0).astype(np.float64)
-                # D0 修复：群居项量纲归一化（按邻居上限 8 归一化 + 权重），
-                # 避免未归一化 bincount(0~8) 压过感知/信号项(0~1)（外部评估 D5/元宝 C4）。
-                # 仅移动决策消费此数组；signal_emit/pleasure_update 各自独立计算不受影响。
+                # D0 修复：群居项量纲归一化 + 🔴 F1 修复（T3）：分母 = **每格实际邻居数**
+                # （`_nb_norm`），不再是 stride(120)。同上（Python 移动分支）。
                 # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
-                nb_max = float(self._nb_table.shape[1])
                 smw = self.config.simulation.social_move_weight
-                densities = occ.astype(np.float64) / nb_max * smw
+                densities = occ.astype(np.float64) / self._nb_norm * smw
                 rand_choice = self.rng.integers(
                     0, 1_000_000, size=Nm, dtype=np.int64
                 )
@@ -2295,6 +2487,13 @@ class SphereEngine:
                 d2_asym = ifcfg3.enabled and ifcfg3.perception_radius == 4
                 d2_noise = ifcfg3.enabled and ifcfg3.perception_noise > 0
                 d2_softmax = ifcfg3.enabled and ifcfg3.softmax_tau > 0
+                # 13.4 波 2B（T3）：span=2 开关（只 Python 路径，H3 已拦 Rust）+ cap 开关
+                _span2_on = (int(getattr(self.config.simulation,
+                                         "perception_span", 1)) == 2)
+                _cap_on = bool(getattr(self.config.simulation,
+                                       "cell_occupancy_cap_enabled", False))
+                _cap_val = int(getattr(self.config.simulation,
+                                       "cell_occupancy_cap", 3))
                 # B1：R2 声誉权重（0=关闭 → sig_weight 恒 0.5，与旧版逐位一致）
                 rep_w = ifcfg3.reputation_weight if ifcfg3.enabled else 0.0
                 # A′ 记忆朝向梯度（2026-09-19）：**不**受 `enabled` 门控 —— 与 ⑥ 探针同规格，
@@ -2307,10 +2506,17 @@ class SphereEngine:
                     # ⚠️ 禁用 nb[:4]：8 邻列序以 [上左,上,上右,左] 打头，取"前4个"
                     # 实际只保留"北+西" → 个体永不能向南/东移动，种群被单向驱赶至极区、
                     # 招募崩塌（见 docs/决策与评审/A4-崩溃溯源报告-20260912.md）。
-                    if d2_asym:
-                        nb = self.world.neighbors_von_neumann(int(self._flat[idx]))
+                    # 13.4 波 2B（T3）：span=2 ⇒ 候选 = ring1+ring2（`_span_table`）；
+                    #   F3 闸：该格 ring1+2 > cap ⇒ 降级为 1 圈（`_span_eff2` 为 False）。
+                    #   span=1（默认）⇒ **走原路径**（逐位等价）。
+                    _cell_i = int(self._flat[idx])
+                    if _span2_on and self._span_eff2[_cell_i]:
+                        _row = self._span_table[_cell_i]
+                        nb = _row[_row >= 0]
+                    elif d2_asym:
+                        nb = self.world.neighbors_von_neumann(_cell_i)
                     else:
-                        nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
+                        nb = np.asarray(self.world.neighbors(_cell_i))
                     if len(nb) == 1:
                         targets[i] = nb[0]
                         continue
@@ -2343,8 +2549,9 @@ class SphereEngine:
                                 self._mem_grad_trig += 1
                             score = score + mem_grad_gain * perc * g
                     elif len(valid_mem) > 0:
-                        # 原式（**严格不动**：`0.3` 字面量，保与旧版逐位一致）
-                        mem_in_nb = np.isin(nb, valid_mem)
+                        # 整数成员判断：广播比较替代 np.isin（valid_mem≤4，结果 bool
+                        #   逐位一致；profile 移动段热点）。`0.3` 字面量严格不动。
+                        mem_in_nb = (nb[:, None] == valid_mem[None, :]).any(axis=1)
                         score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
                     nb_sigs = self.signals._marks[nb]
                     if (nb_sigs > 0).any():
@@ -2399,11 +2606,31 @@ class SphereEngine:
                         if len(_danger_h) > 0:
                             _cos_h = self._memory_orientation_cos(
                                 int(self._flat[idx]), nb, _danger_h)
-                            _fh = (float(_cwc_pred.w_fear_health) * perc
-                                   * (1.0 - float(self._health[idx]))) * _cos_h
-                            score = score - _fh
-                            if float(_fh.max() - _fh.min()) < 1e-12:
-                                self._fearh_flat_n += 1
+                            # 🔴 13.4 波 3（T4，fish 01:20 批准）：恐惧**带门槛连续** ——
+                            #    `1 − health < 0.3` 才触发（受轻伤不恐惧，重伤才怕）。
+                            #    `_wound_fear_threshold` 默认 0.3（config 字段）。
+                            _inj = 1.0 - float(self._health[idx])
+                            if _inj >= float(getattr(_cwc_pred, "wound_fear_threshold", 0.3)):
+                                _fh = (float(_cwc_pred.w_fear_health) * perc * _inj) * _cos_h
+                                score = score - _fh
+                                if float(_fh.max() - _fh.min()) < 1e-12:
+                                    self._fearh_flat_n += 1
+                    # ── 13.4 波 2B（T3）：单格个体上限（score 层剔除满格）──────
+                    # 🔴 三条硬约束（任务书 T3 / 设计稿 §2.4）：
+                    #   1. **只约束"进入"，不约束"留在"**：候选 = 本格（steps=0）不受限。
+                    #      ⚠️ 本段 `nb` 不含自身（移动候选从邻居取）⇒ 天然满足。
+                    #   2. 满格候选 score = −inf；**若全部候选 −inf ⇒ 留本格**（兜底，
+                    #      计 `_cap_stay_n`，不收移动费）⇒ cap 永不因"平局回退"被破坏。
+                    #   3. `occ` = 移动前占用（信号段已算）⇒ 零额外成本。
+                    if _cap_on:
+                        _crowded = occ[nb] >= _cap_val
+                        if _crowded.any():
+                            score = np.where(_crowded, -np.inf, score)
+                            self._cap_blocked_n += 1
+                        if not np.isfinite(score).any():
+                            targets[i] = _cell_i       # 全满 ⇒ 留本格（兜底）
+                            self._cap_stay_n += 1
+                            continue
                     # D2-3 softmax：温度采样替代argmax（tau=0时回退argmax）
                     if d2_softmax:
                         exp_s = np.exp((score - score.max()) / ifcfg3.softmax_tau)
@@ -2457,7 +2684,13 @@ class SphereEngine:
                     # 位置：**在 score/softmax 之后** ⇒ `u = self.rng.random()` 仍按个体消费
                     # ⇒ 每 tick 随机抽取数与关档**逐字一致**（H2/H1 的形状要求）。
                     # 代价：冲刺者白算一次 score（换取随机流形状不变 —— 值得）。
-                    if _l2_on and dash[i]:
+                    # 🔴 13.4 波 2B（T3）去两段式盲选（R148 偏离 2 的前提消失）：
+                    #   span=2 ⇒ ring2 已纳入候选、按 score 选过 ⇒ **跳过盲选覆盖**
+                    #   （保留 score 选出的目标）；span=1 ⇒ 维持旧盲选（逐位等价）。
+                    # 🔴 cap 开（任务书 T3 §5"L2 冲刺目标同理排除"）：盲选 far 候选
+                    #   **不会剔除满格** ⇒ cap 开时同样跳过盲选覆盖（保留 score 目标，
+                    #   score 层已剔除满格）⇒ 冲刺目标永不落满格（本格兜底不受限）。
+                    if _l2_on and dash[i] and not _span2_on and not _cap_on:
                         _c = int(self._flat[idx])
                         _fl = int(self._far_len[_c])
                         targets[i] = int(self._far_cells[
@@ -2587,9 +2820,35 @@ class SphereEngine:
             #   （能力导向 vs 资产保护）。k=0（D 臂）⇒ 退化为原式（逐位不变）。
             _need_k = float(getattr(_cwc_pred, "need_aggression_k", 0.0)) if _wound_on else 0.0
             attack_prob = attack_gene * pcfg.attack_prob_coef * hunger * (1.0 + _need_k * hunger)
-            attackers = np.flatnonzero(
-                (attack_gene > pcfg.attack_gene_gate) & (self.rng.random(P) < attack_prob)
-            )
+            # 🔴 13.4 波 2B（T3）"看见才出手"：span=2 ⇒ 出手须**视野内有猎物**。
+            #   猎物代理 = 低 g16（≤ attack_gene_gate）个体；视野 = span 圈（`_span_table`
+            #   聚合，降级格用 1 圈）。⚠️ 只在 span=2 生效（span=1 逐位等价）。
+            #   `_vis` 是格域 bincount ⇒ 零新增 RNG 抽取（H2 保持：`rng.random(P)` 仍全量消费）。
+            if _span2_on:
+                # 视野内猎物场（格域）：每个低 g16 个体把 +1 加到"能看见它的格"
+                # （= 它所在格的 span 圈邻居；降级格用 1 圈）。零新增 RNG。
+                _seen = np.zeros(self.world.n_cells, dtype=np.int64)
+                _low16 = genes[:P, Gene.AGGRESSION] <= float(pcfg.attack_gene_gate)
+                _low_cells = self._flat[:P][_low16]
+                for c in np.unique(_low_cells):
+                    if self._span_eff2[c]:
+                        r = self._span_table[c]
+                        nb_c = r[r >= 0]
+                    else:
+                        nb_c = np.asarray(self.world.neighbors(int(c)))
+                    np.add.at(_seen, nb_c, int((_low_cells == c).sum()))
+                _vis = _seen
+            if _span2_on:
+                attackers = np.flatnonzero(
+                    (attack_gene > pcfg.attack_gene_gate)
+                    & (self.rng.random(P) < attack_prob)
+                    & (_vis[self._flat[:P]] > 0)
+                )
+            else:
+                attackers = np.flatnonzero(
+                    (attack_gene > pcfg.attack_gene_gate)
+                    & (self.rng.random(P) < attack_prob)
+                )
         else:
             # S2 off（PC-1 单营养级构造）：**跳过攻击者选择**（连 RNG 抽取一起跳过 ⇒
             # 新配置的 RNG 轨迹，与 enabled=True 的 run 不逐位可比——预期，非缺陷）。
@@ -2683,11 +2942,30 @@ class SphereEngine:
                         pcfg.success_floor, pcfg.success_ceil,
                     )
                     if rand_success[k] < success_rate:
-                        # S2 H2（设计稿 §2.3）：wound_enabled 时捕食 = **消耗战** ——
-                        # 成功命中 ⇒ 目标 `health −= Δ`（Δ = wound_base×(0.5+0.5×攻击性)），
-                        # `health ≤ 0` 才死（死因仍记 PREDATION）⇒ 一次咬不死、猎物变弱
-                        # 更易再被咬（分期付款）。🔴 不新增 RNG 抽取（rand_success 已在
-                        # 循环外抽好）⇒ 关档（旧路径）RNG 形状不变（C7）。
+                        # 🔴 13.4 波 3（T4，fish 00:20 裁定，与 S2 相反）：血条语义反转
+                        #   **成功 ⇒ 一击毙命**（猎物能量进尸体，**不直接转移给攻击者**）；
+                        #   **失败 ⇒ 扣猎物血条**（致伤，health≤0 才死）。
+                        # 🔴 守恒（红线）：击杀能量进尸体受 `corpse_enabled` 门控 ——
+                        #    corpse 开 ⇒ 由 7.5 投尸（能量冻结为尸体，可审计）；
+                        #    corpse 关 ⇒ 沿用旧 `transfer_ratio` 转移（不消失，保持
+                        #    能量守恒审计通过）。攻击者**总是**付出手成本（循环上已扣）。
+                        predation_mask[prey] = True
+                        self._ec_prey_e_sum += float(energy[prey])
+                        self._ec_prey_kill_n += 1
+                        self._duel["kills"] += 1
+                        if not _corpse_on_tick:
+                            # corpse 关 ⇒ 旧转移（守恒兜底；T4 反转的"进尸体"不可用）
+                            _tr = float(energy[prey]) * pcfg.transfer_ratio
+                            energy[idx] += _tr
+                            _pred_i.append(idx)
+                            _pred_amt.append(_tr)
+                            stomach[idx] = np.minimum(
+                                stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
+                                ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
+                            )
+                        stomach[prey] = 0.0
+                    else:
+                        # 失败 ⇒ 扣猎物血条（致伤）；health ≤ 0 ⇒ 致死（能量进尸体）
                         if _wound_on:
                             _delta = float(_cwc_pred.wound_base) * (
                                 0.5 + 0.5 * float(attack_gene[idx])
@@ -2696,22 +2974,25 @@ class SphereEngine:
                             self._wound_n += 1
                             self._duel["wounds"] += 1
                             if self._health[prey] > 0.0:
-                                continue   # 未死：不转移能量（猎物保留资源，下轮可再被咬）
-                            # health ≤ 0 ⇒ 致死（走下方原击杀结算）
-                        predation_mask[prey] = True
-                        # R141：ΣE_prey（**击杀瞬间**的猎物能量）——解 `transfer*` 的关键输入
-                        self._ec_prey_e_sum += float(energy[prey])
-                        self._ec_prey_kill_n += 1
-                        _tr = float(energy[prey]) * pcfg.transfer_ratio
-                        energy[idx] += _tr
-                        _pred_i.append(idx)
-                        _pred_amt.append(_tr)
-                        self._duel["kills"] += 1
-                        stomach[idx] = np.minimum(
-                            stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
-                            ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
-                        )
-                        stomach[prey] = 0.0
+                                continue   # 未死：猎物保留资源，下轮可再被咬
+                            # health ≤ 0 ⇒ 致死（predation_mask 置 True，能量进尸体）
+                            predation_mask[prey] = True
+                            self._ec_prey_e_sum += float(energy[prey])
+                            self._ec_prey_kill_n += 1
+                            self._duel["kills"] += 1
+                            if not _corpse_on_tick:
+                                _tr = float(energy[prey]) * pcfg.transfer_ratio
+                                energy[idx] += _tr
+                                _pred_i.append(idx)
+                                _pred_amt.append(_tr)
+                                stomach[idx] = np.minimum(
+                                    stomach[idx] + stomach[prey] * pcfg.stomach_transfer,
+                                    ocfg.max_energy / max(1e-9, ocfg.eat_efficiency),
+                                )
+                            stomach[prey] = 0.0
+                        else:
+                            # 旧路径（wound 关）：失败 = 无事（猎物逃过）
+                            pass
                 # R141 P0：捕食侧两条通道（出手成本 / 掠得能量）——循环外统一记账
                 if _atk_amt:
                     self._ec_add(EC_ATTACK, _atk_i, _atk_amt)
@@ -2724,14 +3005,28 @@ class SphereEngine:
             juvenile = age_f < maturity_age
             if juvenile.any():
                 j_idx = np.flatnonzero(juvenile)
+                # 性能（2026-09-23）：预建"格→成年个体索引"表，替代逐未成年对全种群
+                # 前 P 做 O(P) np.isin（profile 占文化段 ~54%）。语义严格不变：成年集合
+                # = 邻居格内、age_f>=maturity_age 的个体；收集后按个体索引升序排序，
+                # 再 .mean(axis=0) —— 与原 flatnonzero 升序、np.mean 求和顺序逐位一致。
+                _adult_qual = age_f >= maturity_age
+                _cell_adults: list[list[int]] = [[] for _ in range(self.world.n_cells)]
+                for _a in np.flatnonzero(_adult_qual):
+                    _cell_adults[int(self._flat[int(_a)])].append(int(_a))
                 for idx in j_idx:
-                    nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
-                    nb_mask = np.isin(self._flat[:P], nb)
-                    adult_nb = nb_mask & (age_f >= maturity_age)
-                    adult_idx = np.flatnonzero(adult_nb)
-                    if len(adult_idx) > 0:
-                        mean_interpret = self._interpret[adult_idx].mean(axis=0)
-                        self._interpret[idx] += 0.1 * (mean_interpret - self._interpret[idx])
+                    _c = int(self._flat[int(idx)])
+                    _nb = self._nb_table[_c, :int(self._nb_len[_c])]
+                    _lst: list[int] = []
+                    for _nc in _nb:
+                        _lst.extend(_cell_adults[int(_nc)])
+                    if _lst:
+                        # sorted(set(...))：邻居表可能含重复格（球面退化），逐格收集会
+                        # 重复计入同个体；原 np.isin 成员判断天然去重，这里显式去重，
+                        # 再升序，与 flatnonzero 输出（唯一、升序）一致。
+                        _lst = sorted(set(_lst))
+                        mean_interpret = self._interpret[_lst].mean(axis=0)
+                        self._interpret[int(idx)] += 0.1 * (
+                            mean_interpret - self._interpret[int(idx)])
             # ── D2-4 Steels 对齐：同格相遇概率性解读表对齐 ──
             ifcfg_sa = self.config.info_structure
             if ifcfg_sa.enabled and ifcfg_sa.steels_alignment:
@@ -3800,6 +4095,18 @@ class SphereEngine:
             if self.resources._patch_mask is not None
             else np.zeros(0, dtype=bool)
         )
+        # --- 4.1 13.4 波 2A：资源动态状态（T2；关档 = 全零/初值 ⇒ 与旧快照兼容）---
+        data["rd_mask"] = self._rd._mask.copy()
+        data["rd_dead"] = self._rd._dead.copy()
+        data["rd_rest_until"] = self._rd._rest_until.copy()
+        data["rd_dead_since"] = self._rd._dead_since.copy()
+        data["rd_demoted"] = self._rd._demoted.copy()
+        data["rd_damage"] = self._rd._damage.copy()   # 波2 修 v2：累计损伤（随快照走）
+        data["rd_kill_n"] = np.array(self._rd.patch_kill_n)
+        data["rd_reborn_n"] = np.array(self._rd.patch_reborn_n)
+        data["rd_forced_reborn_n"] = np.array(self._rd.forced_reborn_n)
+        data["rd_promote_n"] = np.array(self._rd.promote_n)
+        data["rd_rest_set_n"] = np.array(self._rd.rest_set_n)
         data["resource_bg_regrowth_mult"] = np.array(self.resources._bg_regrowth_mult)
         data["resource_patch_regrowth_mult"] = np.array(self.resources._patch_regrowth_mult)
         data["signal_marks"] = self.signals._marks.copy()
@@ -4025,6 +4332,31 @@ class SphereEngine:
         engine.resources._capacity = data["resource_capacity"].copy()
         _pm = data["resource_patch_mask"]
         engine.resources._patch_mask = _pm.copy() if _pm.size > 0 else None
+        # --- 8.0 恢复资源动态状态（T2；旧快照缺键 ⇒ 由当前掩码重建 = 语义正确）---
+        if "rd_mask" in data and data["rd_mask"].size == engine.world.n_cells:
+            engine._rd._mask = data["rd_mask"].copy()
+            engine._rd._dead = data["rd_dead"].copy()
+            engine._rd._rest_until = data["rd_rest_until"].copy()
+            engine._rd._dead_since = data["rd_dead_since"].copy()
+            engine._rd._demoted = data["rd_demoted"].copy()
+            # 波2 修 v2：累计损伤（旧快照缺键 ⇒ 回退全零，语义 = 从未被啃食）
+            engine._rd._damage = (
+                data["rd_damage"].copy()
+                if "rd_damage" in data
+                else np.zeros(engine.world.n_cells, dtype=np.float64)
+            )
+            engine._rd.patch_kill_n = int(data["rd_kill_n"])
+            engine._rd.patch_reborn_n = int(data["rd_reborn_n"])
+            engine._rd.forced_reborn_n = int(data["rd_forced_reborn_n"])
+            engine._rd.promote_n = int(data["rd_promote_n"])
+            engine._rd.rest_set_n = int(data["rd_rest_set_n"])
+        else:
+            # 旧快照（13.4 前）：rd 状态 = 构造期默认（掩码随 resources._patch_mask 走）
+            engine._rd._mask = (
+                engine.resources._patch_mask.copy()
+                if engine.resources._patch_mask is not None
+                else np.zeros(engine.world.n_cells, dtype=bool)
+            )
         engine.resources._bg_regrowth_mult = float(data["resource_bg_regrowth_mult"])
         engine.resources._patch_regrowth_mult = float(data["resource_patch_regrowth_mult"])
         engine.signals._marks = data["signal_marks"].copy()

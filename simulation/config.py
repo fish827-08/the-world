@@ -51,20 +51,12 @@ class ResourceConfig:
 
     capacity_per_area: float = 40.0   # 每单位面积的食物上限（容量）
     regrowth_rate: float = 0.5        # 基准再生：温度合适时每 tick 每格长多少
-    # 🔴 13.4 波 2（fish 00:38 裁定，**本波暂不改**）：**格内**取食速度必须 > 斑块生长速度。
-    #   本字段将由 0.5 → **0.4**（配 `OrganismConfig.eat_amount` 0.6）。
-    #   ⚠️ 为什么**不**在波 1 改（已裁定，见板帖 R174）：
-    #     (1) 改它 = **改构造** ⇒ 会改变人口承载，并迫使更新 **7 处写死的 C7 基线 digest**
-    #         （`(573985, 8171.692943)`）⇒ 与"坐标基础设施"混在一笔，会让波 1 的验收点
-    #         「关档逐位等价」**失去可验证性**（同时改两件事 ⇒ 归因不干净）；
-    #     (2) §14.6「阶段边界必须可发布 / 一次只改一件事」；
-    #     (3) 它与 `cell_occupancy_cap`（单格个体上限，见 §十一.2）**必须同批** ——
-    #         两者共同决定"**站着不动到底能不能活**"，分开做会得到互相矛盾的读数。
-    #   📐 依据（R171 §十.2 的构造巧合）：原 0.5 与 `eat_amount`(0.5) **数值恰好相等** ⇒
-    #     "一个静止个体独占一格"时"取 0.5 / 补 0.5"恰好动态平衡 ⇒ 静止成为**可持续策略**。
-    #   📐 波 2 改后：格内比值 **1.5** ⇒ 静止者 `40/(0.6−0.4)` = **200 tick 吃空一格**；
-    #     全球裕度：总再生 `Σcell_area(4586)×0.4 = 1834` vs 总需求 `N(1944)×0.6 = 1166` ⇒ **+57%**。
-    #     （两个层面不矛盾：格内"吃>长"⇒ 必须移动；全球"需求<再生"⇒ 整体不枯竭。）
+    # 🔴 13.4 波 2A（T2）：**本字段不改**（R178 只裁定 `eat_amount 0.5→0.9`）。
+    #   配 0.9 后格内"吃>长" = 0.9/0.5 = **1.8 倍**（比设计稿 §11.1 建议的 1.5 更紧），
+    #   全球账：总再生 `Σcell_area(4586)×0.5 = 2293` vs 总需求 `N(1944)×0.9 = 1750` ⇒ **+31%**
+    #   （R178 核算：需求 1750 vs 总再生 3153 为**含斑块倍率**口径 ⇒ +80%；此处按基准再生口径
+    #    更保守，仍安全）。⚠️ 改 `eat_amount` 已**改构造** ⇒ C7 基线 digest 变，
+    #   须同步 7 处写死它的测试（任务书 T2 已列）。
     temp_sensitivity: float = 1.0     # 再生对温度的依赖（0=不 care，越大越敏感）
     initial_fill: float = 0.5         # 初始填充比例（每格开始有多少食物，0~1）
 
@@ -108,11 +100,11 @@ class OrganismConfig:
     #                                    开 = **新纪元**（禁跨比）。钳制点在 `_advance_one_tick` 末。
     base_metabolism: float = 0.6      # 每 tick 基础维持消耗（体温/活动）
     move_cost: float = 0.4            # 移动一格的基础能量消耗
-    eat_amount: float = 0.5           # 每 tick 每格进食量上限
-    # 🔴 13.4 波 2（fish 00:38 裁定，**本波暂不改**）：将由 0.5 → **0.6**，
-    #   与 `ResourceConfig.regrowth_rate`(0.4) 配对实现"**格内吃 > 长**"（比值 1.5）。
-    #   ⚠️ 本波不改的三条理由、全球裕度核算、以及"必须与 `cell_occupancy_cap`（单格个体上限）
-    #   同批"这条依赖 —— 全部见 `regrowth_rate` 处注释。
+    eat_amount: float = 0.9           # 每 tick 每格进食量上限
+    # 🔴 0.5 → **0.9**（13.4 波 2A，T2；R178 裁定：0.6 在斑块格不成立——斑块再生实测
+    #    0.832 > 0.6 ⇒ 斑块格永不枯竭）。0.9 时：斑块格净耗 +0.068（~750 tick 吃空）、
+    #    背景格 +0.513（~27 tick 吃空）；全球账 1944×0.9=1750 vs 总再生 3153 ⇒ 裕度 +80%。
+    #    ⚠️ 改构造 ⇒ C7 基线 digest 变，须同步 7 处写死它的测试（见任务书 T2）。
     eat_efficiency: float = 3.0       # 每单位食物转化为能量的倍率
     # 🔴 R148 §五.2（内评 §一.2 选项 b，所有者裁定「暂不统一但必须补声明」）：
     #   **`stomach` 有两条独立的容量上限，取决于写入路径** —— 这是**既有行为**，不是缺陷：
@@ -233,10 +225,36 @@ class SimulationConfig:
     l1_prey_mode: str = "lowagg"
     social_move_weight: float = 1.0 # 移动决策群居项权重（D0 修复：densities 按邻居上限归一化后与感知项同量级，此项可扫描 0~2）
     stay_prob: float = 0.0          # 停驻率（战役参数：move_prob × (1-stay_prob)，0=旧行为每tick必移判定；配合D2感知半径4=等效扩世界）
+    # ===== 13.4 波 2B：感知范围 / 单格上限 / 社交归一化（T3；**默认 = 旧行为**）=====
+    # 🔴 `perception_span` 是**跳数**（1 = 现状；2 = 两圈），与 `perception_radius`（邻居
+    #   个数 {4,8}）是**两个正交维度**（设计稿 §一 F2）—— 前者扩距离、后者换形状。
+    # ⚠️ span=2 需重建 `_nb_table` ⇒ **构造级**（digest 变，须同步测试）；span=1 逐位等价。
+    perception_span: int = 1         # 感知半径（跳数）：1（默认=旧行为）/ 2
+    perception_cap: int = 32         # F3 闸（设计稿 §一）：ring1+2 规模 > cap ⇒ 该格降级为 1 圈
+    # 🔴 F1 修复（任务书 T3）：`densities` 归一化除数由 stride(120) 改**实际邻居数** ⇒
+    #    社交项增强 ~15 倍（C9 型缺陷修复）＝ 构造级变更（digest 变）。保留显式常量
+    #    语义：`social_norm` 仅在 span=1 时 = 实际邻居数；改它 = 改社交项量级 = 构造级。
+    # ⚠️ 与波 2 设计稿（[本地开发] 建议冻结 120）冲突 —— 任务书（[所有者]）裁定改实际
+    #    邻居数，本字段 = 裁定落点（默认 "auto" ⇒ 每格实际邻居数）。
+    social_norm: str = "auto"        # "auto"=每格实际邻居数（F1 修复）| 数字=冻结常量
+    cell_occupancy_cap: int = 3      # 单格个体上限（默认 3；score 层剔除满格，落本格不受限）
+    #   🔴 默认 3 但**不进新路径**（cap 只在 `_cap_on` 时生效 ⇒ 默认关 = 旧行为逐位等价）
+    cell_occupancy_cap_enabled: bool = False   # 🔴 独立开关：默认关（旧行为），T3 接线
+    # 🔴 "看见才出手"（T3）：`perception_span` 统一供给资源/信号/猎物/威胁感知；
+    #    `attack_range` 独立恒 1 格（看得见 ≠ 够得着）。该开关随 `perception_span=2` 生效。
+    attack_range: int = 1            # 攻击射程（恒 1，独立于感知范围）
 
     def __post_init__(self) -> None:
         assert self.ticks >= 1, "至少跑一个 tick"
         assert 0.0 <= self.stay_prob < 0.95, "stay_prob 在 [0, 0.95)"
+        assert self.perception_span in (1, 2), "perception_span 只许 1/2（跳数，与 radius 正交）"
+        assert self.cell_occupancy_cap >= 1, "cell_occupancy_cap ≥ 1"
+        if self.social_norm not in ("auto",):
+            try:
+                float(self.social_norm)
+            except ValueError:
+                raise AssertionError("social_norm 须是 'auto' 或数字字符串")
+        assert self.attack_range >= 1, "attack_range ≥ 1"
 
 
 @dataclass
@@ -586,6 +604,9 @@ class CorpseWoundConfig:
 
     # ---- 恐惧/激进项（S3；方向相反，各自开关）----
     w_fear_health: float = 0.5            # 血条恐惧项权重（低血条 ⇒ 更恐惧；能力导向）
+    # 🔴 13.4 波 3（T4）：血条恐惧**带门槛连续**（fish 01:20 批准）—— `1−health < 0.3`
+    #    不触发（受轻伤不恐惧，重伤才怕）。
+    wound_fear_threshold: float = 0.3     # 血条恐惧触发门槛（1−health ≥ 此值才生效）
     need_aggression_k: float = 0.5        # 饥饿激进项强度（固定 0.5；D 臂设 0 = 关"饥饿更激进"）
 
     def __post_init__(self) -> None:
@@ -778,8 +799,25 @@ class ResourceDynamicsConfig:
     """
 
     enabled: bool = False            # 默认关 = 旧行为**逐位等价**（派生量全 no-op）
-    rest_ticks: int = 300            # 被吃后**休耕**：该格 N tick 内再生 = 0
-    kill_frac: float = 0.7           # 被吃强度 > 此值 ⇒ 斑块死亡（分母见 `kill_denom`）
+    rest_ticks: int = 60             # 休耕时长：该格 N tick 内再生 = 0（13.4 波2 修 v2：
+                                     #   300→60，文献轮牧 30–60 天口径；配合 rest_threshold
+                                     #   只在"吃够 30% 容量"才休耕 ⇒ 60 足够恢复）
+    # 🔴 13.4 波2 修 v2（2026-09-23，fish 批准方案 A）：**累计损伤三态状态机**。
+    #   旧版"intake>0 即休耕"被实测击穿（B–E 臂 resting 82–92%，一次被吃 = 停摆 300）。
+    #   新口径 = **累计被吃量 / 容量**（damage ∈ [0,∞)）：
+    #     damage ≥ rest_threshold   ⇒ 进入休耕（固定 rest_ticks，**被吃不刷新**）
+    #     damage ≥ death_threshold  ⇒ 死亡（斑块加成搬走；与 kill_frac 极端密度通道并存）
+    #   文献锚（轮牧 Take-Half-Leave-Half / USDA 摘叶梯度：50% 轻伤 / 70% 重伤 / 90% 近死）：
+    #   rest 0.3 / death 0.8 对应"轻伤可恢复 / 重伤退化"，比行业 40–60% 保守。
+    rest_threshold: float = 0.3     # 损伤 ≥ 30% 容量 ⇒ 休耕
+    death_threshold: float = 0.8    # 损伤 ≥ 80% 容量 ⇒ 死亡
+    damage_recovery: float = 0.5    # 休耕到期损伤乘此系数（部分恢复；文献：恢复期后损伤减半）
+    # 🔴 0.7 → **10.0**（13.4 波 2A，T2；R178 裁定：`kill_mult` 初值 10 =
+    #    "一 tick 吃掉 **10 倍当期再生** ⇒ 死"，**禁用裸 `regrowth_rate`**——否则纬度抽奖回归）。
+    #   ⚠️ 收编件字段名保留 `kill_frac`（模块读它），语义 = 再生倍数阈值（不是 <1 的比例）。
+    #   ⚠️ 波2 修 v2：判死主通道改 `death_threshold`（累计损伤）；`kill_frac` 保留为
+    #   **极端密度瞬间死亡**的补充通道（单 tick intake/growth > 10 仍死），两通道共用死格处理。
+    kill_frac: float = 10.0          # 被吃强度 > 此值（= kill_mult，当期再生倍数）⇒ 斑块死亡
     kill_denom: str = "regrowth"     # 🆕 "regrowth"（默认，纬度无关）| "capacity"（设计稿字面）
     dead_regen_ticks: int = 2000     # 死格**重入候选池**的等待（🔴 0 = 永不 ⇒ 硬拒绝：那是文献里的不可逆荒漠化）
     dead_cell_max_frac: float = 0.5  # 🔴 **反荒漠化闸**：死格占比超过它 ⇒ 强制加速重生
@@ -797,6 +835,10 @@ class ResourceDynamicsConfig:
             " shifting mosaic；若确实要测不可逆，请另立开关并先在板上裁定"
         )
         assert 0.0 < self.dead_cell_max_frac <= 1.0, "dead_cell_max_frac ∈ (0,1]"
+        # 波2 修 v2 断言：阈值有序 + 恢复系数 ∈ (0,1]
+        assert 0.0 < self.rest_threshold < self.death_threshold, (
+            "rest_threshold < death_threshold（先休耕后死亡）")
+        assert 0.0 < self.damage_recovery <= 1.0, "damage_recovery ∈ (0,1]"
 
 
 #: `from_dict` 的字段白名单（旧存档缺键 ⇒ 回退默认；多出的键 ⇒ 忽略而非报错）

@@ -1,7 +1,7 @@
 """13.4 波 1「亚格连续坐标」引擎级回归测试（`[所有者·天平]` 线）。
 
 覆盖（对应设计稿 §六 的 E1–E9）：
-  E1 **关档逐位等价**（C7 基线 `(573985, 8171.692943)`）
+  E1 **关档逐位等价**（C7 基线 `(574887, 11266.746993)`）
   E3 **H3 fail-loud** 两条：subpos × use_sim_core、subpos × l2_dash
   E4 **I2**：开档下 `_flat` 与亚格坐标恒一致（防两条路径漂移）
   E5 **扩容/压缩同步**：出生与死亡后三数组长度恒等
@@ -19,7 +19,7 @@ from simulation.config import InfoStructureConfig, SimConfig
 from simulation.sphere_engine import SphereEngine
 from world.subpos import flat_of_sub
 
-C7_BASE = (573985, 8171.692943)
+C7_BASE = (574887, 11266.746993)
 
 
 def _engine(ticks: int = 50, *, subpos: bool = False, seed: int = 42,

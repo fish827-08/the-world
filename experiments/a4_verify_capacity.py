@@ -49,7 +49,9 @@ from simulation.config import (  # noqa: E402
     CorpseWoundConfig,
     InfoStructureConfig,
     PredationConfig,
+    ResourceDynamicsConfig,
     SimConfig,
+    SubposConfig,
 )
 from simulation.sphere_engine import SphereEngine  # noqa: E402
 
@@ -172,7 +174,29 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           wound_heal_rate: float = 0.001, wound_heal_energy_cost: float = 0.05,
           contest_enabled: bool = False, holder_adv: float = 1.2,
           escalation_gap: float = 0.25, contest_cost_energy: float = 0.5,
-          w_fear_health: float = 0.5, need_aggression_k: float = 0.5) -> SphereEngine:
+          w_fear_health: float = 0.5, need_aggression_k: float = 0.5,
+          wound_fear_threshold: float = 0.3,
+          # 13.4 波 1（设计稿 §二/§三）：亚格连续坐标（**默认全关 = 旧行为**，逐位等价）
+          subpos_enabled: bool = False, subdiv: int = 4,
+          speed_gain: float = 4.0, speed_max: float = 2.0,
+          min_energy_frac: float = 0.05, lat_floor: float = 0.3,
+          stay_base: float = 0.0, stay_food_k: float = 0.0,
+          stay_signal_k: float = 0.0, stay_fear_k: float = 0.0,
+          stay_max: float = 0.8,
+          # 13.4 波 2A（T2，R178）：资源动态（斑块休耕—死亡—轮作；**默认关 = 旧行为**）
+          resource_dynamics_enabled: bool = False,
+          rest_ticks: int = 60,
+          rest_threshold: float = 0.3,
+          death_threshold: float = 0.8,
+          damage_recovery: float = 0.5,
+          kill_frac: float = 10.0,
+          kill_denom: str = "regrowth", dead_regen_ticks: int = 2000,
+          dead_cell_max_frac: float = 0.5,
+          kill_patch_only: bool = True, rotate_same_row_only: bool = True,
+          # 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化（默认 = 旧行为）
+          perception_span: int = 1, cell_occupancy_cap: int = 3,
+          cell_occupancy_cap_enabled: bool = False,
+          social_norm: str = "auto") -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -226,7 +250,41 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         contest_cost_energy=float(contest_cost_energy),
         w_fear_health=float(w_fear_health),
         need_aggression_k=float(need_aggression_k),
+        wound_fear_threshold=float(wound_fear_threshold),
     )
+    # 13.4 波 1：亚格连续坐标（**整体替换** SubposConfig ⇒ 须一次传全，防漏传静默重置）
+    c.subpos = SubposConfig(
+        enabled=bool(subpos_enabled),
+        subdiv=int(subdiv),
+        speed_gain=float(speed_gain),
+        speed_max=float(speed_max),
+        min_energy_frac=float(min_energy_frac),
+        lat_floor=float(lat_floor),
+        stay_base=float(stay_base),
+        stay_food_k=float(stay_food_k),
+        stay_signal_k=float(stay_signal_k),
+        stay_fear_k=float(stay_fear_k),
+        stay_max=float(stay_max),
+    )
+    # 13.4 波 2A（T2，R178；波2 修 v2 三态机阈值）：资源动态（**整体替换** ResourceDynamicsConfig ⇒ 一次传全）
+    c.resource_dynamics = ResourceDynamicsConfig(
+        enabled=bool(resource_dynamics_enabled),
+        rest_ticks=int(rest_ticks),
+        rest_threshold=float(rest_threshold),
+        death_threshold=float(death_threshold),
+        damage_recovery=float(damage_recovery),
+        kill_frac=float(kill_frac),
+        kill_denom=str(kill_denom),
+        dead_regen_ticks=int(dead_regen_ticks),
+        dead_cell_max_frac=float(dead_cell_max_frac),
+        kill_patch_only=bool(kill_patch_only),
+        rotate_same_row_only=bool(rotate_same_row_only),
+    )
+    # 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化（默认 = 旧行为）
+    c.simulation.perception_span = int(perception_span)
+    c.simulation.cell_occupancy_cap = int(cell_occupancy_cap)
+    c.simulation.cell_occupancy_cap_enabled = bool(cell_occupancy_cap_enabled)
+    c.simulation.social_norm = str(social_norm)
     # 2026-09-19（R127/C8）：**原为硬编码 "uniform"**（注释"R4 manifest 真实口径"）——
     # 该硬编码使 C1a / C1b / C2 / α / gate / α8 **全部跑在 uniform 世界**
     # （容量只随纬度变 ⇒ 食物位置**可由位置预测** ⇒ 信息本不值钱），**且无任何告警**：
@@ -349,6 +407,9 @@ def main() -> None:
                     help="种群上限（R41：⑤ 不饱和前提=3240；R19 口径=5000）")
     ap.add_argument("--measure", action="store_true",
                     help="显式开 ⑤观测+⑥探针（--arm 已隐含）")
+    ap.add_argument("--no-measure", action="store_true",
+                    help="显式关闭探针（覆盖 --arm 隐含；纯观测，关闭不改变模拟数值，"
+                         "供不使用 response Δ 的批量 run 提速）")
     # D-27④-A（R86 修订）：oracle 剂量扫描参数。默认 None ⇒ 沿用配置默认值（不改行为）。
     ap.add_argument("--oracle-donation", "--donation", dest="oracle_donation",
                     type=float, default=None,
@@ -449,8 +510,75 @@ def main() -> None:
                     help="驱逐战的代价（防'免费赶人'）")
     ap.add_argument("--w-fear-health", dest="w_fear_health", type=float, default=0.5,
                     help="血条恐惧项权重（低血条 ⇒ 更恐惧；能力导向）")
+    ap.add_argument("--wound-fear-threshold", dest="wound_fear_threshold", type=float,
+                    default=0.3,
+                    help="血条恐惧触发门槛（1−health ≥ 此值才生效；13.4 波 3）")
     ap.add_argument("--need-aggression-k", dest="need_aggression_k", type=float, default=0.5,
                     help="饥饿激进项强度（固定 0.5；D 臂设 0 = 关'饥饿更激进'）")
+    # ---- 13.4 波 1：亚格连续坐标（R169/R175；**默认全关 = 旧行为**）----
+    # 臂身份必须能从产物自证（C4）⇒ 全部进 `switches` 读回。
+    ap.add_argument("--subpos-enabled", dest="subpos_enabled", action="store_true",
+                    help="亚格连续坐标（默认关 = 旧行为，逐位等价；与 l2_dash 互斥 H3）")
+    ap.add_argument("--subpos-subdiv", dest="subdiv", type=int, default=4,
+                    help="每格 4×4=16 亚位置 ⇒ 最小步长 0.25 格")
+    ap.add_argument("--subpos-speed-gain", dest="speed_gain", type=float, default=4.0,
+                    help="speed = clamp(mob_eff×gain, 0, speed_max)；4.0 ≈ 历史 1+dash_frac")
+    ap.add_argument("--subpos-speed-max", dest="speed_max", type=float, default=2.0,
+                    help="速度上限（格/tick）；=2 使 subpos 包含 L2 冲刺语义")
+    ap.add_argument("--subpos-min-energy-frac", dest="min_energy_frac", type=float,
+                    default=0.05,
+                    help="移动能量门槛（纯能量阈值；0.05×max_energy=15，拦'真要饿死'）")
+    ap.add_argument("--subpos-lat-floor", dest="lat_floor", type=float, default=0.3,
+                    help="极区移速折减下限（speed_cap = speed_max×(lat_floor+(1−lat_floor)cos)）")
+    ap.add_argument("--subpos-stay-base", dest="stay_base", type=float, default=0.0,
+                    help="停留概率基座（默认 0 = 默认走；语义反转）")
+    ap.add_argument("--subpos-stay-food-k", dest="stay_food_k", type=float, default=0.0,
+                    help="本格还有余粮 ⇒ 停着吃（权重）")
+    ap.add_argument("--subpos-stay-signal-k", dest="stay_signal_k", type=float, default=0.0,
+                    help="收到信号 ⇒ 停（权重）")
+    ap.add_argument("--subpos-stay-fear-k", dest="stay_fear_k", type=float, default=0.0,
+                    help="邻域有威胁 ⇒ 停（权重；本波不接线，只读回）")
+    ap.add_argument("--subpos-stay-max", dest="stay_max", type=float, default=0.8,
+                    help="停留概率上限（反退化闸：任何个体至少 20%% 概率移动）")
+    # ---- 13.4 波 2A：资源动态（T2；**默认关 = 旧行为**）----
+    ap.add_argument("--resource-dynamics-enabled", dest="resource_dynamics_enabled",
+                    action="store_true",
+                    help="斑块休耕—死亡—轮作（默认关 = 旧行为，逐位等价；H3 拦 Rust）")
+    ap.add_argument("--rest-ticks", dest="rest_ticks", type=int, default=60,
+                    help="休耕时长（该格 N tick 内再生=0；波2 修 v2：300→60，文献轮牧 30–60）")
+    ap.add_argument("--rest-threshold", dest="rest_threshold", type=float, default=0.3,
+                    help="累计损伤 ≥ 此值（相对容量）⇒ 进入休耕（波2 修 v2 三态机）")
+    ap.add_argument("--death-threshold", dest="death_threshold", type=float, default=0.8,
+                    help="累计损伤 ≥ 此值 ⇒ 死亡（USDA 摘叶 70–90%% 重伤近死口径）")
+    ap.add_argument("--damage-recovery", dest="damage_recovery", type=float, default=0.5,
+                    help="休耕到期损伤衰减系数（∈(0,1]；恢复期后损伤部分恢复）")
+    ap.add_argument("--kill-frac", dest="kill_frac", type=float, default=10.0,
+                    help="被吃强度 > 此值（= kill_mult，**当期再生倍数**；R178 裁定 10）⇒ 斑块死亡")
+    ap.add_argument("--kill-denom", dest="kill_denom", default="regrowth",
+                    choices=("regrowth", "capacity"),
+                    help="kill 分母：regrowth=当期再生（R178 裁定）/ capacity=设计稿字面")
+    ap.add_argument("--dead-regen-ticks", dest="dead_regen_ticks", type=int, default=2000,
+                    help="死格重入候选池等待（0 = 硬拒绝：不可逆荒漠化）")
+    ap.add_argument("--dead-cell-max-frac", dest="dead_cell_max_frac", type=float,
+                    default=0.5,
+                    help="反荒漠化闸：死格占比超它 ⇒ 强制加速重生")
+    ap.add_argument("--kill-patch-only", dest="kill_patch_only", default="true",
+                    choices=("true", "false"),
+                    help="只有斑块格会死（防背景格大范围被打散）")
+    ap.add_argument("--rotate-same-row-only", dest="rotate_same_row_only", default="true",
+                    choices=("true", "false"),
+                    help="只在同行交换斑块加成（跨行破坏 Σcapacity 守恒）")
+    # ---- 13.4 波 2B（T3）：视野 2 格 / 单格上限 / 社交归一化 ----
+    ap.add_argument("--perception-span", dest="perception_span", type=int, default=1,
+                    choices=(1, 2),
+                    help="感知半径（跳数）：1=默认（旧行为）/ 2=两圈（构造级）")
+    ap.add_argument("--cell-occupancy-cap", dest="cell_occupancy_cap", type=int, default=3,
+                    help="单格个体上限（score 层剔除满格；落本格不受限）")
+    ap.add_argument("--cell-occupancy-cap-enabled", dest="cell_occupancy_cap_enabled",
+                    action="store_true",
+                    help="单格上限开关（默认关 = 旧行为，逐位等价）")
+    ap.add_argument("--social-norm", dest="social_norm", default="auto",
+                    help="社交项归一化除数：auto=每格实际邻居数（F1 修复）/ 数字=冻结常量")
     ap.add_argument("--init-g16-clusters", dest="init_g16_clusters", default="",
                     help="R141 P0-2：g16 初始投放（逗号分隔，按簇等分人口）；"
                          "空=旧行为。校准批用 \"0.05,0.5,0.9\"")
@@ -514,7 +642,7 @@ def main() -> None:
             "--oracle-donation/--oracle-persistence 仅在 --arm oracle 下生效"
             f"（当前 arm={arm!r}）——请勿静默传参"
         )
-    measure = bool(args.measure) or arm is not None
+    measure = (bool(args.measure) or arm is not None) and not args.no_measure
 
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     out = Path(args.out)
@@ -587,6 +715,33 @@ def main() -> None:
                   contest_cost_energy=args.contest_cost_energy,
                   w_fear_health=args.w_fear_health,
                   need_aggression_k=args.need_aggression_k,
+                  wound_fear_threshold=args.wound_fear_threshold,
+                  # 13.4 波 1：亚格连续坐标（默认全关 = 旧行为）
+                  subpos_enabled=bool(args.subpos_enabled),
+                  subdiv=args.subdiv, speed_gain=args.speed_gain,
+                  speed_max=args.speed_max,
+                  min_energy_frac=args.min_energy_frac,
+                  lat_floor=args.lat_floor,
+                  stay_base=args.stay_base, stay_food_k=args.stay_food_k,
+                  stay_signal_k=args.stay_signal_k, stay_fear_k=args.stay_fear_k,
+                  stay_max=args.stay_max,
+                  # 13.4 波 2A：资源动态（默认关 = 旧行为）
+                  resource_dynamics_enabled=bool(args.resource_dynamics_enabled),
+                  rest_ticks=args.rest_ticks,
+                  rest_threshold=args.rest_threshold,
+                  death_threshold=args.death_threshold,
+                  damage_recovery=args.damage_recovery,
+                  kill_frac=args.kill_frac,
+                  kill_denom=args.kill_denom,
+                  dead_regen_ticks=args.dead_regen_ticks,
+                  dead_cell_max_frac=args.dead_cell_max_frac,
+                  kill_patch_only=(args.kill_patch_only == "true"),
+                  rotate_same_row_only=(args.rotate_same_row_only == "true"),
+                  # 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化
+                  perception_span=args.perception_span,
+                  cell_occupancy_cap=args.cell_occupancy_cap,
+                  cell_occupancy_cap_enabled=bool(args.cell_occupancy_cap_enabled),
+                  social_norm=args.social_norm,
                   # R152/P0：捕食生态位结构 6 参
                   attack_cost=args.attack_cost, transfer_ratio=args.transfer_ratio,
                   attack_gene_gate=args.attack_gene_gate,
@@ -638,6 +793,33 @@ def main() -> None:
                 f"l1_prey_mode 冲突：命令行 {args.l1_prey_mode!r} vs "
                 f"快照 {e.config.simulation.l1_prey_mode!r}（E′ 臂身份）"
             )
+        # 13.4（T1–T4）：波 1/2/3 开关同为**臂身份**（A–E 臂的唯一差别）⇒ 续跑时
+        # 命令行若与快照不符，必须**硬失败**（同 F-R21/C5 家族："传了开关没生效"）。
+        # 🔴 漏传后果实测路径：`load_snapshot(config=None)` 配置由快照自带 ⇒ 命令行
+        #   13.4 开关被**静默忽略**（不报错）⇒ 段二会不知不觉跑成别的臂。本检查补上。
+        #   `perception_span` 是档位（1/2）非布尔 ⇒ 单独按 int 比较。
+        for _k, _cli, _snap in (
+            ("subpos_enabled", bool(args.subpos_enabled),
+             bool(e.config.subpos.enabled)),
+            ("resource_dynamics_enabled", bool(args.resource_dynamics_enabled),
+             bool(e.config.resource_dynamics.enabled)),
+            ("cell_occupancy_cap_enabled", bool(args.cell_occupancy_cap_enabled),
+             bool(e.config.simulation.cell_occupancy_cap_enabled)),
+            ("corpse_enabled", bool(args.corpse_enabled),
+             bool(e.config.corpse_wound.corpse_enabled)),
+            ("wound_enabled", bool(args.wound_enabled),
+             bool(e.config.corpse_wound.wound_enabled)),
+        ):
+            if _cli != _snap:
+                raise SystemExit(
+                    f"{_k} 冲突：命令行 {_cli} vs 快照 {_snap} —— 臂身份不得静默混用"
+                    "（段二续跑必须与段一同臂）"
+                )
+        if int(args.perception_span) != int(e.config.simulation.perception_span):
+            raise SystemExit(
+                f"perception_span 冲突：命令行 {args.perception_span} vs "
+                f"快照 {e.config.simulation.perception_span}（C/D/E 臂身份）"
+            )
     # R121 §3.4：**指标口径必须随档位走**（"16"⇒16、"4"⇒4）。
     # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
     _n_alpha = SIGNAL_ALPHABET_STATES[str(e.config.signal_alphabet)]
@@ -686,7 +868,14 @@ def main() -> None:
               "corpse_total", "corpse_eaten",
               "health_mean", "health_low_frac", "wound_n", "contest_n",
               # S3 交互（设计稿 §5.4 项 6/7）：争夺战持有者胜率 + 血条恐惧项反退化
-              "contest_win_by_holder_frac", "fear_health_flat_frac"]
+              "contest_win_by_holder_frac", "fear_health_flat_frac",
+              # 13.4 波 1（R169/R175）：亚格坐标读数（关档 ⇒ 空串 = 未适用，R120 口径）
+              "subpos_flat_moves", "subpos_slow_frac",
+              # 13.4 波 2A（T2，R176 §12.5 四条）：资源动态读数（关档 ⇒ 空串 = 未适用）
+              "dead_cell_frac", "resting_cell_frac",
+              "patch_kill_n", "patch_reborn_n", "mean_capacity_effective",
+              # 13.4 波 2B（T3）：视野/单格上限读数（关档 ⇒ 空串 = 未适用）
+              "span_downgrade_frac", "cap_blocked_n", "cap_stay_n"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -787,6 +976,25 @@ def main() -> None:
                     e.wound_probe(), "contest_win_by_holder_frac"),
                 "fear_health_flat_frac": _probe_csv(
                     e.wound_probe(), "fear_health_flat_frac"),
+                # 13.4 波 1：亚格坐标读数（关档 ⇒ None ⇒ 空串 = 未适用）
+                "subpos_flat_moves": _probe_csv(e.subpos_probe(), "mean_flat_moves"),
+                "subpos_slow_frac": _probe_csv(e.subpos_probe(), "slow_frac"),
+                # 13.4 波 2A：资源动态四条（关档 ⇒ None ⇒ 空串 = 未适用）
+                "dead_cell_frac": _probe_csv(
+                    e.resource_dynamics_probe(), "dead_cell_frac"),
+                "resting_cell_frac": _probe_csv(
+                    e.resource_dynamics_probe(), "resting_cell_frac"),
+                "patch_kill_n": _probe_csv(
+                    e.resource_dynamics_probe(), "patch_kill_n"),
+                "patch_reborn_n": _probe_csv(
+                    e.resource_dynamics_probe(), "patch_reborn_n"),
+                "mean_capacity_effective": _probe_csv(
+                    e.resource_dynamics_probe(), "mean_capacity_effective"),
+                # 13.4 波 2B（T3）：视野/单格上限（关档 ⇒ None ⇒ 空串）
+                "span_downgrade_frac": _probe_csv(
+                    e.wave2b_probe(), "span_downgrade_frac"),
+                "cap_blocked_n": _probe_csv(e.wave2b_probe(), "cap_blocked_n"),
+                "cap_stay_n": _probe_csv(e.wave2b_probe(), "cap_stay_n"),
             })
             fh.flush()
             last = t
@@ -870,6 +1078,9 @@ def main() -> None:
             # R144/R145：能量封顶与光合必须可读回（C4；且封顶开关进指纹 ⇒ 纪元可判）
             "energy_cap_enabled": bool(e.config.organisms.energy_cap_enabled),
             "photo_max": float(e.config.organisms.photo_max),
+            # 🔴 R178（13.4 波 2A，T2）：`eat_amount 0.5→0.9` 是**构造级变更**
+            #    （C7 基线 digest 变 ⇒ 禁跨纪元比较捕食口径）⇒ 必须可从产物自证（C4）。
+            "eat_amount": float(e.config.organisms.eat_amount),
             # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
             #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
             "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),
@@ -910,6 +1121,41 @@ def main() -> None:
             "contest_cost_energy": float(e.config.corpse_wound.contest_cost_energy),
             "w_fear_health": float(e.config.corpse_wound.w_fear_health),
             "need_aggression_k": float(e.config.corpse_wound.need_aggression_k),
+            "wound_fear_threshold": float(e.config.corpse_wound.wound_fear_threshold),
+            # ---- 13.4 波 1：亚格连续坐标（C4 读回；臂身份 = `subpos_enabled`）----
+            # 关档 = 旧行为 ⇒ 这些键仍是"默认值读回"，不叫"未适用"（开关可读回是硬要求）。
+            "subpos_enabled": bool(e.config.subpos.enabled),
+            "subpos_subdiv": int(e.config.subpos.subdiv),
+            "subpos_speed_gain": float(e.config.subpos.speed_gain),
+            "subpos_speed_max": float(e.config.subpos.speed_max),
+            "subpos_min_energy_frac": float(e.config.subpos.min_energy_frac),
+            "subpos_lat_floor": float(e.config.subpos.lat_floor),
+            "subpos_stay_base": float(e.config.subpos.stay_base),
+            "subpos_stay_food_k": float(e.config.subpos.stay_food_k),
+            "subpos_stay_signal_k": float(e.config.subpos.stay_signal_k),
+            "subpos_stay_fear_k": float(e.config.subpos.stay_fear_k),
+            "subpos_stay_max": float(e.config.subpos.stay_max),
+            # ---- 13.4 波 2A：资源动态（C4 读回；臂身份 = `resource_dynamics_enabled`）----
+            "resource_dynamics_enabled": bool(e.config.resource_dynamics.enabled),
+            "rest_ticks": int(e.config.resource_dynamics.rest_ticks),
+            # 波2 修 v2（方案 A）：累计损伤三态机阈值（C4 自证）
+            "rest_threshold": float(e.config.resource_dynamics.rest_threshold),
+            "death_threshold": float(e.config.resource_dynamics.death_threshold),
+            "damage_recovery": float(e.config.resource_dynamics.damage_recovery),
+            "kill_frac": float(e.config.resource_dynamics.kill_frac),
+            "kill_denom": str(e.config.resource_dynamics.kill_denom),
+            "dead_regen_ticks": int(e.config.resource_dynamics.dead_regen_ticks),
+            "dead_cell_max_frac": float(e.config.resource_dynamics.dead_cell_max_frac),
+            "kill_patch_only": bool(e.config.resource_dynamics.kill_patch_only),
+            "rotate_same_row_only": bool(
+                e.config.resource_dynamics.rotate_same_row_only),
+            # ---- 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化（C4 读回）----
+            "perception_span": int(e.config.simulation.perception_span),
+            "perception_cap": int(getattr(e.config.simulation, "perception_cap", 32)),
+            "cell_occupancy_cap": int(e.config.simulation.cell_occupancy_cap),
+            "cell_occupancy_cap_enabled": bool(
+                e.config.simulation.cell_occupancy_cap_enabled),
+            "social_norm": str(e.config.simulation.social_norm),
             # L2 几何/成本参数（「参数制造分化」的可核查性）
             "dash_min_energy_frac": float(e.config.organisms.dash_min_energy_frac),
             "dash_cost_kappa": float(e.config.organisms.dash_cost_kappa),
@@ -983,6 +1229,13 @@ def main() -> None:
             # S1 骨架（设计稿 §5.2 项 9）：尸体—食腐 + 血条读数块（**空壳**，值可为 0）
             "corpse": e.corpse_probe(),
             "wound": e.wound_probe(),
+            # 13.4 波 1：亚格坐标读数（关档 ⇒ None = 未适用，R120 口径）
+            "subpos": e.subpos_probe(),
+            # 13.4 波 2A：资源动态读数（关档 ⇒ None = 未适用）+ 守恒自检（恒应过）
+            "resource_dynamics": e.resource_dynamics_probe(),
+            "resource_dynamics_conservation": e.resource_dynamics_conservation(),
+            # 13.4 波 2B（T3）：视野/单格上限读数
+            "wave2b": e.wave2b_probe(),
             # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
             "energy_ledger": e.energy_ledger(),
             # R135 第 -1 步③：t=0 基因组基线（搭车诊断）

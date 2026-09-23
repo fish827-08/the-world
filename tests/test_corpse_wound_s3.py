@@ -49,7 +49,7 @@ def _digest(e: SphereEngine) -> tuple[int, float]:
 
 def test_s3_default_off_is_bit_identical():
     """C7：contest/wound 全关必须与**改动前**逐位一致（S1 钉死值不变）。"""
-    assert _digest(_engine(ticks=50)) == (573985, 8171.692943), (
+    assert _digest(_engine(ticks=50)) == (574887, 11266.746993), (
         "S3 关档改变了轨迹 ⇒ 破坏 H1（默认关 = 逐位等价）")
 
 

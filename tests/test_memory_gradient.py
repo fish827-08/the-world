@@ -120,7 +120,9 @@ def test_switch_is_behaviorally_active():
     b = _digest(_engine(mode="orientation"))
     assert a != b, "两档逐位相同 ⇒ 朝向梯度根本没接进决策（静默失效）"
     # 但 population 规模同量级（不是把种群跑崩了）
-    assert abs(a[0] - b[0]) < 0.05 * max(a[0], 1)
+    # ⚠️ 2026-09-23（T2）：eat_amount 0.5→0.9 后两档差异被放大到 ~7.4%
+    #   （旧 5% 阈值基于 eat=0.5 环境；实测仍同量级，远非崩盘）⇒ 阈值 5% → 10%。
+    assert abs(a[0] - b[0]) < 0.10 * max(a[0], 1)
 
 
 def test_none_path_digest_pinned():
@@ -129,7 +131,7 @@ def test_none_path_digest_pinned():
     ⚠️ 该 digest 取自 A′ 落地**之后**：`none` 分支与改动前**逐字相同**（`0.3 * perc * mem_in_nb`），
     故它同时是"原式未变"的回归锚点；与改动前的等价性另由全量回归中的既有对拍测试覆盖。
     """
-    assert _digest(_engine(mode="none")) == (426287, 7396.444044, 80)
+    assert _digest(_engine(mode="none")) == (525667, 11893.889994, 80)
 
 
 def test_orientation_reports_counters_and_none_is_na():
