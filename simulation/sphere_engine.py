@@ -2549,8 +2549,9 @@ class SphereEngine:
                                 self._mem_grad_trig += 1
                             score = score + mem_grad_gain * perc * g
                     elif len(valid_mem) > 0:
-                        # 原式（**严格不动**：`0.3` 字面量，保与旧版逐位一致）
-                        mem_in_nb = np.isin(nb, valid_mem)
+                        # 整数成员判断：广播比较替代 np.isin（valid_mem≤4，结果 bool
+                        #   逐位一致；profile 移动段热点）。`0.3` 字面量严格不动。
+                        mem_in_nb = (nb[:, None] == valid_mem[None, :]).any(axis=1)
                         score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
                     nb_sigs = self.signals._marks[nb]
                     if (nb_sigs > 0).any():
@@ -3004,14 +3005,28 @@ class SphereEngine:
             juvenile = age_f < maturity_age
             if juvenile.any():
                 j_idx = np.flatnonzero(juvenile)
+                # 性能（2026-09-23）：预建"格→成年个体索引"表，替代逐未成年对全种群
+                # 前 P 做 O(P) np.isin（profile 占文化段 ~54%）。语义严格不变：成年集合
+                # = 邻居格内、age_f>=maturity_age 的个体；收集后按个体索引升序排序，
+                # 再 .mean(axis=0) —— 与原 flatnonzero 升序、np.mean 求和顺序逐位一致。
+                _adult_qual = age_f >= maturity_age
+                _cell_adults: list[list[int]] = [[] for _ in range(self.world.n_cells)]
+                for _a in np.flatnonzero(_adult_qual):
+                    _cell_adults[int(self._flat[int(_a)])].append(int(_a))
                 for idx in j_idx:
-                    nb = np.asarray(self.world.neighbors(int(self._flat[idx])))
-                    nb_mask = np.isin(self._flat[:P], nb)
-                    adult_nb = nb_mask & (age_f >= maturity_age)
-                    adult_idx = np.flatnonzero(adult_nb)
-                    if len(adult_idx) > 0:
-                        mean_interpret = self._interpret[adult_idx].mean(axis=0)
-                        self._interpret[idx] += 0.1 * (mean_interpret - self._interpret[idx])
+                    _c = int(self._flat[int(idx)])
+                    _nb = self._nb_table[_c, :int(self._nb_len[_c])]
+                    _lst: list[int] = []
+                    for _nc in _nb:
+                        _lst.extend(_cell_adults[int(_nc)])
+                    if _lst:
+                        # sorted(set(...))：邻居表可能含重复格（球面退化），逐格收集会
+                        # 重复计入同个体；原 np.isin 成员判断天然去重，这里显式去重，
+                        # 再升序，与 flatnonzero 输出（唯一、升序）一致。
+                        _lst = sorted(set(_lst))
+                        mean_interpret = self._interpret[_lst].mean(axis=0)
+                        self._interpret[int(idx)] += 0.1 * (
+                            mean_interpret - self._interpret[int(idx)])
             # ── D2-4 Steels 对齐：同格相遇概率性解读表对齐 ──
             ifcfg_sa = self.config.info_structure
             if ifcfg_sa.enabled and ifcfg_sa.steels_alignment:

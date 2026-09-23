@@ -407,6 +407,9 @@ def main() -> None:
                     help="种群上限（R41：⑤ 不饱和前提=3240；R19 口径=5000）")
     ap.add_argument("--measure", action="store_true",
                     help="显式开 ⑤观测+⑥探针（--arm 已隐含）")
+    ap.add_argument("--no-measure", action="store_true",
+                    help="显式关闭探针（覆盖 --arm 隐含；纯观测，关闭不改变模拟数值，"
+                         "供不使用 response Δ 的批量 run 提速）")
     # D-27④-A（R86 修订）：oracle 剂量扫描参数。默认 None ⇒ 沿用配置默认值（不改行为）。
     ap.add_argument("--oracle-donation", "--donation", dest="oracle_donation",
                     type=float, default=None,
@@ -639,7 +642,7 @@ def main() -> None:
             "--oracle-donation/--oracle-persistence 仅在 --arm oracle 下生效"
             f"（当前 arm={arm!r}）——请勿静默传参"
         )
-    measure = bool(args.measure) or arm is not None
+    measure = (bool(args.measure) or arm is not None) and not args.no_measure
 
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     out = Path(args.out)
