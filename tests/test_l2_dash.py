@@ -183,7 +183,9 @@ def test_l2_block_adds_no_rng_draws():
     spans = (
         ("dash = np.zeros(Nm, dtype=bool)", "self._agef_sum += float(age_factor.sum())"),
         # T3（13.4 波 2B）去盲选：span=2 时跳过盲选覆盖 ⇒ 条件加了 `and not _span2_on`
-        ("if _l2_on and dash[i] and not _span2_on:", "int(rand_choice[i] // 100) % _fl])"),
+        # Pre-Flight 2026-09-23：cap 开 ⇒ 盲选覆盖同样跳过（任务书 T3 §5 冲刺目标剔除）
+        # ⇒ 条件再加 `and not _cap_on`
+        ("if _l2_on and dash[i] and not _span2_on and not _cap_on:", "int(rand_choice[i] // 100) % _fl])"),
     )
     for head, tail in spans:
         i0 = src.index(head)

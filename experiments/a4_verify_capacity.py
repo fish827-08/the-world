@@ -773,6 +773,33 @@ def main() -> None:
                 f"l1_prey_mode 冲突：命令行 {args.l1_prey_mode!r} vs "
                 f"快照 {e.config.simulation.l1_prey_mode!r}（E′ 臂身份）"
             )
+        # 13.4（T1–T4）：波 1/2/3 开关同为**臂身份**（A–E 臂的唯一差别）⇒ 续跑时
+        # 命令行若与快照不符，必须**硬失败**（同 F-R21/C5 家族："传了开关没生效"）。
+        # 🔴 漏传后果实测路径：`load_snapshot(config=None)` 配置由快照自带 ⇒ 命令行
+        #   13.4 开关被**静默忽略**（不报错）⇒ 段二会不知不觉跑成别的臂。本检查补上。
+        #   `perception_span` 是档位（1/2）非布尔 ⇒ 单独按 int 比较。
+        for _k, _cli, _snap in (
+            ("subpos_enabled", bool(args.subpos_enabled),
+             bool(e.config.subpos.enabled)),
+            ("resource_dynamics_enabled", bool(args.resource_dynamics_enabled),
+             bool(e.config.resource_dynamics.enabled)),
+            ("cell_occupancy_cap_enabled", bool(args.cell_occupancy_cap_enabled),
+             bool(e.config.simulation.cell_occupancy_cap_enabled)),
+            ("corpse_enabled", bool(args.corpse_enabled),
+             bool(e.config.corpse_wound.corpse_enabled)),
+            ("wound_enabled", bool(args.wound_enabled),
+             bool(e.config.corpse_wound.wound_enabled)),
+        ):
+            if _cli != _snap:
+                raise SystemExit(
+                    f"{_k} 冲突：命令行 {_cli} vs 快照 {_snap} —— 臂身份不得静默混用"
+                    "（段二续跑必须与段一同臂）"
+                )
+        if int(args.perception_span) != int(e.config.simulation.perception_span):
+            raise SystemExit(
+                f"perception_span 冲突：命令行 {args.perception_span} vs "
+                f"快照 {e.config.simulation.perception_span}（C/D/E 臂身份）"
+            )
     # R121 §3.4：**指标口径必须随档位走**（"16"⇒16、"4"⇒4）。
     # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
     _n_alpha = SIGNAL_ALPHABET_STATES[str(e.config.signal_alphabet)]

@@ -15,15 +15,18 @@ import numpy as np
 import pytest
 
 from simulation.config import InfoStructureConfig, SimConfig
+from simulation.genes import Gene
 from simulation.sphere_engine import SphereEngine
 
 
 def _engine(ticks: int = 0, *, seed: int = 42,
             span: int = 1, cap: bool = False, cap_val: int = 3,
-            use_sim_core: bool = False, l2: bool = False) -> SphereEngine:
+            use_sim_core: bool = False, l2: bool = False,
+            predation: bool = True) -> SphereEngine:
     cfg = SimConfig(seed=seed)
     cfg.population.max_count = 600
     cfg.predation.forage_tradeoff_k = 0.0
+    cfg.predation.enabled = bool(predation)
     cfg.info_structure = InfoStructureConfig(
         enabled=True, learning_rate=0.05, memory_gradient="none",
     )
@@ -132,6 +135,46 @@ def test_span2_removes_blind_dash():
     # span=2 + l2_dash 同开（不互斥，T3 去盲选的前提）
     e = _engine(ticks=500, span=2, l2=True)
     assert len(e._id) > 0, "span=2 + l2 不应崩"
+
+
+def test_cap_blocks_l2_blind_dash_target():
+    """cap 开 + span=1 + l2：L2 盲选覆盖被跳过 ⇒ 冲刺目标不落满格（任务书 T3 §5）。
+
+    构造（**部分满**场景，避免"全候选满 ⇒ score 兜底 continue"在盲选覆盖前短路）：
+    个体 0（成年、必移动、必 dash）在普通格 cell；
+    邻居 8 个中 4 个满（occ=1=cap_val=1）、4 个空；
+    strict 2 圈（far 候选）**全满**；其余个体 MOVE_PROB=0 不动。
+    修复前：dash ⇒ 盲选覆盖 ⇒ 目标 = far 盲选（far 全满 ⇒ 落满格，cap 被破坏）；
+    修复后：cap 开 ⇒ 盲选跳过 ⇒ 目标 = score 从 4 个非满邻居选（不落满格）。
+    断言：个体 0 落点 ∈ {本格} ∪ {非满邻居}。
+    """
+    e = _engine(ticks=1, cap=True, cap_val=1, l2=True, span=1,
+                predation=False)
+    P = len(e._id)
+    assert P >= 60, f"需要足够个体（P={P}）"
+    cell = 1000                        # 普通格（row 8，8 邻；非极区 ⇒ far_len>0）
+    nb = np.asarray(e.world.neighbors(cell))
+    _off, _fl = int(e._far_off[cell]), int(e._far_len[cell])
+    far = e._far_cells[_off:_off + _fl]
+    assert len(far) >= 4 and len(nb) >= 8
+    e._flat[:] = 5000                  # 全部远置（row 41，普通格）
+    e._flat[0] = cell                  # 个体 0 在 cell
+    e._flat[1:5] = nb[:4]              # 4 个邻居满（occ=1=cap_val=1）
+    e._flat[5:5 + len(far)] = far      # far 候选全满
+    e._genes[1:, Gene.MOVE_PROB] = 0.0  # 其余个体不动（保持 occ 布局）
+    e._genes[0, Gene.MOVE_PROB] = 1.0  # 个体 0 必移动
+    e._genes[0, Gene.DEFENSE] = 1.0    # mob_eff=1 ⇒ dash 概率 100%
+    e._energy[0] = float(e.config.organisms.max_energy)  # 冲刺门槛过
+    _ls = e._lifespan(e._genes[0, Gene.LIFE_GENE])
+    e._age[0] = e.config.organisms.maturity_fraction * _ls  # 成年 ⇒ age_factor=1
+    free = set(int(x) for x in np.concatenate(([cell], nb[4:])))  # 本格 + 4 非满邻居
+    for _ in range(3):
+        if e.extinct:
+            break
+        e.step()
+    assert e._cap_blocked_n > 0, "score 层应触发过满格剔除"
+    assert int(e._flat[0]) in free, (
+        "dash 个体落点应在非满集合（本格 ∪ 非满邻居）；盲选覆盖会把目标救去满 far 格")
 
 
 # --------------------------------------------------------------- ⑥ H3

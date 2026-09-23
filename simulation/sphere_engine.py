@@ -2686,7 +2686,10 @@ class SphereEngine:
                     # 🔴 13.4 波 2B（T3）去两段式盲选（R148 偏离 2 的前提消失）：
                     #   span=2 ⇒ ring2 已纳入候选、按 score 选过 ⇒ **跳过盲选覆盖**
                     #   （保留 score 选出的目标）；span=1 ⇒ 维持旧盲选（逐位等价）。
-                    if _l2_on and dash[i] and not _span2_on:
+                    # 🔴 cap 开（任务书 T3 §5"L2 冲刺目标同理排除"）：盲选 far 候选
+                    #   **不会剔除满格** ⇒ cap 开时同样跳过盲选覆盖（保留 score 目标，
+                    #   score 层已剔除满格）⇒ 冲刺目标永不落满格（本格兜底不受限）。
+                    if _l2_on and dash[i] and not _span2_on and not _cap_on:
                         _c = int(self._flat[idx])
                         _fl = int(self._far_len[_c])
                         targets[i] = int(self._far_cells[
