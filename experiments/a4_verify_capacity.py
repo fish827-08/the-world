@@ -160,6 +160,25 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           energy_cap: bool = False,
           # R145 §七.1：光合产能覆盖（`photo_max`；None = 不覆盖）——供配对臂用
           photo_max: float | None = None,
+          # 🔴 13.5 ③（2026-09-24，fish 批准）：能量标定 7 参
+          #   **默认值一律 = 现状行为**（⇒ 关档仍逐位等价，C7 基线不动）
+          stomach_cap_mass: float = 0.0,     # 独立胃容量（0 = 沿用旧公式 max_energy/3*0.5）
+          eat_threshold_frac: float = 0.0,   # 胃 ≥ 该比例×容量 就不吃（0 = 旧：没满就吃）
+          starve_frac: float = 0.0,          # 饿死阈值（能量<比例 且 胃空；0 = 旧：仅 energy<=0）
+          exhaust_frac: float = 0.0,         # 力竭阈值（能量<比例，无论胃里有没有食；0 = 关）
+          assim_herb: float = 1.0,           # 素食吸收率（1.0 = 无损失）
+          assim_carn: float = 1.0,           # 肉食（尸体腿）吸收率
+          assim_return_frac: float = 1.0,    # 未吸收部分回流本格的比例（assim=1 时无作用）
+          # 🔴 13.5 ①②（2026-09-24）：食物绑定 —— 背景产能归零 + 斑块再生倍率
+          bg_production_zero: bool = False,  # 背景容量/再生/存量三者归零（只留斑块生产）
+          patch_regrowth_mult: float | None = None,   # None = 用 config 默认
+          # 🔴 R187（2026-09-24）：`eat_efficiency` 语义澄清为**完全燃烧值**。
+          #   13.5 必须与吸收率**同批**传：7.5 × 0.4 = 3.0 = 现状净吸收（⇒ 不灭绝）；
+          #   单传 assim=0.4 会让净吸收腰斩 ⇒ 低代谢个体赤字 ⇒ 连锁灭绝（R187 实测）。
+          eat_efficiency: float | None = None,        # None = 用 config 默认（3.0）
+          # 🔴 13.5 参数联动（R188 冒烟）：改死亡阈值必须同步改初始能量，否则开局集体饿死
+          max_energy: float | None = None,            # 体能上限（None = config 默认 300）
+          initial_energy: float | None = None,        # 初始能量（None = config 默认 60）
           # R146/R149 L1/L2（R150 B1/B2；**默认全关 = 旧行为**，逐位等价）
           l1_seek: bool = False, l1_fear: bool = False, l2_dash: bool = False,
           w_seek_max: float = 0.5, w_fear: float = 0.5,
@@ -222,6 +241,22 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.organisms.energy_cap_enabled = bool(energy_cap)           # R144：能量封顶（新纪元开关）
     if photo_max is not None:
         c.organisms.photo_max = float(photo_max)                # R145：光合配对臂
+    # 🔴 13.5 ③（2026-09-24）：能量标定 —— 默认值 = 现状 ⇒ 关档逐位等价
+    _ocfg = c.organisms
+    _ocfg.stomach_cap_mass = float(stomach_cap_mass)            # 独立胃容量（>0 才生效）
+    _ocfg.eat_threshold_frac = float(eat_threshold_frac)        # 胃≥比例×容量 就不吃
+    _ocfg.starve_frac = float(starve_frac)                      # 饿死阈值（且胃空）
+    _ocfg.exhaust_frac = float(exhaust_frac)                    # 力竭阈值（无论胃）
+    _ocfg.assim_herb = float(assim_herb)                        # 素食吸收率
+    _ocfg.assim_carn = float(assim_carn)                        # 肉食吸收率
+    _ocfg.assim_return_frac = float(assim_return_frac)          # 未吸收回流比例
+    if eat_efficiency is not None:
+        _ocfg.eat_efficiency = float(eat_efficiency)            # R187：完全燃烧值
+    # 🔴 13.5 参数联动（R188）：阈值改了 ⇒ 初始能量必须跟着改（否则开局集体饿死）
+    if max_energy is not None:
+        _ocfg.max_energy = float(max_energy)
+    if initial_energy is not None:
+        _ocfg.initial_energy = float(initial_energy)
     # R146/R149 L1/L2（R150 B1/B2）：**默认全关 ⇒ 旧行为**（H1 逐位等价，C7 已钉死）
     c.simulation.l1_seek = bool(l1_seek)
     c.simulation.l1_fear = bool(l1_fear)
@@ -291,6 +326,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     # C4 对账"开关 vs 设计"时两边都是 uniform ⇒ 判通过。⇒ 见 R127 的 **C8 前提对账**。
     # 现改为**可配**：默认仍 "uniform"（与历史批可比）；"patchy" 须**显式指定**且**先过前提冒烟**。
     c.resources.distribution = str(distribution) if distribution else "uniform"
+    # 🔴 13.5 ①②（2026-09-24）：食物绑定两旋钮 —— 必须在 `distribution` 之后设置
+    #   （两者只在 patchy 分支有意义；uniform 下 bg_production_zero 无作用）
+    c.resources.bg_production_zero = bool(bg_production_zero)
+    if patch_regrowth_mult is not None:
+        c.resources.patch_regrowth_mult = float(patch_regrowth_mult)
     # A′ 走向构造参数（而非构造后赋值）：`__post_init__` 只在构造时跑 ⇒ 赋值不会校验（F1 同型教训）
     d2 = InfoStructureConfig(
         enabled=True,
@@ -585,6 +625,39 @@ def main() -> None:
     ap.add_argument("--forage-tradeoff-k", dest="forage_tradeoff_k", type=float, default=0.0,
                     help="R135 第3步 A-连续：取食倍率 (1−g16)^k（凸 trade-off）；"
                          "0=关（默认，与旧版逐位一致）；本批取 2.0（凸/加速下降 ⇒ 中间态杂食者吃亏）")
+    # ---- 🔴 13.5（2026-09-24，fish 批准）：食物绑定 + 能量标定 ---------------------
+    # 全部**默认 = 现状行为** ⇒ 关档逐位等价（C7 基线不动），可安全用于配对臂。
+    # 术语速记（先人话后术语）：胃容量 = "饭盒大小"；吸收率 = "吃进去多少真变成能量"；
+    #   饿死 = "找不到吃的"（能量低**且**胃空）；力竭 = "累垮了"（能量极低，无论胃）。
+    ap.add_argument("--bgzero", dest="bg_production_zero", action="store_true",
+                    help="13.5 ①：背景产能归零（背景格容量/再生/存量三者归零，只留斑块生产）；"
+                         "默认关（= 现状，背景贡献 67.7%% 容量 / 78%% 再生）")
+    ap.add_argument("--patch-mult", dest="patch_regrowth_mult", type=float, default=None,
+                    help="13.5 ②：斑块再生倍率；None = 用 config 默认（不改动）")
+    ap.add_argument("--eat-efficiency", dest="eat_efficiency", type=float, default=None,
+                    help="🔴 R187：吃进去的质量→能量的倍率（语义 = 完全燃烧值）；"
+                         "None = 用 config 默认。13.5 须与 --assim-herb 同批：7.5 × 0.4 = 3.0")
+    ap.add_argument("--stomach-cap-mass", dest="stomach_cap_mass", type=float, default=0.0,
+                    help="13.5 ③ 独立胃容量（质量单位）；0 = 沿用旧公式（默认，逐位一致）")
+    ap.add_argument("--eat-threshold-frac", dest="eat_threshold_frac", type=float, default=0.0,
+                    help="13.5 ③ 胃 ≥ 该比例×容量 就不吃（不饿不吃）；0 = 旧行为（没满就吃）")
+    ap.add_argument("--starve-frac", dest="starve_frac", type=float, default=0.0,
+                    help="13.5 ③ 饿死阈值：能量 < 该比例×体能 **且胃空** 才死；0 = 旧判据（energy<=0）")
+    ap.add_argument("--exhaust-frac", dest="exhaust_frac", type=float, default=0.0,
+                    help="13.5 ③ 力竭阈值：能量 < 该比例×体能 即死（**无论胃里有没有食**）；0 = 关")
+    ap.add_argument("--assim-herb", dest="assim_herb", type=float, default=1.0,
+                    help="13.5 ③ 素食吸收率（吃进去的质量里多少变成能量）；1.0 = 无损失（默认）")
+    ap.add_argument("--assim-carn", dest="assim_carn", type=float, default=1.0,
+                    help="13.5 ③ 肉食（尸体腿）吸收率；1.0 = 与素食同（默认）")
+    ap.add_argument("--assim-return-frac", dest="assim_return_frac", type=float, default=1.0,
+                    help="13.5 ③ 未吸收部分回流本格（植物池）的比例；assim=1 时无作用")
+    # 🔴 13.5 参数联动的必要件（R188 冒烟发现）：**改死亡阈值必须同步改初始能量**。
+    #   否则 `initial_energy(60) < starve_frac(0.30)×max_energy(300)=90` ⇒ **开局集体饿死**
+    #   （冒烟实测：2000 tick 后 N=10、饿死 197）。这属于"参数联动"，不是机制问题。
+    ap.add_argument("--max-energy", dest="max_energy", type=float, default=None,
+                    help="体能上限（能量封顶与饥饿度/成功率的共同分母）；None = 用 config 默认（300）")
+    ap.add_argument("--initial-energy", dest="initial_energy", type=float, default=None,
+                    help="初始能量；None = 用 config 默认（60）。须 > starve_frac×max_energy")
     # ---- R152/P0（2026-09-22）：**捕食生态位结构** 6 个参数上 CLI -----------------
     # 🔴 目的：P0 要测"给捕食者真实代价 + 让中间态最差"，而这些值此前**只能改源码**
     #    ⇒ 无法做臂间对照（F1 家族："传了开关却没生效"的可预防形态）。
@@ -694,6 +767,18 @@ def main() -> None:
                   init_g16_clusters=args.init_g16_clusters,
                   energy_cap=(args.energy_cap == "true"),
                   photo_max=args.photo_max,
+                  # 🔴 13.5（2026-09-24）：食物绑定 + 能量标定（默认 = 现状 ⇒ 关档逐位等价）
+                  bg_production_zero=bool(args.bg_production_zero),
+                  patch_regrowth_mult=args.patch_regrowth_mult,
+                  stomach_cap_mass=args.stomach_cap_mass,
+                  eat_threshold_frac=args.eat_threshold_frac,
+                  starve_frac=args.starve_frac,
+                  exhaust_frac=args.exhaust_frac,
+                  assim_herb=args.assim_herb,
+                  assim_carn=args.assim_carn,
+                  assim_return_frac=args.assim_return_frac,
+                  eat_efficiency=args.eat_efficiency,
+                  max_energy=args.max_energy, initial_energy=args.initial_energy,
                   # R146/R149（R150 B1）：L1/L2 臂身份（默认全关 = 旧行为）
                   l1_seek=bool(args.l1_seek), l1_fear=bool(args.l1_fear),
                   l2_dash=bool(args.l2_dash), w_seek_max=args.w_seek_max,
@@ -1081,6 +1166,20 @@ def main() -> None:
             # 🔴 R178（13.4 波 2A，T2）：`eat_amount 0.5→0.9` 是**构造级变更**
             #    （C7 基线 digest 变 ⇒ 禁跨纪元比较捕食口径）⇒ 必须可从产物自证（C4）。
             "eat_amount": float(e.config.organisms.eat_amount),
+            # 🔴 13.5（2026-09-24）①②③：食物绑定 + 能量标定 ⇒ 全部必须可读回（C4），
+            #    否则"传了参数却没生效"会静默（F1 家族；老工 00:20 实测过 bg_production_zero 不生效）。
+            "bg_production_zero": bool(e.config.resources.bg_production_zero),
+            "patch_regrowth_mult": float(e.config.resources.patch_regrowth_mult),
+            "stomach_cap_mass": float(e.config.organisms.stomach_cap_mass),
+            "eat_threshold_frac": float(e.config.organisms.eat_threshold_frac),
+            "starve_frac": float(e.config.organisms.starve_frac),
+            "exhaust_frac": float(e.config.organisms.exhaust_frac),
+            "assim_herb": float(e.config.organisms.assim_herb),
+            "assim_carn": float(e.config.organisms.assim_carn),
+            "assim_return_frac": float(e.config.organisms.assim_return_frac),
+            "eat_efficiency": float(e.config.organisms.eat_efficiency),
+            "initial_energy": float(e.config.organisms.initial_energy),
+            "max_energy": float(e.config.organisms.max_energy),
             # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
             #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
             "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),

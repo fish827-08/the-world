@@ -503,6 +503,12 @@ class SphereEngine:
             initial_fill=config.resources.initial_fill,
             # 用 config.seed 派生 patch 中心：可复现，且独立 rng 不消费引擎 self.rng
             patch_seed=config.seed,
+            # 🔴 13.5 ①（2026-09-24）：背景产能归零 —— 必须显式透传，
+            #   否则 `ResourceConfig.bg_production_zero` 是**死字段**（老工 00:20 实测过：
+            #   不传这一行 ⇒ 背景归零完全不生效，且现象是"静默无变化"——C9 家族）。
+            bg_production_zero=bool(
+                getattr(config.resources, "bg_production_zero", False)
+            ),
         )
         # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
         self.signals = SignalField(self.world, duration=50)

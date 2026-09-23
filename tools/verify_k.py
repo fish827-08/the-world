@@ -50,13 +50,20 @@ def _get(obj, name, default):
     return getattr(obj, name, default)
 
 
-def build(regrowth: float, max_count: int, seed: int) -> SimConfig:
+def build(regrowth: float, max_count: int, seed: int,
+          bgzero: bool = False, patch_mult: float | None = None) -> SimConfig:
     c = SimConfig(seed=seed)
     c.simulation.use_sim_core = False           # 新机制强制 Python（§14.7）
     c.population.max_count = max_count          # 抬高硬顶 ⇒ 让食物（而非硬顶）决定 K
     c.population.soft_cap_target = 0.0          # 关软顶 ⇒ 关掉"出生率节流"这个人为限制
     c.resources.distribution = "patchy"
     c.resources.regrowth_rate = regrowth
+    # 🔴 13.5（2026-09-24）：两条新的食物绑定旋钮 —— 必须可分别测，否则
+    #   "背景归零" 与 "斑块再生倍率" 的贡献分不开（R178 教训：设计数字必须能指到是哪类格）。
+    if bgzero:
+        c.resources.bg_production_zero = True   # 背景容量/再生/存量三者归零
+    if patch_mult is not None:
+        c.resources.patch_regrowth_mult = float(patch_mult)
     c.predation.enabled = False                 # 只有素食者
     c.info_structure = InfoStructureConfig(enabled=True, learning_rate=0.05,
                                            memory_gradient="none")
@@ -75,7 +82,11 @@ def build(regrowth: float, max_count: int, seed: int) -> SimConfig:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="素食者 K 验收工具（13.5 硬判据）")
-    ap.add_argument("--regrowth", type=float, default=0.5, help="基准再生率（唯一被改的变量）")
+    ap.add_argument("--regrowth", type=float, default=0.5, help="基准再生率（全局）")
+    ap.add_argument("--bgzero", action="store_true",
+                    help="13.5 ①：背景产能归零（只留斑块生产）")
+    ap.add_argument("--patch-mult", dest="patch_mult", type=float, default=None,
+                    help="13.5 ②：斑块再生倍率（None = 用 config 默认）")
     ap.add_argument("--ticks", type=int, default=4000)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max-count", dest="max_count", type=int, default=12000)
@@ -84,7 +95,8 @@ def main() -> int:
     ap.add_argument("--json-out", dest="json_out", default="")
     a = ap.parse_args()
 
-    e = SphereEngine(build(a.regrowth, a.max_count, a.seed))
+    e = SphereEngine(build(a.regrowth, a.max_count, a.seed,
+                           bgzero=a.bgzero, patch_mult=a.patch_mult))
 
     # ---- 解析预测（事前）----
     eff = float(_get(e.config.organisms, "eat_efficiency", 3.0))
@@ -95,10 +107,17 @@ def main() -> int:
     k_prior = g_all / need_m_prior
 
     print("=" * 78)
-    print("素食者 K 验收 ｜ seed=%d regrowth=%.3f ticks=%d max_count=%d" % (a.seed, a.regrowth, a.ticks, a.max_count))
+    print("素食者 K 验收 ｜ seed=%d regrowth=%.3f patch_mult=%s bgzero=%s ticks=%d max_count=%d"
+          % (a.seed, a.regrowth, a.patch_mult, a.bgzero, a.ticks, a.max_count))
     print("  eat_efficiency=%.2f ｜ assim_herb=%.2f（缺失按 1.0 ⇒ 13.4 行为）" % (eff, assim))
     print("  Σ名义再生 = %.1f 质量/tick ｜ 人均需求(事前) = %.4f 质量/tick" % (g_all, need_m_prior))
     print("  ⇒ K_prior = %.0f" % k_prior)
+    import numpy as _np
+    _cap = _np.asarray(e.resources._capacity, dtype=float)
+    _pm = _np.asarray(e.resources._patch_mask, dtype=bool)
+    print("  Σ容量 = %.1f（斑块格 %d 格 %.1f%% ｜ 背景格 %d 格 %.1f%%）"
+          % (_cap.sum(), int(_pm.sum()), 100.0 * _cap[_pm].sum() / max(1e-9, _cap.sum()),
+             int((~_pm).sum()), 100.0 * _cap[~_pm].sum() / max(1e-9, _cap.sum())))
     print("-" * 78)
 
     t0 = time.time()

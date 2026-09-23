@@ -917,6 +917,48 @@ PRESETS = {
                  template="_rerun_logs/w2w3full/E_s{seed}.csv"),
         ],
     ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 13.5：食物绑定 + 能量标定（fish 2026-09-24 批准"三件同批"）
+    # ══════════════════════════════════════════════════════════════════════════
+    # 🔴 本批要回答的**唯一问题**：**食物有没有成为绑定约束**（= "位置"第一次有信息价值）。
+    #    背景：R183/R184 实测 ⇒ 现状 Σ再生 3153 ⇒ K≈12 400 ≫ 软顶 1 944 ⇒
+    #    **食物从不绑定** ⇒ 生物随处有食 ⇒ 斑块信息无用（可能解释 E-019/E-023/E-027 的阴性）。
+    # 🔴 参数已由 K 验收工具定稿（tools/verify_k.py，纯素食世界独立实测）：
+    #    · mult=1.195 ⇒ Σ斑块再生 406.3 ⇒ K_prior 1600 / **K_meas 1383** ✅ ∈ [1200,1900]
+    #    · mult=3.0   ⇒ Σ斑块再生 1020.1 ⇒ K_meas 3220 ❌（≥ 软顶 ⇒ 不绑定）
+    #      （两档实测人均需求 0.294 / 0.317 ≠ 事前估算 0.254 ⇒ 食物稀缺会抬高觅食成本）
+    # 臂设计（归因干净：B vs C 只差"能量标定"，C vs A 只差"食物绑定"）：
+    #   · A = 13.4 行为对照（显式 patch-mult=2.0；③ 全默认）⇒ 食物不绑定
+    #   · B = 13.5 全开（食物绑定 + 能量标定）                ⇒ 新纪元基线
+    #   · C = 只食物绑定（bgzero + mult，③ 不接线）           ⇒ 隔离"绑定"的独立贡献
+    # ⚠️ 本批**不判分化**（8k/12k 只有 ~10–20 代 ⇒ R149 世代门不过）；只判：
+    #   ① Σ名义再生与容量构成可从产物自证 ② N 是否朝 K 收敛（不再顶软顶）
+    #   ③ 饿死占比是否显著上升（食物成为死因主项）④ 净收入是否仍为正 ⑤ 不灭绝
+    # 规模：3 臂 × 4 seed × 12k = 12 run。冒烟先跑 1 run × 2k（§12.2.1）。
+    "p135food": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=4000",
+               "snapshot-dir=_rerun_logs/p135food_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="A", args=["patch-mult=2.0"],
+                 template="_rerun_logs/p135food/A_s{seed}.csv"),
+            dict(name="B", args=["bgzero", "patch-mult=1.195",
+                                 "photo-max=0", "eat-efficiency=7.5",
+                                 "assim-herb=0.4", "assim-carn=0.8",
+                                 "stomach-cap-mass=25", "eat-threshold-frac=0.6",
+                                 "starve-frac=0.30", "exhaust-frac=0.17",
+                                 "max-energy=600", "initial-energy=300"],
+                 template="_rerun_logs/p135food/B_s{seed}.csv"),
+            dict(name="C", args=["bgzero", "patch-mult=1.195"],
+                 template="_rerun_logs/p135food/C_s{seed}.csv"),
+        ],
+    ),
 }
 
 # ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
