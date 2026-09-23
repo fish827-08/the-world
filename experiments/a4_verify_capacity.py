@@ -172,6 +172,14 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           # 🔴 13.5 ①②（2026-09-24）：食物绑定 —— 背景产能归零 + 斑块再生倍率
           bg_production_zero: bool = False,  # 背景容量/再生/存量三者归零（只留斑块生产）
           patch_regrowth_mult: float | None = None,   # None = 用 config 默认
+          # 🔴 13.6 S1（2026-09-24，R193 派工）：三种地形的几何参数（**默认 = config 现状**
+          #   ⇒ 不传时逐位等价）。地形 = count×radius×mult 三参数组合（设计稿 §一）：
+          #     森林 12/3/1.62（少而大 ⇒ 聚集）｜草原 60/1/1.06（多而小 ⇒ 分散）｜
+          #     荒漠 10/1/2.47（少而小 ⇒ 难找）。`patch_capacity_mult` 默认 None = 不覆盖
+          #   （config 3.0）—— 只有需要改**容量**倍率时才传（地形表只用再生倍率定 K）。
+          patch_count: int = 30,             # 斑块中心数（config 默认 30）
+          patch_radius: int = 2,             # 斑块半径（config 默认 2）
+          patch_capacity_mult: float | None = None,   # None = 用 config 默认（3.0）
           # 🔴 R187（2026-09-24）：`eat_efficiency` 语义澄清为**完全燃烧值**。
           #   13.5 必须与吸收率**同批**传：7.5 × 0.4 = 3.0 = 现状净吸收（⇒ 不灭绝）；
           #   单传 assim=0.4 会让净吸收腰斩 ⇒ 低代谢个体赤字 ⇒ 连锁灭绝（R187 实测）。
@@ -331,6 +339,17 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.resources.bg_production_zero = bool(bg_production_zero)
     if patch_regrowth_mult is not None:
         c.resources.patch_regrowth_mult = float(patch_regrowth_mult)
+    # 🔴 13.6 S1（2026-09-24）：地形几何三参数（**默认 = config 现状 ⇒ 不传逐位等价**）
+    #   ⚠️ 这里用构造后赋值：`ResourceConfig.__post_init__` 的校验（count≥1 / radius≥1 /
+    #      capacity_mult>1）只在构造期跑 ⇒ 赋值不触发校验。⇒ 本段**显式复刻**那三条断言，
+    #      让非法地形参数在 a4 层就 fail-loud（F1 同型教训："赋值绕过 __post_init__"）。
+    c.resources.patch_count = int(patch_count)
+    c.resources.patch_radius = int(patch_radius)
+    if patch_capacity_mult is not None:
+        c.resources.patch_capacity_mult = float(patch_capacity_mult)
+    assert c.resources.patch_count >= 1, "patch_count 至少 1"
+    assert c.resources.patch_radius >= 1, "patch_radius 至少 1"
+    assert c.resources.patch_capacity_mult > 1.0, "patch_capacity_mult 必须 > 1（否则无富集）"
     # A′ 走向构造参数（而非构造后赋值）：`__post_init__` 只在构造时跑 ⇒ 赋值不会校验（F1 同型教训）
     d2 = InfoStructureConfig(
         enabled=True,
@@ -634,6 +653,18 @@ def main() -> None:
                          "默认关（= 现状，背景贡献 67.7%% 容量 / 78%% 再生）")
     ap.add_argument("--patch-mult", dest="patch_regrowth_mult", type=float, default=None,
                     help="13.5 ②：斑块再生倍率；None = 用 config 默认（不改动）")
+    # ---- 🔴 13.6 S1（2026-09-24，R193 派工）：三种地形的几何参数 -------------------
+    # 默认 = config 现状（30 / 2 / 不覆盖）⇒ 关档逐位等价；地形 preset 显式传值。
+    # ⚠️ 与 `--patch-mult`（斑块**再生**倍率）不同：`--patch-capacity-mult` 是**容量**倍率。
+    ap.add_argument("--patch-count", dest="patch_count", type=int, default=30,
+                    help="13.6 地形：斑块中心数（默认 30 = config 现状）；"
+                         "森林 12 / 草原 60 / 荒漠 10（设计稿 §一）")
+    ap.add_argument("--patch-radius", dest="patch_radius", type=int, default=2,
+                    help="13.6 地形：斑块半径（默认 2 = config 现状）；"
+                         "森林 3（块大）/ 草原 1 / 荒漠 1（块小）")
+    ap.add_argument("--patch-capacity-mult", dest="patch_capacity_mult", type=float,
+                    default=None,
+                    help="13.6 地形：斑块格**容量**倍率；None = 用 config 默认（3.0，不改动）")
     ap.add_argument("--eat-efficiency", dest="eat_efficiency", type=float, default=None,
                     help="🔴 R187：吃进去的质量→能量的倍率（语义 = 完全燃烧值）；"
                          "None = 用 config 默认。13.5 须与 --assim-herb 同批：7.5 × 0.4 = 3.0")
@@ -770,6 +801,10 @@ def main() -> None:
                   # 🔴 13.5（2026-09-24）：食物绑定 + 能量标定（默认 = 现状 ⇒ 关档逐位等价）
                   bg_production_zero=bool(args.bg_production_zero),
                   patch_regrowth_mult=args.patch_regrowth_mult,
+                  # 13.6 S1 地形几何（默认 = config 现状）
+                  patch_count=args.patch_count,
+                  patch_radius=args.patch_radius,
+                  patch_capacity_mult=args.patch_capacity_mult,
                   stomach_cap_mass=args.stomach_cap_mass,
                   eat_threshold_frac=args.eat_threshold_frac,
                   starve_frac=args.starve_frac,
@@ -1170,6 +1205,12 @@ def main() -> None:
             #    否则"传了参数却没生效"会静默（F1 家族；老工 00:20 实测过 bg_production_zero 不生效）。
             "bg_production_zero": bool(e.config.resources.bg_production_zero),
             "patch_regrowth_mult": float(e.config.resources.patch_regrowth_mult),
+            # 🔴 13.6 S1（2026-09-24）：**地形身份必须可从产物自证**（C4）——
+            #    三地形 preset 的唯一差别就在这 3 个键上（count/radius/capacity_mult）；
+            #    缺席 ⇒ 外复核只能靠 preset 名（R136 §一 增量 2 的同型缺口）。
+            "patch_count": int(e.config.resources.patch_count),
+            "patch_radius": int(e.config.resources.patch_radius),
+            "patch_capacity_mult": float(e.config.resources.patch_capacity_mult),
             "stomach_cap_mass": float(e.config.organisms.stomach_cap_mass),
             "eat_threshold_frac": float(e.config.organisms.eat_threshold_frac),
             "starve_frac": float(e.config.organisms.starve_frac),

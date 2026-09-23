@@ -959,6 +959,86 @@ PRESETS = {
                  template="_rerun_logs/p135food/C_s{seed}.csv"),
         ],
     ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 13.6 S1：三种食物地形（2026-09-24，R193 派工 §一.3；fish 09-24 批准四件）
+    # ══════════════════════════════════════════════════════════════════════════
+    # 目的：为 S3 三地形对比提供**可跑形态** —— 森林（少而大 ⇒ 聚集）/
+    #      草原（多而小 ⇒ 分散）/ 荒漠（少而小 ⇒ 难找）。
+    # 地形 = `patch_count` × `patch_radius`（几何）+ `patch_regrowth_mult`（把 K 定到目标）：
+    #   terrain_forest : 12 / 3 / 1.62 ⇒ K≈1800（≈ 现状单块容量 1.9×、块数 0.4× ⇒ 聚集）
+    #   terrain_grass  : 60 / 1 / 1.06 ⇒ K≈1000（块小量少但到处有 ⇒ 分散）
+    #   terrain_desert : 10 / 1 / 2.47 ⇒ K≈400 （块极少 ⇒ 难找；fish 裁定"加倍率保结构语义"）
+    # 🔴 非地形参数 = **13.5 全开**（食物绑定 + 能量标定）：bgzero + photo-max=0 +
+    #    ③ 全参（净吸收 eff7.5×assim0.4=3.0）+ energy-cap + soft-cap 0.6 + patchy。
+    #    ⇒ 设计稿 §0.2 的 K 口径（人均需求 0.254 @ 净吸收 3.0「13.5 定稿」）成立。
+    #    ⚠️ 派工单 §一.3 写"与 p135food 的 **C 臂**一致"，但其括号内枚举
+    #       （photo-max=0 + 13.5 ③ 全参）**只存在于 B 臂**（C 臂 = bgzero + patch-mult）
+    #       ⇒ 按括号内**具体枚举**实现（= B 臂级配置 + 地形几何）；已在 S1 回板单列。
+    # 🔴 各自**专属快照目录**（F-R12/F-R13 血泪：默认目录 + 重名 ⇒ 静默从旧快照续跑）。
+    # 🔴 S1 交付后 **B′（斑块聚合）即 terrain_forest 本身**（派工 §四·补）⇒ 可直接当实验臂。
+    # 规模：3 preset × 1 地形 × 4 seed（42/7/11/13）× 12k = 12 run（S3 对比批的形态）。
+    # ⚠️ 预注册判据见 S3（三地形读数互相可分）；本轮 S1 **只验可展开 + 参数齐全**。
+    "terrain_forest": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=4000",
+               "snapshot-dir=_rerun_logs/terrain_forest_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="forest",
+                 args=["bgzero", "photo-max=0", "eat-efficiency=7.5",
+                       "assim-herb=0.4", "assim-carn=0.8",
+                       "stomach-cap-mass=25", "eat-threshold-frac=0.6",
+                       "starve-frac=0.30", "exhaust-frac=0.17",
+                       "max-energy=600", "initial-energy=300",
+                       "patch-count=12", "patch-radius=3", "patch-mult=1.62"],
+                 template="_rerun_logs/terrain_forest/forest_s{seed}.csv"),
+        ],
+    ),
+    "terrain_grass": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=4000",
+               "snapshot-dir=_rerun_logs/terrain_grass_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="grass",
+                 args=["bgzero", "photo-max=0", "eat-efficiency=7.5",
+                       "assim-herb=0.4", "assim-carn=0.8",
+                       "stomach-cap-mass=25", "eat-threshold-frac=0.6",
+                       "starve-frac=0.30", "exhaust-frac=0.17",
+                       "max-energy=600", "initial-energy=300",
+                       "patch-count=60", "patch-radius=1", "patch-mult=1.06"],
+                 template="_rerun_logs/terrain_grass/grass_s{seed}.csv"),
+        ],
+    ),
+    "terrain_desert": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13"],
+        fixed=["mode=on", "arm=main", "ticks=12000",
+               "max-count=3240", "snapshot-every=4000",
+               "snapshot-dir=_rerun_logs/terrain_desert_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            dict(name="desert",
+                 args=["bgzero", "photo-max=0", "eat-efficiency=7.5",
+                       "assim-herb=0.4", "assim-carn=0.8",
+                       "stomach-cap-mass=25", "eat-threshold-frac=0.6",
+                       "starve-frac=0.30", "exhaust-frac=0.17",
+                       "max-energy=600", "initial-energy=300",
+                       "patch-count=10", "patch-radius=1", "patch-mult=2.47"],
+                 template="_rerun_logs/terrain_desert/desert_s{seed}.csv"),
+        ],
+    ),
 }
 
 # ---- 🔴 F-R32 守卫（2026-09-19 实际事故）：**同名 preset 会被 dict 字面量静默覆盖** ----
