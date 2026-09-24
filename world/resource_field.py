@@ -45,6 +45,16 @@ class ResourceField:
         基准再生速度（每 tick 每格恢复的食物量，温度因子为 1 时）。
     temp_sensitivity : float
         再生受温度影响的强弱（0=完全不看温度，越大越看温度）。
+    light_sensitivity : float
+        再生受**光照强度**影响的强弱（0=完全不看光，与旧机制完全一致）。
+        >0 时，再生量额外乘 clip(光照,0,1)^light_sensitivity（"光合作用"）。
+        与季节机制（LightConfig.tilt_rad/season_period）合用时：
+        夏季日照长 ⇒ 该半球再生快 ⇒ 食物丰度带随季节南北移动（"绿浪"）。
+    light_normalize : bool
+        是否把光照因子按全球均值归一化（保持全球平均再生量不变）。
+        🔴 它是**保总量**的开关：开启后季节只改变再生的**空间分布**（南北此消彼长），
+        不改变全球总量 ⇒ 与光照的零均值特性一致，回归季节关闭时必须无影响。
+        关闭时全球总量在极昼/极夜间整体起伏（信号更强、但格局会随半周期整体涨落）。
     _grid : NDArray[float64], 形状 (n_cells,) 平铺
         每个格子当前的食物存量（扁平数组，通过 flat 索引访问）。
     _capacity : NDArray[float64], 形状 (n_cells,) 平铺
@@ -57,6 +67,8 @@ class ResourceField:
         "capacity_per_area",
         "regrowth_rate",
         "temp_sensitivity",
+        "light_sensitivity",
+        "light_normalize",
         "distribution",
         "_grid",
         "_capacity",
@@ -73,6 +85,8 @@ class ResourceField:
         capacity_per_area: float = 40.0,
         regrowth_rate: float = 0.5,
         temp_sensitivity: float = 1.0,
+        light_sensitivity: float = 0.0,
+        light_normalize: bool = False,
         distribution: str = "uniform",
         patch_count: int = 30,
         patch_radius: int = 2,
@@ -99,6 +113,14 @@ class ResourceField:
         ----
         world, lt, capacity_per_area, regrowth_rate, temp_sensitivity :
             同旧版。
+        light_sensitivity : 🔴 **R196 光驱动再生**（2026-09-24）——
+            再生量额外乘 `clip(光照,0,1)^light_sensitivity`。光照本身由
+            `LightConfig.tilt_rad`/`season_period` 驱动正弦季节摆动 ⇒
+            开季节后南北半球日照此消彼长 ⇒ 食物丰度带随季节南北移动。
+            物理原型：光合作用有效辐射（PAR）随日照时长/太阳高度角变化
+            —— 即"日照长短决定初级生产力"（Sverdrup 临界深度、绿浪假说）。
+            默认 0.0 = **完全不看光** ⇒ 与旧版逐位一致（回归安全）。
+        light_normalize : 见类文档。默认 False。
         distribution : "uniform" | "patchy"，默认 uniform。
         patch_count : 斑块中心数。
         patch_radius : 斑块半径（邻居扩散层数）。
@@ -119,6 +141,12 @@ class ResourceField:
         self.capacity_per_area = float(capacity_per_area)
         self.regrowth_rate = float(regrowth_rate)
         self.temp_sensitivity = float(temp_sensitivity)
+        self.light_sensitivity = float(light_sensitivity)
+        self.light_normalize = bool(light_normalize)
+        if self.light_sensitivity < 0.0:
+            raise ValueError(
+                f"light_sensitivity 必须 ≥ 0，收到 {light_sensitivity}"
+            )
         self.distribution = distribution
 
         areas = world.cell_area(np.arange(world.n_cells))
@@ -354,17 +382,21 @@ class ResourceField:
     def _regrowth_amount(self, tick: int) -> NDArray[np.float64]:
         """计算每格本 tick 应恢复的食物量（内部函数）。
 
-        规则：恢复量 = 基准恢复率 × 温度因子。
-        温度因子 = clip(温度 / 0°C, 0, 1)^temp_sensitivity：
+        规则：恢复量 = 基准恢复率 × **温度因子** × **光照因子**（后者可选）。
+        温度因子 = clip((温度+20°C)/20, 0, 1)^temp_sensitivity：
           - 温度 ≥ 0°：因子 1，恢复满速；
           - 温度 0°~-20°：逐渐变小，越冷恢复越慢；
           - 温度 ≤ -20°：因子≈0，几乎不恢复（极地冰封）。
-        极点因为温度极低，再生基本停摆；但容纳的生物也少，符合"竞争少"。
+        光照因子 = clip(光照, 0, 1)^light_sensitivity：
+          - light_sensitivity = 0（默认）⇒ 因子恒为 1 ⇒ **与旧版逐位一致**；
+          - >0 ⇒ "日照越长、太阳越高 ⇒ 初级生产力越强"（光合作用有效辐射）。
+            配合季节机制 ⇒ 夏季半球再生快、冬季半球再生慢，
+            食物丰度带随季节南北移动 ⇒ 迁徙的**驱动源**。
 
         参数
         ----
         tick : int
-            当前时间步（用于查温度）。
+            当前时间步（用于查温度、光照）。
 
         返回
         ----
@@ -376,6 +408,16 @@ class ResourceField:
         factor = np.clip((temps + 20.0) / 20.0, 0.0, 1.0)
         factor = np.power(factor, self.temp_sensitivity)
         growth = self.regrowth_rate * factor
+        # ---- 🔴 R196 光驱动再生（light_sensitivity=0 时下面整块恒等跳过）----
+        if self.light_sensitivity > 0.0:
+            ill = self.lt.illumination(np.arange(self.world.n_cells), tick)
+            lf = np.power(np.clip(ill, 0.0, 1.0), self.light_sensitivity)
+            if self.light_normalize:
+                # 按全球均值归一化 ⇒ 只改空间分布，不改全球总量
+                m = float(lf.mean())
+                if m > 1e-9:
+                    lf = lf / m
+            growth = growth * lf
         # patchy 守恒：斑块格 × patch_mult，背景格 × bg_mult，周期总再生量不变
         if self.distribution == "patchy" and self._patch_mask is not None:
             growth = np.where(

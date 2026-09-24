@@ -334,6 +334,10 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           #   None/None（默认）⇒ 不覆盖 config ⇒ 关档逐位等价
           tilt_deg: float | None = None,
           season_period: int | None = None,
+          # 🔴 R196 光驱动再生（迁移驱动源）：light_sensitivity>0 ⇒ 再生乘光照因子
+          #   None（默认）⇒ 不覆盖 config（= 0.0）⇒ 逐位等价
+          light_sensitivity: float | None = None,
+          light_normalize: bool | None = None,
           # R145 §七.1：光合产能覆盖（`photo_max`；None = 不覆盖）——供配对臂用
           photo_max: float | None = None,
           # 🔴 13.5 ③（2026-09-24，fish 批准）：能量标定 7 参
@@ -446,6 +450,11 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         c.light.tilt_rad = float(np.deg2rad(float(tilt_deg)))
     if season_period is not None:
         c.light.season_period = int(season_period)
+    # 🔴 R196 光驱动再生 —— 默认 None = 不覆盖（保持 0.0）⇒ 逐位等价
+    if light_sensitivity is not None:
+        c.resources.light_sensitivity = float(light_sensitivity)
+    if light_normalize is not None:
+        c.resources.light_normalize = bool(light_normalize)
     # R146/R149 L1/L2（R150 B1/B2）：**默认全关 ⇒ 旧行为**（H1 逐位等价，C7 已钉死）
     c.simulation.l1_seek = bool(l1_seek)
     c.simulation.l1_fear = bool(l1_fear)
@@ -916,6 +925,15 @@ def main() -> None:
     ap.add_argument("--season-period", dest="season_period", type=int, default=None,
                     help="一个季节循环的 tick 数（'一年'）；None=无季节（默认）。"
                          "R149 前置门：观测长度须 ≥ 3×该值")
+    # ── 🔴 R196 光驱动再生 —— 默认 None = 不覆盖 config（= 0.0）⇒ 逐位等价 ──
+    ap.add_argument("--light-sensitivity", dest="light_sensitivity", type=float,
+                    default=None,
+                    help="再生量对光照的敏感度（clip(光照,0,1)^该值 的指数）。"
+                         "None/0 = 不看光（默认，逐位等价）；1.0 = 标准光合响应。"
+                         "与 --tilt-deg/--season-period 合用 ⇒ 食物带随季节移动")
+    ap.add_argument("--light-normalize", dest="light_normalize",
+                    action="store_true", default=None,
+                    help="光照因子按全球均值归一化（保全球平均再生量，只改空间分布）")
     args = ap.parse_args()
 
     arm = args.arm
@@ -996,6 +1014,9 @@ def main() -> None:
                   # 13.7 季节（默认 None/None ⇒ 不覆盖 ⇒ 逐位等价）
                   tilt_deg=args.tilt_deg,
                   season_period=args.season_period,
+                  # 🔴 R196 光驱动再生（默认 None ⇒ 不覆盖 ⇒ 逐位等价）
+                  light_sensitivity=args.light_sensitivity,
+                  light_normalize=args.light_normalize,
                   stomach_cap_mass=args.stomach_cap_mass,
                   eat_threshold_frac=args.eat_threshold_frac,
                   starve_frac=args.starve_frac,
@@ -1447,6 +1468,14 @@ def main() -> None:
             "tilt_rad": float(e.config.light.tilt_rad),
             "tilt_deg": float(np.rad2deg(e.config.light.tilt_rad)),
             "season_period": int(e.config.light.season_period),
+            # 🔴 R196（2026-09-24）：光驱动再生身份必须可从产物自证（C4）——
+            #    迁徙驱动源的唯一开关；缺席 ⇒ 无法判"食物带是否随季节移动"。
+            "light_sensitivity": float(
+                getattr(e.config.resources, "light_sensitivity", 0.0)
+            ),
+            "light_normalize": bool(
+                getattr(e.config.resources, "light_normalize", False)
+            ),
             # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
             #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
             "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),

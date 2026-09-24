@@ -497,6 +497,15 @@ class SphereEngine:
             capacity_per_area=config.resources.capacity_per_area,
             regrowth_rate=config.resources.regrowth_rate,
             temp_sensitivity=config.resources.temp_sensitivity,
+            # 🔴 R196 光驱动再生（2026-09-24）：再生量乘光照因子 ⇒ 食物带随季节移动。
+            #   ⚠️ 必须显式透传，否则 `ResourceConfig.light_sensitivity` 是**死字段**
+            #   （同 13.5 ① `bg_production_zero` 家族：不传即"静默无变化"——C9）。
+            light_sensitivity=float(
+                getattr(config.resources, "light_sensitivity", 0.0)
+            ),
+            light_normalize=bool(
+                getattr(config.resources, "light_normalize", False)
+            ),
             distribution=config.resources.distribution,
             patch_count=config.resources.patch_count,
             patch_radius=config.resources.patch_radius,
@@ -657,6 +666,20 @@ class SphereEngine:
                 "use_sim_core=True 时开启会**静默走无季节光照**（开关开了行为却不变"
                 " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
                 "（§14.7：新机制强制 Python 路径）。"
+            )
+        # ── H3（R196）：light_sensitivity>0 时必须 **fail-loud** ───────────────
+        # 光驱动再生（`ResourceField._regrowth_amount` 的 illumination 因子）只在
+        # Python 路径实现 —— Rust 的 `resource.rs` 再生式**只耦合温度** ⇒
+        # use_sim_core=True 时开启会**静默走无光照再生**（开关开了行为却不变
+        # = 静默 no-op 的同族形态）⇒ 构造期硬报错。
+        if _scfg0.use_sim_core and float(
+            getattr(getattr(config, "resources", None), "light_sensitivity", 0.0)
+        ) > 0.0:
+            raise NotImplementedError(
+                "light_sensitivity>0（光驱动再生：再生量乘光照因子）尚未下沉 Rust："
+                "use_sim_core=True 时开启会**静默走只看温度的旧再生路径**"
+                "（开关开了行为却不变 = 静默 no-op 的同族形态）⇒ 硬报错。"
+                "请设 use_sim_core=False（§14.7：新机制强制 Python 路径）。"
             )
         # ── H3（13.4 波 2B，T3）：perception_span=2 开启时必须 **fail-loud** ──────
         # span=2 需要两圈邻居表（`_span_table`），只在 Python 移动路径实现 ⇒

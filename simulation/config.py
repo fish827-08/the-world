@@ -78,6 +78,16 @@ class ResourceConfig:
     temp_sensitivity: float = 1.0     # 再生对温度的依赖（0=不 care，越大越敏感）
     initial_fill: float = 0.5         # 初始填充比例（每格开始有多少食物，0~1）
 
+    # ---- 🔴 R196 光驱动再生（2026-09-24）------------------------------
+    # 再生量额外乘 clip(光照,0,1)^light_sensitivity（"光合作用"）。
+    # 与 `LightConfig.tilt_rad`/`season_period` 合用时：夏季半球日照长 ⇒ 再生快，
+    # 冬季半球日照短 ⇒ 再生慢 ⇒ 食物丰度带随季节南北移动（"绿浪"）。
+    # ⚠️ light_sensitivity=0（默认）时**整块跳过** ⇒ 与旧版逐位一致（回归安全）。
+    # 物理原型：光合作用有效辐射（PAR）随日照时长/太阳高度角变化
+    #   —— Sverdrup 临界深度（光限春季藻华）/ 绿浪假说（有蹄类跟随返青带）。
+    light_sensitivity: float = 0.0    # 再生对光照的依赖（0=完全不看光，与旧版一致）
+    light_normalize: bool = False     # 光照因子按全球均值归一化（保持全球平均再生量）
+
     # ---- 斑块化（L1，守恒版）------------------------------------------
     # distribution="uniform" 时以下字段全部不生效，行为与旧版完全一致。
     # "patchy" 时：食物聚簇到斑块，背景压低；两条守恒保证总食物量不变：
@@ -115,6 +125,9 @@ class ResourceConfig:
         assert self.regrowth_rate >= 0, "再生率非负"
         assert 0.0 <= self.initial_fill <= 1.0, "初始填充比例在 0~1"
         assert self.distribution in ("uniform", "patchy"), "distribution 只能是 uniform 或 patchy"
+        # ---- 🔴 R196 光驱动再生 ----
+        assert self.light_sensitivity >= 0.0, "light_sensitivity 必须非负（0=不看光）"
+        assert isinstance(self.light_normalize, bool), "light_normalize 必须是布尔值"
         if self.distribution == "patchy":
             assert self.patch_count >= 1, "斑块数至少 1"
             assert self.patch_radius >= 1, "斑块半径至少 1"
