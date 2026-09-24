@@ -98,6 +98,22 @@ def _table(rows: list[list[str]], header: list[str]) -> str:
 
 # --------------------------------------------------------------------------- C9
 
+def _declared_field_names(text: str) -> list[str]:
+    """从「可自证字段」行里抽取反引号内标识符（原 `check_c9` 内联逻辑，抽成函数）。"""
+    out: list[str] = []
+    stop = {"result", "switches", "null", "true", "false", "none", "n/a", "csv", "json"}
+    for line in text.splitlines():
+        if "可自证字段" not in line:
+            continue
+        for span in re.findall(r"`([^`]+)`", line):
+            for tok in re.split(r"[、,，/ ]+", span):
+                tok = tok.strip()
+                if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{2,}", tok)
+                        and tok.lower() not in stop and tok not in out):
+                    out.append(tok)
+    return out
+
+
 def check_c9() -> int:
     """C9：`AGENT.md §十三` 声明的 `switches`/`result` 字段，代码里真的存在吗？
 
@@ -115,19 +131,25 @@ def check_c9() -> int:
         return 0
     sect = m.group(1)
 
-    declared: list[str] = []
-    stop = {"result", "switches", "null", "true", "false", "none", "n/a", "csv", "json"}
-    for line in sect.splitlines():
-        if "可自证字段" not in line:
+    # 🔴 「已声明但尚未实现」的纪元：设计稿/派工单已发、代码还没写。这类纪元的字段
+    #    **必然找不到**，若照常报 🔴 ⇒ 每立一个新纪元都撞一次假报警（假报警会淹没真
+    #    报警，同 `git` 检查那次）。处理规则（三条缺一不可）：
+    #      ① **必须**在该小节标题里显式写「待实现」才跳过（不许靠字段名猜）；
+    #      ② 跳过项**显著报出**（打印小节名 + 全部字段），**禁静默**；
+    #      ③ 实现完成后**必须同 commit 删掉标题里的标记**，否则字段永远不被校验。
+    pending: list[tuple[str, list[str]]] = []
+    active_blobs: list[str] = []
+    for blk in re.split(r"^### ", sect, flags=re.M):
+        head = blk.splitlines()[0].strip() if blk.strip() else ""
+        if head and re.search(r"待实现|尚未实现", head):
+            names = _declared_field_names(blk)
+            if names:
+                pending.append((head[:46], names))
             continue
-        for span in re.findall(r"`([^`]+)`", line):
-            for tok in re.split(r"[、,，/ ]+", span):
-                tok = tok.strip()
-                if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{2,}", tok)
-                        and tok.lower() not in stop and tok not in declared):
-                    declared.append(tok)
+        active_blobs.append(blk)
+    declared = _declared_field_names("\n".join(active_blobs))
 
-    if not declared:
+    if not declared and not pending:
         print("⚠️ §十三 未解析出任何字段名（格式变了？）—— 跳过")
         return 0
 
@@ -151,6 +173,14 @@ def check_c9() -> int:
         return 1
     print("✅ 全部名字都能在代码里按词边界找到"
           "（注意：这只证明「名字在」，不证明「接线对」）。")
+    if pending:
+        total = sum(len(n) for _, n in pending)
+        print(f"\n⚠️ **跳过 {len(pending)} 个「待实现」纪元小节**（共 {total} 个字段**未校验**）：")
+        for head, names in pending:
+            print(f"  · {head} ⇒ " + "、".join(f"`{x}`" for x in names))
+            print("    🔴 归属：设计稿/派工单已发，代码尚未实现（字段不存在是**预期**）；"
+                  "**实现完成后必须同 commit 删掉小节标题里的「待实现」标记**，"
+                  "否则这些字段永远不被 C9 校验（= 用标记开后门）。")
     return 0
 
 
