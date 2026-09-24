@@ -58,7 +58,7 @@ class Gene(IntEnum):
     HEDONISM = 20            # 享乐敏感（未接线，预留）
     PROCESSING = 21          # 处理位（未接线，预留）
     TRUST_GENE = 22          # 信任阈值（未接线，预留）
-    RESERVED = 23            # 预留
+    MIGRATE_BIAS = 23        # 迁徙倾向（日历—罗盘式定向迁徙，13.8 接线；原 RESERVED）
 
 
 GENE_COUNT: int = len(Gene)
@@ -131,7 +131,7 @@ GENE_SEMANTICS: tuple[str, ...] = (
     "享乐敏感（未接线）",  # g20
     "处理位（未接线）",    # g21
     "信任阈值（未接线）",  # g22
-    "预留",                # g23
+    "迁徙倾向（日历—罗盘）",  # g23（13.8 接线；原「预留」）
 )
 
 # 已接线的基因位（引擎/Rust 消费）；未接线的仅是预留位（观察台跟踪漂移）
@@ -142,6 +142,7 @@ _GENE_WIRED: set[int] = {
     int(Gene.HOMEOTHERM), int(Gene.FORAGE_NEIGHBOR), int(Gene.TEMP_PREF),
     int(Gene.REPRO_COOLDOWN), int(Gene.SOCIABILITY), int(Gene.PERCEPTION),
     int(Gene.SIGNAL_STRENGTH), int(Gene.AGGRESSION), int(Gene.ROOTING),
+    int(Gene.MIGRATE_BIAS),
 }
 GENE_WIRED: frozenset[int] = frozenset(_GENE_WIRED)
 
@@ -188,7 +189,7 @@ GENE_META: tuple[GeneMeta, ...] = (
     GeneMeta(0.10, 0),    # g20 享乐敏感（预留）：默认
     GeneMeta(0.10, 0),    # g21 处理位（预留）：默认
     GeneMeta(0.10, 0),    # g22 信任阈值（预留）：默认
-    GeneMeta(0.10, 0),    # g23 预留：默认
+    GeneMeta(0.10, 0),    # g23 迁徙倾向（13.8 接线；探索性位，宽松突变）
 )
 
 

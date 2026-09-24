@@ -870,6 +870,67 @@ class SubposConfig:
 
 
 @dataclass
+class MigrationConfig:
+    """日历—罗盘式定向迁徙（13.8；fish 2026-09-25 批准 / 设计稿 `docs/设计文档/设计-日历罗盘式定向迁徙-20260925.md`）。
+
+    为什么
+    ------
+    13.7 已把季节接上（`band_res` 摆幅 1.4–3° → 21–37°），但 **个体仍不会迁徙**
+    （R197 实测：掉头率 0.525 ≈ 0.5；且 R196 臂个体位移 6.16° **反而小于**
+    无季节基线 7.49°）。根因已定位到信噪比：
+
+        食物带移动 0.0015°/tick  vs  个体随机运动 0.025–0.030°/tick  ⇒ **慢 17–20 倍**
+
+    ⇒ 「让个体感知食物梯度」这条路**在信噪比上就被堵死**。本机制改走真实鸟类
+    用的两件东西：**一个日历（本地日照时长）+ 一个罗盘（自己的绝对纬度）**，
+    再加一个自由基因位 `g23`，让"要不要用、用多强"由选择压自己决定。
+
+    机制（移动打分加一项，逐候选）
+    ------------------------------
+        A_i(t)   = photoperiod(φ_self, t) − 0.5      # 本地日照异常见量，>0 = 本地夏季
+        Δ|φ|(n)  = |φ_n| − |φ_self|                   # 该候选"离极地更近/更远"
+        score(n) += enabled · gain · g23_i · A_i(t) · Δ|φ|(n)
+
+    * **本地夏季（A>0）⇒ 奖励往极地走；本地冬季（A<0）⇒ 奖励往赤道走。**
+    * 🔴 用 `|φ|` 而非带符号 `φ` ⇒ **南北半球自动都对，无需半球分支**。
+
+    为什么这不是"把答案写进模型"
+    ----------------------------
+    只加**可观测维度**（日照时长 / 绝对纬度）+ **一条可被使用的通路**（`g23` 缩放）；
+    `g23` **完全自由**（可为 0／任意正负），**不给任何额外能量/繁殖奖励**。
+    ⇒ 若迁徙无益，选择压会把 `g23` 压向 0 ⇒ **机制自己会证伪自己**。
+
+    🔴 三条硬约束（与 `SubposConfig` / `L2` 同一套纪律）
+    ---------------------------------------------------
+    * **I1** `enabled=False`（默认）⇒ **整块跳过** ⇒ C7 逐位等价
+      （基线 `(574887, 11266.746993)`）
+    * **I2** 新机制**只在 Python 路径**实现 ⇒ 与 Rust 互斥（M1 fail-loud，§14.7）
+    * **I3** **无季节 ⇒ A ≡ 0 ⇒ 迁移项恒 0 ⇒ 开关形同虚设** ⇒ M2 fail-loud
+      （否则会得到"开了迁徙但没反应"的**假阴性**）
+
+    🔴 H3 互斥（fail-loud，两条缺一不可；均**不许 warning**）
+    --------------------------------------------------------
+    * **M1** `enabled=True` ∧ `SimulationConfig.use_sim_core=True`
+      ⇒ 构造期 `NotImplementedError`
+    * **M2** `enabled=True` ∧ **无季节**（`tilt_rad=0` 或 `season_period<=1`）
+      ⇒ 构造期 `ValueError`
+    """
+
+    enabled: bool = False      # 默认关 ⇒ 整块跳过 ⇒ 与本机制加入前**逐位等价**
+    gain: float = 50.0         # 全局权重 w_mig（**实验旋钮，不是基因**；S2 的 P6 量级门定它）
+    min_abs_anomaly: float = 0.0   # |A| 低于此值不计（抑制春秋分附近的噪声翻转）；
+                                   #   0.0 = 不设门槛（默认，最小实现）
+
+    def __post_init__(self) -> None:
+        """字段断言（与全仓配置类同规格：构造即校验，fail-loud）。"""
+        assert isinstance(self.enabled, bool), "migration.enabled 必须是布尔值"
+        assert self.gain >= 0.0, "migration.gain 必须非负"
+        assert 0.0 <= self.min_abs_anomaly <= 0.5, (
+            "migration.min_abs_anomaly 是 |A| 门槛（A∈[−0.5,0.5]）⇒ 须在 0~0.5"
+        )
+
+
+@dataclass
 class ResourceDynamicsConfig:
     """斑块"休耕—死亡—轮作"（13.4 波 2；fish 01:20 构想 / R176 §12）。
 
@@ -948,6 +1009,9 @@ _RESOURCE_DYNAMICS_FIELDS: frozenset = frozenset(
     f.name for f in fields(ResourceDynamicsConfig)
 )
 
+#: 13.8 迁徙配置白名单（同 `_RESOURCE_DYNAMICS_FIELDS` 规格：旧存档缺键回退默认）。
+_MIGRATION_FIELDS: frozenset = frozenset(f.name for f in fields(MigrationConfig))
+
 
 @dataclass
 class SimConfig:
@@ -975,6 +1039,11 @@ class SimConfig:
     # ---- 13.4 波 2：斑块"休耕—死亡—轮作"（默认关 = 旧行为逐位等价）----
     #   实现落在新文件 `world/resource_dynamics.py`；本配置是它的参数契约。
     resource_dynamics: ResourceDynamicsConfig = field(default_factory=ResourceDynamicsConfig)
+    # ---- 13.8 日历—罗盘式定向迁徙（默认关 = 旧行为**逐位等价**）----
+    #   消费 13.7 的 δ(t)（**不改** illumination / light_sensitivity），只**新增**
+    #   `LightAndTemperature.photoperiod`。挂进 SimConfig ⇒ 经 `asdict` **自动进指纹**
+    #   （跨档续跑被拦，同 `subpos` / `resource_dynamics`）。
+    migration: MigrationConfig = field(default_factory=MigrationConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -1053,6 +1122,15 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("resource_dynamics") or {}).items()
                     if k in _RESOURCE_DYNAMICS_FIELDS
+                }
+            ),
+            # 13.8：日历—罗盘式定向迁徙配置；旧存档缺失 ⇒ 回退默认（enabled=False = 旧行为）。
+            #   同款字段白名单过滤（向后兼容：13.8 之前的存档无 `migration` 键）。
+            migration=MigrationConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("migration") or {}).items()
+                    if k in _MIGRATION_FIELDS
                 }
             ),
             # D-8：oracle 配置；旧存档缺失时回退默认关闭（C-6/C-7 先例同 reputation_weight）。

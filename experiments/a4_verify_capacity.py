@@ -54,6 +54,9 @@ from simulation.config import (  # noqa: E402
     SubposConfig,
 )
 from simulation.sphere_engine import SphereEngine  # noqa: E402
+# 🔴 13.8：P7 要求产物自证 `migrate_gene_slot == 23` ⇒ 必须从基因表取**常量**，
+#    不可抄字面量 23（抄了就永远"通过"，位号真错了也测不出来）。
+from simulation.genes import Gene  # noqa: E402
 
 
 # D-19：provenance 统一走 simulation.provenance（硬校验，不再本地静默 None/"unknown"）
@@ -403,7 +406,12 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           # 13.4 波 2B（T3）：视野 / 单格上限 / 社交归一化（默认 = 旧行为）
           perception_span: int = 1, cell_occupancy_cap: int = 3,
           cell_occupancy_cap_enabled: bool = False,
-          social_norm: str = "auto") -> SphereEngine:
+          social_norm: str = "auto",
+          # 🔴 13.8 日历—罗盘式定向迁徙（g23；**默认关 = 旧行为逐位等价**）
+          #   `migration_enabled=False`（默认）⇒ 移动段整段不执行 ⇒ C7 基线不动。
+          migration_enabled: bool = False,
+          migration_gain: float = 50.0,
+          migration_min_abs_anomaly: float = 0.0) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -455,6 +463,12 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         c.resources.light_sensitivity = float(light_sensitivity)
     if light_normalize is not None:
         c.resources.light_normalize = bool(light_normalize)
+    # 🔴 13.8 日历—罗盘式定向迁徙（g23）—— 默认关 ⇒ 移动段整段不执行 ⇒ 逐位等价（C7）。
+    #   M1（enabled ∧ use_sim_core）与 M2（enabled ∧ 无季节）都由**引擎构造期**硬报错，
+    #   这里不重复判（少一处逻辑 = 少一个不一致的机会）。
+    c.migration.enabled = bool(migration_enabled)
+    c.migration.gain = float(migration_gain)
+    c.migration.min_abs_anomaly = float(migration_min_abs_anomaly)
     # R146/R149 L1/L2（R150 B1/B2）：**默认全关 ⇒ 旧行为**（H1 逐位等价，C7 已钉死）
     c.simulation.l1_seek = bool(l1_seek)
     c.simulation.l1_fear = bool(l1_fear)
@@ -934,7 +948,33 @@ def main() -> None:
     ap.add_argument("--light-normalize", dest="light_normalize",
                     action="store_true", default=None,
                     help="光照因子按全球均值归一化（保全球平均再生量，只改空间分布）")
+    # ── 🔴 13.8 日历—罗盘式定向迁徙（g23）—— 默认 False = 旧行为逐位等价 ──
+    ap.add_argument("--migration", dest="migration_enabled", action="store_true",
+                    default=False,
+                    help="开启日历—罗盘式定向迁徙（g23）：候选分数加 "
+                         "gain·g23·A(t)·Δ|φ|。🔴 **必须同时给 --tilt-deg 与 "
+                         "--season-period**（无季节 ⇒ A≡0 ⇒ 项恒 0 ⇒ 假阴性），"
+                         "且**不可与 --use-sim-core 同用**（Rust 未实现）——"
+                         "两种情形都在构造期硬报错（设计稿 §3.5 M1/M2）")
+    ap.add_argument("--migration-gain", dest="migration_gain", type=float, default=50.0,
+                    help="迁移项全局增益（默认 50；S2 扫档建议 20 —— "
+                         "项量级约等于觅食项的十分之一，见设计稿 §4 P6）")
+    ap.add_argument("--migration-min-abs-anomaly", dest="migration_min_abs_anomaly",
+                    type=float, default=0.0,
+                    help="|A| 门槛：本地日长异常绝对值 ≤ 该值则跳过迁移项"
+                         "（0 = 不设门槛，默认；A∈[−0.5,0.5]）")
     args = ap.parse_args()
+    # ── 🔴 13.8 工具侧 fail-loud（设计稿 §3.5 的 M2 前置版）────────────────────
+    # 引擎侧 M2 已拦"enabled ∧ 无季节"，但**工具侧也要拦**：否则命令行给
+    # `--migration` 忘了 `--tilt-deg`，报错信息指向"引擎构造失败"，运维会误以为
+    # 引擎坏了 —— 这里直接说清"是命令行缺参数"，把诊断成本降到零。
+    if args.migration_enabled and (args.tilt_deg is None or args.season_period is None):
+        ap.error(
+            "--migration 必须同时给 --tilt-deg 与 --season-period："
+            "无季节 ⇒ 赤纬 δ(t)≡0 ⇒ 逐格日长 P≡0.5（与纬度无关）⇒ "
+            "日历轴异常 A≡0 ⇒ 迁移项**逐候选恒 0**（argmax 逐位不变）"
+            "⇒ 实验只会读出「迁徙无效」的**假阴性**（错在实验设计，不在机制）。"
+        )
 
     arm = args.arm
     neutral = arm == "zero"
@@ -1017,6 +1057,10 @@ def main() -> None:
                   # 🔴 R196 光驱动再生（默认 None ⇒ 不覆盖 ⇒ 逐位等价）
                   light_sensitivity=args.light_sensitivity,
                   light_normalize=args.light_normalize,
+                  # 🔴 13.8 日历—罗盘式定向迁徙（默认关 ⇒ 逐位等价；M1/M2 由引擎拦）
+                  migration_enabled=bool(args.migration_enabled),
+                  migration_gain=float(args.migration_gain),
+                  migration_min_abs_anomaly=float(args.migration_min_abs_anomaly),
                   stomach_cap_mass=args.stomach_cap_mass,
                   eat_threshold_frac=args.eat_threshold_frac,
                   starve_frac=args.starve_frac,
@@ -1141,6 +1185,9 @@ def main() -> None:
              bool(e.config.corpse_wound.corpse_enabled)),
             ("wound_enabled", bool(args.wound_enabled),
              bool(e.config.corpse_wound.wound_enabled)),
+            # 13.8：迁徙开关同为**臂身份**（mig_base/mig_g/mig_2g/mig_noseason 的唯一差别）
+            ("migration_enabled", bool(args.migration_enabled),
+             bool(e.config.migration.enabled)),
         ):
             if _cli != _snap:
                 raise SystemExit(
@@ -1476,6 +1523,13 @@ def main() -> None:
             "light_normalize": bool(
                 getattr(e.config.resources, "light_normalize", False)
             ),
+            # 🔴 13.8（2026-09-24）：迁徙身份必须可从产物自证（C4）——
+            #    主判据 ρ(Δ|φ|, g23) 的唯一前提开关；缺席 ⇒ 无法判"迁徙是否在跑"。
+            "migration_enabled": bool(e.config.migration.enabled),
+            "migration_gain": float(e.config.migration.gain),
+            "migration_min_abs_anomaly": float(e.config.migration.min_abs_anomaly),
+            # 🔴 P7：基因位号必须自证（= 23）—— 位号错位是"接了却没接对"的隐形来源
+            "migrate_gene_slot": int(Gene.MIGRATE_BIAS),
             # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，
             #    码本/瓶颈两个开关读不到 ⇒ **臂间开关差无法从产物自证**（外复核只能靠 preset 名）。
             "arbitrary_codebook": bool(e.config.info_structure.arbitrary_codebook),
@@ -1620,6 +1674,9 @@ def main() -> None:
             # R146/R149（R150 B1/B2）：L1 两项 + L2 机动性读数（**关档 ⇒ None = 未适用**）
             "l1": e.l1_probe(),
             "l2": e.l2_probe(),
+            # 🔴 13.8：日历—罗盘式定向迁徙读数（**关档 ⇒ None = 未适用**，R120 口径）。
+            #    含反退化占比 mig_flat_frac（R148-1）与量级 mig_term_abs_mean（P6）。
+            "migration": e.migration_probe(),
             "bounds": e.state_bounds_check(),
             # S1 骨架（设计稿 §5.2 项 9）：尸体—食腐 + 血条读数块（**空壳**，值可为 0）
             "corpse": e.corpse_probe(),
