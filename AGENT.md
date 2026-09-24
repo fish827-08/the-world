@@ -780,6 +780,18 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **⚠️ 参数联动（R188 实测，必守）** | 🔴 **改死亡阈值必须同步改初始能量**：`initial_energy < starve_frac × max_energy` ⇒ **开局集体饿死**（实测 300/60 ⇒ N=10；600/300 ⇒ N=95）。任何新批改阈值前先核这一条 |
 | **状态（2026-09-24 更新）** | 🚧 实施中：老工 **①②✅**（`c93d085` bgzero + mult，含 15 例测试）+ `tools/k_calib.py`（`8d4e5e8`）；`[所有者]` **③接线✅ + ①生效接线✅ + a4 读回✅ + p135food preset✅**（`9b726ca`）；批跑 **`p135food`（3 臂 × 4 seed × 12k）待 fish 下令** |
 
+### 13.6 「地形与季节」纪元（2026-09-24 起；依据 R193 方案定稿 + fish 09-24 批准四件；**实施中：S1–S5 `[云端·开发]`**）
+
+| 项 | 内容 |
+|---|---|
+| **触发变更** | ① **三种食物地形**（用现成参数组合，**零新机制**）：`patch_count` × `patch_radius`（几何）+ `patch_regrowth_mult`（把 K 定到目标）⇒ **森林 12/3/1.62（K≈1800）｜草原 60/1/1.06（K≈1000）｜荒漠 10/1/2.47（K≈400）** ② **季节**（S4 待做，路线 A = 调 `tilt_rad` + `temp_sensitivity`，零新机制）③ S2 读数（食物利用率/斑块访问率/在斑块占比/GUD 方差） |
+| **⚠️ 纪元号** | 🔴 **正式编号由 `[所有者]` 给定**；`[云端·开发]` 按「13.6」先行登记占位（2026-09-24），正式号回板确认后回填 |
+| **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`patch_count` / `patch_radius` / `patch_capacity_mult`（S1 新增读回；地形身份 = 这三键）＋ `patch_regrowth_mult` / `bg_production_zero`（13.5 已在册）；`result.spatial`（S2 新增读数块）：`food_util_frac` / `patch_visit_frac` / `on_patch_frac` / `gud_var` / `gud_mean` / `patch_stock_frac` / `sigma_regen_nominal` / `visited_patch_cells` / `spatial_carry_ok`（CSV 同期六列：`food_util_frac`/`patch_visit_frac`/`on_patch_frac`/`gud_var`/`gud_mean`/`patch_stock_frac`） |
+| **为什么（前提）** | R190：食物绑定成立但瓶颈是**可达性**（利用率 2–39%）⇒ `K_eff = K × util`；R191：斑块 93–100% 被占、31–47% 斑块格从未被访问；R192：MVT/ARS 说明"找到不走"是**最优** ⇒ 需要"斑块**可耗尽**"的空间结构 ⇒ 三地形即该结构的最小参数化 |
+| **纪律** | 🔴 **禁跨纪元/跨地形比较**：改 `patch_count`/`patch_radius`/`patch_capacity_mult` **= 改世界构造**（斑块格数/单块容量/可达性全变）⇒ 三地形读数**只在同一 S3 批内互比**，不得与 13.4/13.5 的 patchy 批直接比（那批是 30/2 + 背景产能） |
+| **默认与路径** | 🔴 **默认 = 现状**（`patch_count=30` / `patch_radius=2` / `patch_capacity_mult=3.0`）⇒ 不传参数**逐位等价**（C7 digest `(574887, 11266.746993)` 不动）；**零新机制**（地形只是既有构造参数的取值）⇒ 无需 H3；不动 Rust、不重编 `sim_core.so` |
+| **状态（2026-09-24 更新）** | 🚧 **S1 ✅ + S2 ✅**（`[云端·开发]`，分支 `dev/terrain-s1` → `dev/terrain-s2`）：**S1** = a4 补 `--patch-count`/`--patch-radius`/`--patch-capacity-mult` + `switches` 读回（C4）+ 三地形 preset（`terrain_forest`/`terrain_grass`/`terrain_desert`，各 4 seed × 12k）+ 单测 12 例；**S2** = 四读数落码（`SpatialReadings`，**纯观测**）+ CSV 六列 + `result.spatial` + 侧车续跑（`spatial_carry_ok` 自曝）+ 单测 11 例 + DEL-8 两层变异（两阶段均是：改坏接线 ⇒ 测试变红）。⚠️ S2 实测**复算命中 R191**：访问率 44.7%→53.4%（逐位同）、在斑块 100%、存量比 0.9997、未访问 46.6%（seed42/6000t/C 臂）；S3 对比 → S4 季节 → S5 迁徙 **逐阶段等放行** |
+
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 
 > **背景**：本项目进入"结构改造 + 短实验"高频迭代期（R152–R157）。为把机时与开发解耦，fish 裁定：

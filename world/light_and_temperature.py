@@ -62,6 +62,8 @@ class LightAndTemperature:
         "world",
         "rotation_period",
         "tilt_rad",
+        "season_period",
+        "_season_on",
         "lat_base_ref",
         "t_equator",
         "t_pole",
@@ -94,6 +96,8 @@ class LightAndTemperature:
         t_pole: float = -20.0,
         day_boost: float = 6.0,
         lat_base_ref: float = 1.0,
+        tilt_rad: float = 0.0,
+        season_period: int = 0,
     ) -> None:
         """构造光照温度场。
 
@@ -113,6 +117,13 @@ class LightAndTemperature:
             刻意小 → "夜晚只比白天冷一点"。
         lat_base_ref : float, 默认 1.0
             光照对纬度的敏感指数。越大极地光照衰减越快（极地更冷）。
+        tilt_rad : float, 默认 0.0（= 无季节，与旧行为逐位等价）
+            黄赤交角（弧度）。≠0 ⇒ **季节**：太阳直射点纬度（赤纬 δ）随
+            `season_period` 作正弦摆动 ⇒ 富集纬度带南北移动 ⇒ 迁徙的驱动源。
+            δ(t) = tilt_rad · sin(2πt / season_period)
+        season_period : int, 默认 0（= 无季节）
+            一个完整季节循环的 tick 数（"一年"）。仅当 `tilt_rad ≠ 0` 时生效。
+            须 ≥ 3× 观测长度才看得到完整周期（R149 前置门）。
 
         返回
         ----
@@ -120,7 +131,16 @@ class LightAndTemperature:
         """
         self.world = world
         self.rotation_period = int(rotation_period)
-        self.tilt_rad = 0.0  # 阶段 2 前固定无季节
+        self.tilt_rad = float(tilt_rad)
+        self.season_period = int(season_period)
+        # 季节开关：tilt≠0 且 period>1 ⇒ 启用；否则完全走旧路径（逐位等价）
+        self._season_on = (abs(self.tilt_rad) > 1e-12
+                           and self.season_period > 1)
+        if self._season_on:
+            assert self.season_period >= 2, "season_period 至少 2 tick"
+            # 🔴 季节需要新的光照公式，Rust 版未实现 ⇒ 禁用 Rust 光照，
+            #    强制走 Python 路径（fail-loud 由引擎侧 use_sim_core 守卫负责）。
+            self._rust_lt = None
         self.lat_base_ref = float(lat_base_ref)
         self.t_equator = float(t_equator)
         self.t_pole = float(t_pole)
@@ -174,11 +194,49 @@ class LightAndTemperature:
         if self._cache_base_all is None:
             self._cache_base_all = self.t_pole + (self.t_equator - self.t_pole) * self._pre_cos_lat
 
-        if self._rust_lt is not None:
-            # Rust+Rayon 版（就地写入 _rust_illum/_rust_temp）
+        if not self._season_on and self._rust_lt is not None:
+            # Rust+Rayon 版（就地写入 _rust_illum/_rust_temp）——仅无季节时可用
             self._rust_lt.compute(tick, self._rust_illum, self._rust_temp)
             self._cache_illum_all = self._rust_illum
             self._cache_temp_all = self._rust_temp
+        elif self._season_on:
+            # ── 季节路径（Python，标准天球公式）──
+            # 太阳赤纬 δ(t) = tilt · sin(2πt / season_period)
+            decl = self.tilt_rad * np.sin(
+                2.0 * np.pi * (tick % self.season_period) / self.season_period
+            )
+            sun_lon = self.sun_longitude(tick)
+            # ⚠️ `_pre_col_rad` 是**每格**经度（长度 n_cells），不是每列；
+            #    reshape 成 (rows, cols) 后取第一行即得每列经度（同行内列索引一致）。
+            col_rad = self._pre_col_rad.reshape(
+                self.world.rows, self.world.cols)[0]        # (cols,)
+            lon_diff = col_rad - sun_lon
+            lon_diff = (lon_diff + np.pi) % (2.0 * np.pi) - np.pi
+            cos_h = np.cos(lon_diff)                        # (cols,)
+            # 天顶角余弦 = sin(φ)·sin(δ) + cos(φ)·cos(δ)·cos(h)
+            lat_rows = self.world.latitude_of(
+                np.arange(self.world.rows, dtype=np.int64))  # (rows,)
+            sin_lat = np.sin(lat_rows)[:, None]              # (rows,1)
+            cos_lat = np.cos(lat_rows)[:, None]              # (rows,1)
+            z = (sin_lat * np.sin(decl)
+                 + cos_lat * np.cos(decl) * cos_h[None, :])  # (rows, cols)
+            illum_grid = np.maximum(0.0, z)                  # 地平线下 ⇒ 0
+            # lat_base_ref ≠ 1：与旧实现同义——对 cos(φ) 取幂
+            if not self._lat_term_is_cos:
+                ratio = np.where(
+                    cos_lat[:, 0] > 1e-12,
+                    np.power(cos_lat[:, 0], self.lat_base_ref - 1.0),
+                    0.0,
+                )
+                illum_grid = illum_grid * ratio[:, None]
+            illum_flat = np.ascontiguousarray(illum_grid.reshape(-1))
+            self._cache_illum_all = illum_flat
+            if self._cache_base_all is None:
+                self._cache_base_all = (self.t_pole
+                                        + (self.t_equator - self.t_pole)
+                                        * self._pre_cos_lat)
+            self._cache_temp_all = (self._cache_base_all
+                                    + illum_flat * self.day_boost)
         else:
             # Python numpy 回退
             lat_term = self._pre_cos_lat if self._lat_term_is_cos else self._pre_lat_term

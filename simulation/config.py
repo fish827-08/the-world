@@ -39,10 +39,28 @@ class LightConfig:
     t_pole: float = -20.0         # 极点基温（恒冷）
     day_boost: float = 6.0        # 昼夜温差幅度（正午比深夜高这么多）
     lat_base_ref: float = 1.0     # 纬度光照敏感度（越大极地越暗越冷）
+    # ---- 13.7 季节（默认关 = 旧行为逐位等价）----
+    #   tilt_rad ≠ 0 且 season_period > 1 ⇒ 启用季节：
+    #   太阳赤纬 δ(t) = tilt_rad · sin(2πt / season_period) ⇒ 光照富集纬度带
+    #   南北周期性移动 ⇒ 温度带移动 ⇒ 资源再生带移动 ⇒ 迁徙的物理驱动。
+    #   ⚠️ tilt_rad=0.0（默认）⇒ 完全走旧路径（逐位等价，C7 digest 不动）。
+    tilt_rad: float = 0.0         # 黄赤交角（弧度）；0.0 = 无季节（默认）
+    season_period: int = 0        # 一个季节循环的 tick 数；0 = 无季节（默认）
 
     def __post_init__(self) -> None:
         assert self.rotation_period >= 10, "自转周期至少 10 tick"
         assert self.t_equator > self.t_pole, "赤道必须比极地暖"
+        assert self.tilt_rad >= 0.0, "倾角非负（弧度）"
+        assert self.season_period >= 0, "季节周期非负"
+        if self.tilt_rad > 0.0 and self.season_period > 0:
+            assert self.season_period >= 2, "启用季节时 season_period 至少 2"
+            # 🔴 R149 前置门（软提示）：观测长度须 ≥ 3 个季节周期才看得到完整周期；
+            #    此处不断言（观测长度在别处），由实验设计侧保证。
+        elif self.tilt_rad > 0.0 or self.season_period > 0:
+            raise ValueError(
+                "季节须 tilt_rad>0 且 season_period>0 同时给出（否则语义不明）："
+                f"tilt_rad={self.tilt_rad}, season_period={self.season_period}"
+            )
 
 
 @dataclass
@@ -59,6 +77,16 @@ class ResourceConfig:
     #   须同步 7 处写死它的测试（任务书 T2 已列）。
     temp_sensitivity: float = 1.0     # 再生对温度的依赖（0=不 care，越大越敏感）
     initial_fill: float = 0.5         # 初始填充比例（每格开始有多少食物，0~1）
+
+    # ---- 🔴 R196 光驱动再生（2026-09-24）------------------------------
+    # 再生量额外乘 clip(光照,0,1)^light_sensitivity（"光合作用"）。
+    # 与 `LightConfig.tilt_rad`/`season_period` 合用时：夏季半球日照长 ⇒ 再生快，
+    # 冬季半球日照短 ⇒ 再生慢 ⇒ 食物丰度带随季节南北移动（"绿浪"）。
+    # ⚠️ light_sensitivity=0（默认）时**整块跳过** ⇒ 与旧版逐位一致（回归安全）。
+    # 物理原型：光合作用有效辐射（PAR）随日照时长/太阳高度角变化
+    #   —— Sverdrup 临界深度（光限春季藻华）/ 绿浪假说（有蹄类跟随返青带）。
+    light_sensitivity: float = 0.0    # 再生对光照的依赖（0=完全不看光，与旧版一致）
+    light_normalize: bool = False     # 光照因子按全球均值归一化（保持全球平均再生量）
 
     # ---- 斑块化（L1，守恒版）------------------------------------------
     # distribution="uniform" 时以下字段全部不生效，行为与旧版完全一致。
@@ -97,6 +125,9 @@ class ResourceConfig:
         assert self.regrowth_rate >= 0, "再生率非负"
         assert 0.0 <= self.initial_fill <= 1.0, "初始填充比例在 0~1"
         assert self.distribution in ("uniform", "patchy"), "distribution 只能是 uniform 或 patchy"
+        # ---- 🔴 R196 光驱动再生 ----
+        assert self.light_sensitivity >= 0.0, "light_sensitivity 必须非负（0=不看光）"
+        assert isinstance(self.light_normalize, bool), "light_normalize 必须是布尔值"
         if self.distribution == "patchy":
             assert self.patch_count >= 1, "斑块数至少 1"
             assert self.patch_radius >= 1, "斑块半径至少 1"
