@@ -107,6 +107,178 @@ def _probe_csv(probe: dict | None, key: str):
     return "" if v is None else v
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 13.6 S2 四读数（R193 §四 / R194 §S2；`[云端·开发]`，2026-09-24）
+# ══════════════════════════════════════════════════════════════════════════════
+# 🔴 **纯观测**（D-18 探针同族）：零 RNG、零行为改变 ⇒ 不传任何新参数时的轨迹
+#    与 S1 逐位一致（C7 digest `(574887, 11266.746993)` 不动）。
+# 🔴 **口径必须与 R190/R191 的工具可复算对齐**（否则"新读数"与"旧判读"不可比）：
+#    · `food_util_frac`   =（取食入能量 ÷ 净吸收）÷（Σ名义再生 × tick 数）
+#        —— R190 §三「**实际被吃掉的质量 ÷ 名义再生总量**」
+#           源：`tools/p135_verdict.py` 第二部分 ①（分母 = `g_all × T`）
+#        ⚠️ 净吸收 = `eat_efficiency × assim_herb`；引擎账本 `intake_forage` 已是
+#          **净吸收能量**（`_dg = 质量 × eat_efficiency × _assim`，引擎 2021 行）⇒ 除法正确。
+#    · `patch_visit_frac` = 曾被"有生物占据"过的斑块格数 ÷ 斑块格总数
+#        —— R191「已访问斑块%」（源：`tools/spatial_diag.py`：`visited[e._flat[:P]] = True`）
+#    · `on_patch_frac`    = 生物落在斑块格的比例 —— R191「生物在斑块%」（同源）
+#    · `gud_var`          = 生物**当前所占格**的 GUD 方差
+#        —— R192 §C′ 建议的 MVT 读数（**本项目首次定义**，口径见下注）
+#    · 附赠 `patch_stock_frac` = 斑块总存量 ÷ 斑块总容量（R191「斑块存量/容量」；复算用）
+#
+# 🔴 GUD（giving-up density）本项目的定义（**首次落码 ⇒ 必须自解释**）：
+#    GUD_格 = 生物当前所在格的**相对存量** `stock/capacity`（0=吃空，1=满）。
+#    `gud_var` = 这些格上 GUD 的**样本方差**（ddof=1）。
+#    MVT 预期：最优觅食 ⇒ 各格被放弃时的存量趋同 ⇒ **方差低**；
+#    方差高 ⇒ 位置间质量差异大/觅食未达平衡（正是"森林 vs 草原"要区分的量）。
+#    ⚠️ 所占格 < 2（含灭绝）⇒ **None**（禁写 0，R120）；容量 0 的格（bgzero 背景格）
+#    从 GUD 样本中**剔除**（分母为 0 ⇒ 该格 GUD 无定义，不是 0）。
+SPATIAL_NOTE = (
+    "S2 四读数（纯观测，零 RNG）：food_util_frac=取食质量÷名义再生总量（R190 口径）；"
+    "patch_visit_frac=曾被占据过的斑块格比例 / on_patch_frac=生物在斑块格比例（R191 口径）；"
+    "gud_var=所占格 stock/capacity 的样本方差（MVT 的 GUD；本线首次定义，见代码注释）；"
+    "None=未适用（灭绝/样本<2），不是 0。口径源：tools/p135_verdict.py + tools/spatial_diag.py"
+)
+
+
+class SpatialReadings:
+    """13.6 S2 四读数的**累计器**（每 tick 观测 + 采样点快照；纯观测）。
+
+    为什么需要累计器：`patch_visit_frac` 是"**曾经**被占据过"的**历史量**，
+    必须逐 tick 累积（不是某一刻的瞬时量）。
+
+    断点续跑（F-R12 家族）：`visited` 掩码与"取食能量结转"存**侧车 npz**
+    （`<out>.spatial.npz`，与快照同目录同节拍）——因为引擎快照**不含能量账本**
+    （`energy_ledger` 只读 `_ec_global`，而它不入快照）⇒ 不结转会把利用率的
+    分子（本段取食）与分母（全程名义再生×tick）**错配**（静默错读）。
+    侧车缺失时 ⇒ 结转记为 False 并由产物自曝（`spatial_carry_ok`），**不假装**。
+    """
+
+    def __init__(self, e, sidecar: "Path | None" = None, *, carried_e: float = 0.0,
+                 visited: "np.ndarray | None" = None, carry_ok: bool = True) -> None:
+        self.n = int(e.world.n_cells)
+        # 🔴 `uniform` 世界里 `_patch_mask is None`（ResourceField 只在 patchy 分支建掩码）
+        #   ⇒ 必须归一成"无斑块"（**不是崩、也不是全 False 记 0**）：
+        #   斑块类读数在 uniform 下 = **None（未适用）**（R120/DEL-7），
+        #   而 `food_util_frac` 仍适用（分母 = 全世界名义再生，与 R190 的 A 臂口径 3153.1 同源）。
+        raw = getattr(e.resources, "_patch_mask", None)
+        if raw is None:
+            self.patch = np.zeros(self.n, dtype=bool)
+        else:
+            self.patch = np.asarray(raw, dtype=bool)
+            if self.patch.shape != (self.n,):       # 形状异常 ⇒ 同"无斑块"处理（可自证）
+                self.patch = np.zeros(self.n, dtype=bool)
+        self.has_patches = bool(self.patch.any())
+        self.cap = np.asarray(e.resources._capacity, dtype=np.float64).copy()
+        self.area_patch = int(self.patch.sum())
+        # R190 口径：Σ名义再生取 **t=0 的名义值**（与静态 K 公式同一个量 ⇒ 可对账）
+        self.sigma_regen = float(np.asarray(
+            e.resources._regrowth_amount(0), dtype=np.float64).sum())
+        self.visited = (np.zeros(self.n, dtype=bool) if visited is None else visited.copy())
+        self.carried_e = float(carried_e)      # 前几段的取食入能量结转（净吸收口径）
+        self.carry_ok = bool(carry_ok)
+        self.sidecar = sidecar
+
+    # ---- 每 tick ----
+    def observe(self, e) -> None:
+        """标记"本 tick 被生物占据过的格"（含非斑块格 —— 与 R191 工具一致）。
+
+        ⚠️ 人口数用 `len(e._id)`（= a4 全脚本的约定；引擎不变式 `len(_flat) == len(_id)`
+        也成立，但显式用 `_id` ⇒ 与"人为截断 _id 模拟灭绝"的测试语义一致）。
+        """
+        P = len(e._id)
+        if P:
+            self.visited[e._flat[:P]] = True
+
+    # ---- 读数（采样点可调，纯读）----
+    def _intake_e_total(self, e) -> float:
+        led = (e.energy_ledger() or {}).get("global") or {}
+        return self.carried_e + float(led.get("intake_forage_sum") or 0.0)
+
+    def food_util_frac(self, e, tick: int) -> "float | None":
+        """R190 口径：取食质量 ÷（Σ名义再生 × tick）。tick=0 ⇒ None（分母 0）。"""
+        if tick <= 0 or self.sigma_regen <= 0.0:
+            return None
+        eff = float(getattr(e.config.organisms, "eat_efficiency", 3.0) or 3.0)
+        ah = float(getattr(e.config.organisms, "assim_herb", 1.0) or 1.0)
+        net_abs = eff * ah
+        if net_abs <= 0.0:
+            return None
+        mass = self._intake_e_total(e) / net_abs
+        return mass / (self.sigma_regen * tick)
+
+    def sample(self, e, tick: int) -> dict:
+        """采样点的五读数（GUD/在斑块/访问率 = 瞬时；利用率 = 累计）。"""
+        P = len(e._id)
+        stock = np.asarray(e.resources._grid, dtype=np.float64)
+        cap_patch = float(self.cap[self.patch].sum())
+        out = {
+            "food_util_frac": self.food_util_frac(e, tick),
+            # 🔴 无斑块世界（uniform / 掩码缺失）⇒ 斑块类读数 = None（**未适用**，
+            #   不是 0）——否则 uniform 批会被读成"从不访问斑块"的假阴性（E 类缺陷）
+            "patch_stock_frac": (float(stock[self.patch].sum()) / cap_patch
+                                 if (self.has_patches and cap_patch > 0.0) else None),
+            "patch_visit_frac": (float(self.visited[self.patch].sum()) / self.area_patch
+                                 if self.has_patches and self.area_patch else None),
+            "on_patch_frac": (float(np.mean(self.patch[e._flat[:P]]))
+                              if (P and self.has_patches) else None),
+            "gud_var": None,
+            "gud_mean": None,
+        }
+        if P:
+            cells = e._flat[:P]
+            c = self.cap[cells]
+            ok = c > 0.0                       # 容量 0 的格 GUD 无定义 ⇒ 剔除
+            if ok.any():
+                vals = stock[cells][ok] / c[ok]
+                out["gud_mean"] = float(np.mean(vals))
+                if vals.size >= 2:
+                    out["gud_var"] = float(np.var(vals, ddof=1))
+        return out
+
+    # ---- 侧车（续跑结转）----
+    def save_sidecar(self, e) -> "Path | None":
+        if self.sidecar is None:
+            return None
+        self.sidecar.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            self.sidecar,
+            visited=self.visited,
+            carried_e=np.array(self.carried_e + float(
+                ((e.energy_ledger() or {}).get("global") or {}).get(
+                    "intake_forage_sum") or 0.0)),
+        )
+        return self.sidecar
+
+    @classmethod
+    def load_sidecar(cls, path: "Path", e) -> "SpatialReadings":
+        d = np.load(path)
+        vis = np.asarray(d["visited"], dtype=bool)
+        if vis.shape != (e.world.n_cells,):
+            # 世界几何变了（不该发生：续跑同快照）⇒ 不静默用错形状
+            raise SystemExit(f"侧车 visited 形状 {vis.shape} ≠ 世界格数 {e.world.n_cells}")
+        return cls(e, sidecar=path, carried_e=float(d["carried_e"]), visited=vis)
+
+    def summary(self, e, tick: int) -> dict:
+        s = self.sample(e, tick)
+        p = len(e._id)
+        return {
+            **{k: (None if v is None else round(float(v), 6)) for k, v in s.items()},
+            "sigma_regen_nominal": round(self.sigma_regen, 3),
+            "patch_cells": self.area_patch,
+            "has_patches": bool(self.has_patches),
+            "visited_patch_cells": int(self.visited[self.patch].sum()),
+            "n_individuals": p,
+            "tick": int(tick),
+            "food_util_numerator_mass": round(
+                self._intake_e_total(e) / max(1e-9, float(
+                    getattr(e.config.organisms, "eat_efficiency", 3.0) or 3.0)
+                    * float(getattr(e.config.organisms, "assim_herb", 1.0) or 1.0)), 3),
+            "spatial_carry_ok": bool(self.carry_ok),
+            "note": SPATIAL_NOTE,
+            "caliber_src": "R190（利用率）/ R191（访问率·在斑块）/ R192（GUD）/ R193 §四（S2）",
+        }
+
+
 def _moments(x) -> tuple[float, float, float]:
     """样本标准差 / 偏度 / **超额**峰度（矩法）—— BC 双峰系数的输入（R135 第 -1 步①）。
 
@@ -940,9 +1112,31 @@ def main() -> None:
                 f"perception_span 冲突：命令行 {args.perception_span} vs "
                 f"快照 {e.config.simulation.perception_span}（C/D/E 臂身份）"
             )
+        # 🔴 13.6（S2，2026-09-24）：**地形三参数同为臂身份**（三地形 preset 的唯一差别）
+        #   —— 与上表同族：`load_snapshot(config=None)` 让命令行被静默忽略（C5/F-R21），
+        #   段二若漏传 `--patch-count/--patch-radius` ⇒ 会不知情地跑成"现状 30/2"的地形。
+        for _k, _cli, _snap_v in (
+            ("patch_count", int(args.patch_count), int(e.config.resources.patch_count)),
+            ("patch_radius", int(args.patch_radius), int(e.config.resources.patch_radius)),
+        ):
+            if _cli != _snap_v:
+                raise SystemExit(
+                    f"{_k} 冲突：命令行 {_cli} vs 快照 {_snap_v} —— 地形身份不得静默混用"
+                    "（段二续跑必须与段一同臂）"
+                )
     # R121 §3.4：**指标口径必须随档位走**（"16"⇒16、"4"⇒4）。
     # 漏传的后果：数组宽度恒 16，未用槽恒"一致" ⇒ 收敛度**系统性虚高**（静默错误）。
     _n_alpha = SIGNAL_ALPHABET_STATES[str(e.config.signal_alphabet)]
+
+    # ---- 13.6 S2 四读数（纯观测；见 `SpatialReadings` 类注释与 `SPATIAL_NOTE`）----
+    # 侧车 = 续跑时把"曾访问掩码 + 已结转取食能量"带过来（引擎快照不含能量账本）。
+    _spatial_path = snap.parent / f"{out.stem}.spatial.npz"
+    if resumed and _spatial_path.exists():
+        sr = SpatialReadings.load_sidecar(_spatial_path, e)
+    else:
+        # 非续跑（或侧车缺失）⇒ 从零起；缺失时**自曝** carry_ok=False（不假装全覆盖）
+        sr = SpatialReadings(e, sidecar=_spatial_path,
+                             carry_ok=not resumed)
 
     fields = ["tick", "N", "g14", "g15", "g16", "trust",
               # R135 第 -1 步①（2026-09-20）：g16 **分布矩**——
@@ -995,7 +1189,10 @@ def main() -> None:
               "dead_cell_frac", "resting_cell_frac",
               "patch_kill_n", "patch_reborn_n", "mean_capacity_effective",
               # 13.4 波 2B（T3）：视野/单格上限读数（关档 ⇒ 空串 = 未适用）
-              "span_downgrade_frac", "cap_blocked_n", "cap_stay_n"]
+              "span_downgrade_frac", "cap_blocked_n", "cap_stay_n",
+              # 13.6 S2（R193 §四）：四读数 + 复算用存量比（未适用 ⇒ 空串 = None，禁写 0）
+              "food_util_frac", "patch_visit_frac", "on_patch_frac",
+              "gud_var", "gud_mean", "patch_stock_frac"]
     # ---- F-R12：续跑必须**按 tick 幂等**写 CSV ----
     # 原因（2026-09-15 D-24 实测）：续跑直接 `open("a")` 追加 ⇒ 多轮续批会把
     # [start_tick 之前] 的 tick 重复写入（云端 20+ 轮续批：main_s42 16 个重复、
@@ -1019,6 +1216,7 @@ def main() -> None:
     last = start_tick
     for t in range(start_tick + 1, args.ticks + 1):
         e.step()
+        sr.observe(e)          # 13.6 S2：逐 tick 标记"被占据过的格"（纯观测）
         if t % args.log_interval == 0 or e.extinct:
             P = len(e._id)
             r = (e._flat[:P] // 120) if P else np.zeros(0)
@@ -1115,6 +1313,9 @@ def main() -> None:
                     e.wave2b_probe(), "span_downgrade_frac"),
                 "cap_blocked_n": _probe_csv(e.wave2b_probe(), "cap_blocked_n"),
                 "cap_stay_n": _probe_csv(e.wave2b_probe(), "cap_stay_n"),
+                # 13.6 S2：四读数（None ⇒ 空串 = 未适用，R120 口径）
+                **{k: ("" if v is None else round(float(v), 6))
+                   for k, v in sr.sample(e, t).items()},
             })
             fh.flush()
             last = t
@@ -1129,6 +1330,7 @@ def main() -> None:
             e.save_snapshot(str(snap))
             with open(rngp, "wb") as fh2:
                 pickle.dump(np.random.get_state(), fh2)
+            sr.save_sidecar(e)     # 13.6 S2：侧车与快照**同节拍**（续跑口径一致）
     fh.close()
 
     rows = list(csv.DictReader(out.open(encoding="utf-8")))
@@ -1376,6 +1578,9 @@ def main() -> None:
             "resource_dynamics_conservation": e.resource_dynamics_conservation(),
             # 13.4 波 2B（T3）：视野/单格上限读数
             "wave2b": e.wave2b_probe(),
+            # 13.6 S2（R193 §四）：四读数块（食物利用率/斑块访问率/在斑块占比/GUD 方差
+            #   + R191 复算用存量比）；口径与 self-证 字段见 `SPATIAL_NOTE`
+            "spatial": sr.summary(e, int(e._tick)),
             # R141 P0（派工单 §1.3，🔴 段名与结构锁定 —— `calib_solve.py` 按此消费）
             "energy_ledger": e.energy_ledger(),
             # R135 第 -1 步③：t=0 基因组基线（搭车诊断）
