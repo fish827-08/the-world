@@ -298,18 +298,35 @@ def check_git() -> int:
         for l in untracked[:15]:
             print(f"   {l}")
 
-    # 未推送？（与主远端 gitee/main 比）
-    rc2, _ = _git("rev-parse", "--verify", "gitee/main")
-    if rc2 == 0:
-        _, cnt = _git("rev-list", "--count", "gitee/main..HEAD")
+    # 未推送？—— 🔴 必须**按本分支**的远端比，不能硬编码 `gitee/main`
+    # （2026-09-24 `[云端·开发]` 实测报告：在 `dev/terrain-s2` 上跑本工具恒报"未推送"，
+    #   因为特性分支的提交本来就不在 `gitee/main` 里 ⇒ **假报警**会让真报警被忽略）。
+    ref = None
+    rc2, up = _git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if rc2 == 0 and up.strip() and "@{u}" not in up:
+        ref = up.strip()
+    if ref is None and branch not in ("<未知>", "HEAD"):
+        for cand in (f"gitee/{branch}", f"origin/{branch}"):
+            rc3, _ = _git("rev-parse", "--verify", cand)
+            if rc3 == 0:
+                ref = cand
+                break
+    if ref is None:
+        ref = "gitee/main"
+    rc4, _ = _git("rev-parse", "--verify", ref)
+    if rc4 == 0:
+        _, cnt = _git("rev-list", "--count", f"{ref}..HEAD")
         ahead = cnt.strip()
+        tag = "" if ref == "gitee/main" else f"（本分支 `{branch}` 的远端）"
         if ahead.isdigit() and int(ahead) > 0:
-            print(f"\n🔴 有 **{ahead}** 个提交**未推送**到 `gitee` ⇒ 按零号规则**不算交付**。")
+            print(f"\n🔴 有 **{ahead}** 个提交**未推送**到 `{ref}`{tag} ⇒ 按零号规则**不算交付**。")
+            print(f"   ⇒ 对账命令：`git ls-remote gitee {branch}`（勿只看 refs/remotes，F-R24）")
             problems += 1
         else:
-            print("\n✅ 与 `gitee/main` 同步（无未推送提交）。")
+            print(f"\n✅ 与 `{ref}` 同步（无未推送提交）{tag}。")
     else:
-        print("\n⚠️ 读不到 `gitee/main` ⇒ 请先 `git fetch gitee`（本条无法判）。")
+        print(f"\n⚠️ 读不到远端跟踪引用 `{ref}` ⇒ 请先 `git fetch gitee`（本条无法判）。")
+        print(f"   ⇒ 特性分支请手动对账：`git ls-remote gitee {branch}`")
 
     # 禁推物
     _, changed = _git("show", "--name-only", "--format=", "HEAD")
