@@ -39,10 +39,28 @@ class LightConfig:
     t_pole: float = -20.0         # 极点基温（恒冷）
     day_boost: float = 6.0        # 昼夜温差幅度（正午比深夜高这么多）
     lat_base_ref: float = 1.0     # 纬度光照敏感度（越大极地越暗越冷）
+    # ---- 13.7 季节（默认关 = 旧行为逐位等价）----
+    #   tilt_rad ≠ 0 且 season_period > 1 ⇒ 启用季节：
+    #   太阳赤纬 δ(t) = tilt_rad · sin(2πt / season_period) ⇒ 光照富集纬度带
+    #   南北周期性移动 ⇒ 温度带移动 ⇒ 资源再生带移动 ⇒ 迁徙的物理驱动。
+    #   ⚠️ tilt_rad=0.0（默认）⇒ 完全走旧路径（逐位等价，C7 digest 不动）。
+    tilt_rad: float = 0.0         # 黄赤交角（弧度）；0.0 = 无季节（默认）
+    season_period: int = 0        # 一个季节循环的 tick 数；0 = 无季节（默认）
 
     def __post_init__(self) -> None:
         assert self.rotation_period >= 10, "自转周期至少 10 tick"
         assert self.t_equator > self.t_pole, "赤道必须比极地暖"
+        assert self.tilt_rad >= 0.0, "倾角非负（弧度）"
+        assert self.season_period >= 0, "季节周期非负"
+        if self.tilt_rad > 0.0 and self.season_period > 0:
+            assert self.season_period >= 2, "启用季节时 season_period 至少 2"
+            # 🔴 R149 前置门（软提示）：观测长度须 ≥ 3 个季节周期才看得到完整周期；
+            #    此处不断言（观测长度在别处），由实验设计侧保证。
+        elif self.tilt_rad > 0.0 or self.season_period > 0:
+            raise ValueError(
+                "季节须 tilt_rad>0 且 season_period>0 同时给出（否则语义不明）："
+                f"tilt_rad={self.tilt_rad}, season_period={self.season_period}"
+            )
 
 
 @dataclass

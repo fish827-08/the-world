@@ -488,6 +488,9 @@ class SphereEngine:
             t_pole=config.light.t_pole,
             day_boost=config.light.day_boost,
             lat_base_ref=config.light.lat_base_ref,
+            # 13.7 季节（默认 0/0 = 关 ⇒ 逐位等价；见 LightConfig 注释）
+            tilt_rad=config.light.tilt_rad,
+            season_period=config.light.season_period,
         )
         self.resources = ResourceField(
             self.world, self.light,
@@ -637,6 +640,21 @@ class SphereEngine:
             raise NotImplementedError(
                 "resource_dynamics（斑块休耕—死亡—轮作）尚未下沉 Rust："
                 "use_sim_core=True 时开启会**静默走旧再生路径**（开关开了行为却不变"
+                " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
+                "（§14.7：新机制强制 Python 路径）。"
+            )
+        # ── H3（13.7）：season 开启时必须 **fail-loud** ──────────────────────
+        # 季节光照公式（太阳赤纬 δ(t)）只在 Python 路径实现
+        # （`LightAndTemperature._ensure_cache` 的季节分支）——Rust 的
+        # `light_temp.rs` 未实现赤纬 ⇒ use_sim_core=True 时会**静默走无季节光照**
+        # （开关开了行为却不变 = 静默 no-op 的同族形态）⇒ 构造期硬报错。
+        _lcfg0 = getattr(config, "light", None)
+        _season_on0 = (abs(float(getattr(_lcfg0, "tilt_rad", 0.0))) > 1e-12
+                       and int(getattr(_lcfg0, "season_period", 0)) > 1)
+        if _scfg0.use_sim_core and _season_on0:
+            raise NotImplementedError(
+                "season（季节：tilt_rad≠0 且 season_period>1）尚未下沉 Rust："
+                "use_sim_core=True 时开启会**静默走无季节光照**（开关开了行为却不变"
                 " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
                 "（§14.7：新机制强制 Python 路径）。"
             )
