@@ -1,0 +1,10 @@
+# S3-pre 证据清单 —— sha256sum 格式（生成于 2026-09-24 04:32:25）
+a4aaecebe90bd65486a72ab5875e3be147af76ab591b31ec693fcef385bd0c13         1,854  _rerun_logs/terrain_s2_smoke/commit_msg_s3pre_code.txt
+176b5448487215d542f5e763aedc0fe1eda5975f9198b7448dd93e74c790b079           473  _rerun_logs/terrain_s2_smoke/diag_multiseed.txt
+2182b8e190b83d2b949d152e7afc201f4ee3e94033163647938e6f5628f91425         1,402  _rerun_logs/terrain_s2_smoke/diag_option_analysis.txt
+fc8a5671922acf402577806c70e86a592086bdc907856b218665bd5bcdeab853           367  _rerun_logs/terrain_s2_smoke/diag_seed_basin.txt
+35f5c5897b450ca77c6328ffe3dde78d7c5cd557b23a1833cc548913efe1083d         6,654  _rerun_logs/terrain_s2_smoke/self_audit_all_s3pre.txt
+979839893e1e7a91d9bf462c34c81ec904c4ab6c4dfcb1dee6c0f3a7591b19cd         1,353  _rerun_logs/terrain_s2_smoke/smoke_tools_s3pre.txt
+d96eb32971228fb6478934fdb6bf5e7f9ff8bc3f6256ad4b81041b5d6fa1811d         2,395  tools/terrain_diag_multiseed.py
+650e5499ecbb9bde947c98cba1fb12b63011e57bcd81567a6104d4ba03359bf3         5,185  tools/terrain_diag_options.py
+53b94868699b5211c0c33228bf4808c22ddda9e97d77038db89c460d2d2a23fd         2,252  tools/terrain_diag_seed_basin.py
