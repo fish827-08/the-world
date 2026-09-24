@@ -27,6 +27,17 @@ import csv
 import numpy as np
 
 
+# 🔴 R98 纪律（F-R14/F-R15 同族）：中文 Windows 默认 **GBK** 控制台下，print 里的
+#    emoji / 箭头（`⇒` `✅` `❌` 等）会抛 UnicodeEncodeError ⇒ 脚本 **rc=1 假失败**，
+#    把批次退出码搅坏（数据其实无损）。入口强制 UTF-8，`errors="replace"` 兜底，
+#    **绝不因编码丢结果**。守卫测试：`tests/test_r98_nonascii_print.py`。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
 def load(path, warm=6000.0):
     rows = [r for r in csv.DictReader(open(path)) if float(r["tick"]) >= warm]
     if len(rows) < 8:
