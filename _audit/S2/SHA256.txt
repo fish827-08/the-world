@@ -1,0 +1,15 @@
+# S2 证据清单 —— sha256sum 格式（生成于 2026-09-24 01:19:18）
+299f884b7b3a7e8d662e7b3798ad0960b749ccfa217e00ae81151439c2e1b38a         3,845  _rerun_logs/terrain_s2_smoke/S2_SMOKE_SUMMARY.md
+993cb704a3148dc6091a90aabdf89e55f1e01a4e6f97c5d15b74a3c165bb373a         3,108  _rerun_logs/terrain_s2_smoke/carm_s42_6k.csv
+8c24d159b3a295df07659971f15883bcdf34ae4741e242c6cd9661e3d970e12d           102  _rerun_logs/terrain_s2_smoke/carm_s42_6k.progress.json
+ea595df399258b0bf50c5c23dcfc562f1efb2a3f3a5a7ca9f3c2f7cd9dd25d51        20,763  _rerun_logs/terrain_s2_smoke/carm_s42_6k.summary.json
+e3cd8e97835b7753eeb5b14dd3e26c4fefc787d305a970b9fbdfc72ce6e21d20         2,179  _rerun_logs/terrain_s2_smoke/commit_msg.txt
+2ae95447c270ab60c7b1f881c43222dc0ac98e471c96ec372412c832892b3062           180  _rerun_logs/terrain_s2_smoke/del8_s2_M1_observe_green.txt
+eb1234b49f615f6b5cc062575dfecde63003f9cb838e0a353a8d5720488bc956         2,782  _rerun_logs/terrain_s2_smoke/del8_s2_M1_observe_red.txt
+e4264e9ee08328fa1ce467b530316f25e1dcbba4c491c1dcb921942ec1fe6209           185  _rerun_logs/terrain_s2_smoke/del8_s2_M2_result_block_green.txt
+e71155c1eba9e5e364fcc3db69792b8901ca25ec9dcf1b162012bafed5c17926         1,765  _rerun_logs/terrain_s2_smoke/del8_s2_M2_result_block_red.txt
+21de82bf21d01e9c69625035df74776e95424947c9e675326ec6f67307ae24ef         3,392  _rerun_logs/terrain_s2_smoke/del8_s2_mutation.py
+7151f3558cab9aa244fb9c2725ee2d9c4c778688d83bfae28adee76ce4d03410            62  _rerun_logs/terrain_s2_smoke/log_carm_s42.txt
+74a73077d170af54595e6d23a8ddd6222ed77a2067257811bd5e88ec8052c2bb        44,269  _rerun_logs/terrain_s2_smoke/snap/carm_s42_6k.snapshot.npz
+ba21b711b91ca05aae8404c2c753007d59c926835bc71edce3ba6e874ce701d5         2,675  _rerun_logs/terrain_s2_smoke/snap/carm_s42_6k.snapshot.rngstate.pkl
+4ba74339024da50aadb053fe46586d3d7971715789fb8984961da503a45e582a         1,209  _rerun_logs/terrain_s2_smoke/snap/carm_s42_6k.spatial.npz
