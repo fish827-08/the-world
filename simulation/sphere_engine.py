@@ -3556,15 +3556,26 @@ class SphereEngine:
                 # = 邻居格内、age_f>=maturity_age 的个体；收集后按个体索引升序排序，
                 # 再 .mean(axis=0) —— 与原 flatnonzero 升序、np.mean 求和顺序逐位一致。
                 _adult_qual = age_f >= maturity_age
-                _cell_adults: list[list[int]] = [[] for _ in range(self.world.n_cells)]
+                # 🔴 S1d（2026-09-25 逐行剖析，`[实测]`）：原实现
+                #   `[[] for _ in range(self.world.n_cells)]` **每 tick 创建 n_cells 个空 list**
+                #   ⇒ 480×960（46 万格）下占**整 tick 的 83.7%**（527 ms/12tick 行内时间，
+                #   profiler 放大后；按真实基线折算 ≈ 71 ms/tick），是世界放大的**头号成本**。
+                #   而行内真正被读的格只有"邻居格"那几个 ⇒ **稀疏字典即可**。
+                #   成本由 O(格数) 降为 **O(有成年个体的格数)**（≤ P）
+                #   ⇒ **即使生物铺满全世界也不退化**（这是 worst-case 保险）。
+                #   逐位等价：原来对空 list 的 `extend` 无效果，改成 `.get()` 跳过；遍历顺序
+                #   （按 `_nb`、格内按 `_a` 升序）与去重排序（`sorted(set(...))`）均不变。
+                _cell_adults: dict[int, list[int]] = {}
                 for _a in np.flatnonzero(_adult_qual):
-                    _cell_adults[int(self._flat[int(_a)])].append(int(_a))
+                    _cell_adults.setdefault(int(self._flat[int(_a)]), []).append(int(_a))
                 for idx in j_idx:
                     _c = int(self._flat[int(idx)])
                     _nb = self._nb_table[_c, :int(self._nb_len[_c])]
                     _lst: list[int] = []
                     for _nc in _nb:
-                        _lst.extend(_cell_adults[int(_nc)])
+                        _v = _cell_adults.get(int(_nc))
+                        if _v:
+                            _lst.extend(_v)
                     if _lst:
                         # sorted(set(...))：邻居表可能含重复格（球面退化），逐格收集会
                         # 重复计入同个体；原 np.isin 成员判断天然去重，这里显式去重，
