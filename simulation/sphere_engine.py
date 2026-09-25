@@ -351,7 +351,8 @@ class SphereEngine:
         # R141/R138：真决斗三级拆分（名义/出手/致死 + skip 原因）
         "_duel",
         # R146/R149 L2 机动性（本段 = [本地开发] 线）：strict 2 圈 CSR + 读数计数器
-        "_far_off", "_far_cells", "_far_len", "_far_excluded_n",
+        "_far_off_c", "_far_cells_c", "_far_len_c", "_far_excluded_c", "_far_ready",
+        "_cap_floor",
         "_run_mover_n", "_run_dash_n", "_mover_n_by_box", "_dash_n_by_box",
         "_mob_sum", "_mob_sq_sum", "_mob_n", "_agef_sum",
         "_inelig_pop_n", "_pop_n", "_g16_le_gate_n",
@@ -621,26 +622,27 @@ class SphereEngine:
         #       极点格走 `neighbors()` 的整带语义）。只在 `l2_dash=True` 时被读。
         # `FAR_CAP` 语义 = 「strict 2 圈规模 > FAR_CAP 的格**不可冲刺**」（拓扑退化），
         #   🔴 措辞：排除的是**格**，不是"极区个体"；`[实测]` 不变区间 [16,119] ⇒ 非旋钮。
-        self._far_off = np.zeros(n_cells + 1, dtype=np.int64)
-        self._far_len = np.zeros(n_cells, dtype=np.int64)
-        _rings: list[np.ndarray] = [np.zeros(0, dtype=np.int32) for _ in range(n_cells)]
-        _far_cap = int(config.organisms.far_cap)
-        for c in range(n_cells):
-            one = {int(x) for x in self.world.neighbors(c)}
-            two: set[int] = set()
-            for d in one:
-                two.update(int(x) for x in self.world.neighbors(d))
-            two.discard(c)
-            two -= one
-            if 0 < len(two) <= _far_cap:
-                _rings[c] = np.fromiter(sorted(two), dtype=np.int32, count=len(two))
-        for c in range(n_cells):
-            self._far_len[c] = len(_rings[c])
-            self._far_off[c + 1] = self._far_off[c] + self._far_len[c]
-        self._far_cells = (np.concatenate(_rings) if self._far_off[-1] else
-                           np.zeros(0, dtype=np.int32))
-        self._far_excluded_n = int(np.count_nonzero(self._far_len == 0))
-        del _rings
+        # 🔴 S0（2026-09-25 性能；世界「画布化」讨论）：2 跳环表**改为惰性构造**。
+        #   `[实测]` 480×960（46 万格）下原无条件构造耗时 **29.0 s**，而这张表
+        #   **只被 `l2_dash=True` 的路径读取**（`l2_probe` 的 dash_* 读数 + 冲刺盲选目标）。
+        #   构造是 O(格数 × 邻居²) ⇒ 世界放大后必然成为构造期不可逾越的墙。
+        #   ⇒ 默认置空，首次真正读取时由 `_ensure_far_tables()` 构造
+        #     ⇒ **逐位等价**（构造结果只依赖 `world` 与 `far_cap`，与 tick 状态无关）。
+        #   ⚠️ 新增个体状态数组的四处登记纪律：本数组是**引擎级派生表**（非逐个体），
+        #     故只需 `__slots__` + 本处初始化，不进出生扩容/死亡压缩清单。
+        self._far_ready = False
+        self._far_off_c = np.zeros(0, dtype=np.int64)
+        self._far_len_c = np.zeros(0, dtype=np.int64)
+        self._far_cells_c = np.zeros(0, dtype=np.int32)
+        self._far_excluded_c = 0
+
+        # 🔴 S1（2026-09-25 性能）：`food_ratio = _grid / max(_capacity, 1e-9)` 的**分母
+        #   在构造期算一次**。`_capacity` 只在 `ResourceField.__init__` 里被赋值、运行期不变
+        #   ⇒ 预计算与"每 tick 重算"**逐位相同**（同一次 `np.maximum` 的同一输入）。
+        #   省下每 tick 一个全场 max + 一个全场临时数组。
+        #   ⚠️ 若将来出现"运行期改容量"的机制（如资源动态改写 `_capacity`），
+        #     必须同步失效本缓存（否则是静默 no-op 型的 C9 缺陷）。
+        self._cap_floor = np.maximum(self.resources._capacity, 1e-9)
 
         # ── H3（R146 硬约束）：L1/L2 开启时必须 **fail-loud**（本段 = [本地开发] 线）────
         # 为什么不并进 `_d2_asym`：那是**静默换路径**（开开关后悄悄走 Python ⇒ 与"静默
@@ -1736,6 +1738,7 @@ class SphereEngine:
         """
         if not bool(self.config.simulation.l2_dash):
             return None
+        self._ensure_far_tables()   # S0：只在真的读 dash_* 时构造（关档 early-return 不付钱）
         n_mov = int(self._run_mover_n)
         n_dash = int(self._run_dash_n)
         mob_mean = (self._mob_sum / self._mob_n) if self._mob_n else None
@@ -1885,6 +1888,74 @@ class SphereEngine:
                 if len(self._flat) else None
             ),
         }
+
+    def _ensure_far_tables(self) -> None:
+        """惰性构造 L2 冲刺用的 2 跳环表（S0，2026-09-25）。
+
+        为什么惰性
+        ----------
+        `[实测]` 480×960（46 万格）下原 `__init__` 无条件构造耗时 **29.0 s**；
+        128 万格按 O(格数×邻居²) 外推是**分钟级** ⇒ 世界放大后这是第一道墙。
+        而这张表**只在 `l2_dash=True` 路径被读**（`l2_probe` 的 dash_* 读数、
+        冲刺盲选目标、`step_movement` 的 far 参数）⇒ 默认档完全不需要。
+
+        逐位等价性
+        ----------
+        构造只依赖 `world`（邻居表）与 `organisms.far_cap`，**与任何 tick 状态无关**
+        ⇒ 首次构造出的一定是原来那份 ⇒ 惰性化不改变任何读数（C7 基线不受影响）。
+
+        `FAR_CAP` 语义 = 「strict 2 圈规模 > FAR_CAP 的格**不可冲刺**」（拓扑退化）。
+        """
+        if self._far_ready:
+            return
+        n_cells = self.world.n_cells
+        self._far_off_c = np.zeros(n_cells + 1, dtype=np.int64)
+        self._far_len_c = np.zeros(n_cells, dtype=np.int64)
+        _rings: list[np.ndarray] = [np.zeros(0, dtype=np.int32) for _ in range(n_cells)]
+        _far_cap = int(self.config.organisms.far_cap)
+        for c in range(n_cells):
+            one = {int(x) for x in self.world.neighbors(c)}
+            two: set[int] = set()
+            for d in one:
+                two.update(int(x) for x in self.world.neighbors(d))
+            two.discard(c)
+            two -= one
+            if 0 < len(two) <= _far_cap:
+                _rings[c] = np.fromiter(sorted(two), dtype=np.int32, count=len(two))
+        for c in range(n_cells):
+            self._far_len_c[c] = len(_rings[c])
+            self._far_off_c[c + 1] = self._far_off_c[c] + self._far_len_c[c]
+        self._far_cells_c = (np.concatenate(_rings) if self._far_off_c[-1] else
+                             np.zeros(0, dtype=np.int32))
+        self._far_excluded_c = int(np.count_nonzero(self._far_len_c == 0))
+        del _rings
+        self._far_ready = True
+
+    # 🔴 S0 只读属性（2026-09-25）：**读即构造**。
+    #   为什么不用"内部调用点显式 ensure"：测试与外部代码会**直接读** `e._far_len`
+    #   （`tests/test_l2_dash.py` 就是这么选合法格的）⇒ 若只在引擎内部 ensure，
+    #   外部读到的是**空数组** ⇒ 静默错误（本项目最忌的失效形态）。属性化后
+    #   无论谁读、什么时候读，拿到的都是与惰性化之前**完全相同**的表。
+
+    @property
+    def _far_off(self) -> np.ndarray:
+        self._ensure_far_tables()
+        return self._far_off_c
+
+    @property
+    def _far_len(self) -> np.ndarray:
+        self._ensure_far_tables()
+        return self._far_len_c
+
+    @property
+    def _far_cells(self) -> np.ndarray:
+        self._ensure_far_tables()
+        return self._far_cells_c
+
+    @property
+    def _far_excluded_n(self) -> int:
+        self._ensure_far_tables()
+        return self._far_excluded_c
 
     def _refresh_pp_anom(self) -> None:
         """刷新逐格日历轴异常 A = P(φ, t) − 0.5（13.8；**逐 tick**，带 tick 去重）。
@@ -2686,16 +2757,14 @@ class SphereEngine:
             )
             if len(mi) > 0:
                 # 预计算环境量
-                food_ratio = self.resources._grid / np.maximum(
-                    self.resources._capacity, 1e-9
-                )
+                food_ratio = self.resources._grid / self._cap_floor
                 sig_present = (self.signals._marks > 0).astype(np.float64)
                 # D0 修复：群居项量纲归一化 + 🔴 F1 修复（T3）：分母 = **每格实际邻居数**
                 # （`_nb_norm`），不再是 stride(120)。注释此前写"0~8"但代码除 120 ⇒ 社交项
                 # 被静默弱化 15×（C9 型缺陷）。构造级变更（digest 变，已同步测试）。
                 # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
                 smw = self.config.simulation.social_move_weight
-                densities = occ.astype(np.float64) / self._nb_norm * smw
+                densities = np.divide(occ, self._nb_norm, dtype=np.float64) * smw
                 signal_marks = self.signals._marks.astype(np.uint8)
                 # 预生成随机选择（得分无差异时用），按移动个体顺序
                 rand_choice = self.rng.integers(
@@ -2783,6 +2852,8 @@ class SphereEngine:
             # （R120/§五.12 口径铁律）。与"谁在动"无关，故放在 `if Nm:` **之外**。
             _l2_on = bool(self.config.simulation.l2_dash)
             if _l2_on:
+                # S0（2026-09-25）：惰性构造 2 跳环表（本段之后的 far 读数/盲选都要用）
+                self._ensure_far_tables()
                 _gate = float(self.config.predation.attack_gene_gate)
                 self._pop_n += int(P)
                 self._g16_le_gate_n += int(np.count_nonzero(
@@ -2791,15 +2862,13 @@ class SphereEngine:
                     self._far_len[self._flat[:P]] == 0))
             if Nm:
                 mi = np.flatnonzero(moved)
-                food_ratio = self.resources._grid / np.maximum(
-                    self.resources._capacity, 1e-9
-                )
+                food_ratio = self.resources._grid / self._cap_floor
                 sig_present = (self.signals._marks > 0).astype(np.float64)
                 # D0 修复：群居项量纲归一化 + 🔴 F1 修复（T3）：分母 = **每格实际邻居数**
                 # （`_nb_norm`），不再是 stride(120)。同上（Python 移动分支）。
                 # S0：occupancy 复用信号段预计算的 occ（移动之前位置未变）。
                 smw = self.config.simulation.social_move_weight
-                densities = occ.astype(np.float64) / self._nb_norm * smw
+                densities = np.divide(occ, self._nb_norm, dtype=np.float64) * smw
                 rand_choice = self.rng.integers(
                     0, 1_000_000, size=Nm, dtype=np.int64
                 )
