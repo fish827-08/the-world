@@ -1,0 +1,16 @@
+# S1-S3 证据清单 —— sha256sum 格式（生成于 2026-09-25 07:29:47）
+3438dc3d9020e1ef95382a940297acad40af898eaa795f18c1e4f82ba8812f9c        90,170  AGENT.md
+e1fd7c079d39dff1d2637b640af20038d4bc7563fc91bd75506bb58e42a88782        16,735  evidence/r198/S2-报告.md
+278370adb9f5c524a4fec8f4adf3c9facd7114ac7f07ff6d1a6486cf109d7ccd        27,276  evidence/r198/S3-报告.md
+e474757034a571fced7e48cc9edf42f00f6fb96e7fa4540d657a3393a06e722d         1,323  evidence/r198/run_s3.sh
+ff1d92e6dd054ae9d080c8121acf2275a60573cc1ec7182ba030d2018b9842fd           899  evidence/r198/run_shards.sh
+c2fcad97fb7f91949c670d4c209c719dc590a30c3a9da88354aafd676ca036c7         2,757  evidence/r198/s2_judge.json
+1fc36b3720d0cfbe59a0d2e4049ea91637e7a3aabd28a4f4d43482228234e4ed         5,360  evidence/r198/s2_judge.py
+e0c3a78516ff6a6dc261cf0f1d9769245d3f01a480160b02548c03667fbdb13c         9,050  evidence/r198/s2_smoke.py
+555201c6cc57cec7df86ee2a40c9680afff2fa781c50c842257472fedf05288b         6,466  evidence/r198/s3_batch_readout.py
+aaabafb8314ca6577774f390aa3fd6cb1f37ce54da3a972e938a067fb84f074a         1,682  evidence/r198/s3_batch_summary.json
+c9e77bb59f072d1be91915268577c9bb0d08480d553f888c46f75f2f359d849a        14,914  evidence/r198/s3_judge.json
+d2f49ebda4f8294dfa5bc00dac526162f5b0f1fa55d6f409ae1ac4068dde2a0c        10,417  evidence/r198/s3_judge.py
+6e2dbd09406fd089ec3dd7d7d5d262f7f3fc536312fab1e884f400386869555c         8,934  evidence/r198/s3_judge_merge.py
+354f8de9dcd2966dda0da74965f266490c28be66d3131769766297ce91392c3c         2,156  evidence/r198/s3_judge_shard.py
+bbeb2ccbec30662ed0dc78bb15cda2b4c5b1b66db159ccd45eec20886b5bf1be        12,791  tests/test_138_migration.py

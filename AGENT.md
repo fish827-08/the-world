@@ -806,7 +806,7 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **默认与路径** | 🔴 **默认全 0 / False ⇒ 整块跳过 ⇒ 逐位等价**（C7 digest `(574887, 11266.746993)` 不动）；**全程 Python 路径**（§14.7）：Rust 的 `light_temp.rs` 未实现赤纬、`resource.rs` 再生式只耦合温度 ⇒ **开 + `use_sim_core=True` ⇒ 构造期硬报错**（H3 fail-loud，**两条独立守卫**） |
 | **状态（2026-09-25 更新，R197 验收）** | ✅ **S4 ✅ + S5 ✅**（云归，`dev/terrain-s2` @ `6356dc8`，**已并入 main `75c1356`**）：机制生效——`band_res` 摆幅 **21.3–36.9°**（6 周期 29.1°）｜质心往返 **43–72°**｜半周期自相关 **−0.69~−1.00**、全周期 +0.40~+1.00｜centroid 与 band **主周期相同**｜4/4 seed 通过 B/C/D 判据｜seed 7（lag=0）**p = 0.0105**。🔴 **个体定向往返迁徙 ❌ 未成立**（见上"纪律"）｜🔴 **已知缺口**：原先本纪元**零单测**（R197 V2），已补 `tests/test_137_season_light.py`（含 DEL-8 变异测试） |
 
-### 13.8 「日历—罗盘式定向迁徙」纪元（2026-09-25 立；依据 fish 09-25 批准；`[云端]` 云归实施；**待实现**）
+### 13.8 「日历—罗盘式定向迁徙」纪元（2026-09-25 立；依据 fish 09-25 批准；`[云端]` 云归实施；**S1 ✅，S2 冒烟进行中**）
 
 | 项 | 内容 |
 |---|---|
@@ -814,12 +814,14 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **为什么用 `\|φ\|` 而非 `φ`** | ⇒ 南北半球**自动都对**（本地夏季往极地、冬季往赤道），**无需任何半球分支** |
 | **⚠️ 不是"把答案写进模型"** | 只加**可观测维度**（日照时长、纬度）与**一条可被使用的通路**；`g23` **完全自由**（0／正／负皆可），收益全部来自**未改动**的觅食/能量/繁殖账 ⇒ 迁徙若无益，选择压会把 `g23` 压向 0（**机制自证伪**）。❌ 不写"日照<X 就往南"、❌ 不给迁徙额外奖励、❌ 不打方向偏好表 |
 | **⚠️ 与 13.7 的关系** | 本机制**消费** 13.7 的 δ(t)，**不改** `illumination` / `light_sensitivity`（只**新增** `photoperiod`）。⇒ 与 13.7 关档批可比；与 13.7 开档批**不可比**（迁徙项改变了移动决策） |
-| **⚙️ 配置** | 新增 `MigrationConfig`（`enabled=False` 默认关 / `gain` / `min_abs_anomaly`），挂进 `SimConfig` ⇒ 经 `asdict` **自动进指纹** |
-| **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`migration_enabled` / `migration_gain` / `migrate_gene_slot`（=23，自证基因位未被挪） |
+| **⚙️ 配置** | 新增 `MigrationConfig`（`enabled=False` 默认关 / `gain` / `min_abs_anomaly`），挂进 `SimConfig` ⇒ 经 `asdict` **自动进指纹**。字段校验走 `__post_init__`（`gain ≥ 0`；`min_abs_anomaly ∈ [0,0.5]`——因 `A∈[−0.5,0.5]`） |
+| **产物可自证字段**（🔴 与实现逐字对齐，C9） | `switches`：`migration_enabled` / `migration_gain` / `migration_min_abs_anomaly` / `migrate_gene_slot`（=23，自证基因位未被挪）；`result.migration`（读数块）：`migration_enabled` / `migration_gain` / `migration_min_abs_anomaly` / `migrate_gene_slot` / `mig_term_abs_mean` / `mig_term_n` / `mig_dec_n` / `mig_flat_frac` / `mig_zero_frac` / `mig_skip_frac` / `pp_anom_min` / `pp_anom_max` / `pp_anom_lo_run` / `pp_anom_hi_run` / `lat_abs_max` |
+| **🔴 反退化读数（R148-1）** | `mig_flat_frac` = 迁移项对某个体**所有候选取同值**的个体占比 ⇒ ≈1.0 即"接了却一行行为没改"。⚠️ **同纬候选（极点行冗余槽位／同一行内横移）天然贡献 flat > 0** ⇒ **必须报比例，但不可直接判"接线失败"**。`mig_zero_frac` = 项恒 0 的个体占比（自熄）；`mig_skip_frac` = 因 `\|A\| ≤ min_abs_anomaly` 提前跳过的个体占比 |
+| **🔴 P6 量级非僭越（S2 必扫）** | 单候选项 ≤ `gain·g23·0.5·Δ\|φ\|`；`Δ\|φ\|` ≈ 邻行间隔 **3.00°** = 0.0524 rad；`A` 的时间/纬度均值 **0.150** ⇒ `E\|term\| ≈ gain × 0.5 × 0.150 × 0.0524 = gain × 0.00393`。觅食项上界 ≈ `perc × 0.5` ≈ **0.24**（实测 `perc` 均值 0.48）⇒ **gain ≥ 50 时量级与觅食项相当 = 僭越**（实测 gain=50 种群 2305→116）。**S2 建议 gain = 20**（实测 `mig_term_abs_mean` / 觅食量级 = **0.103**，即约十分之一） |
 | **🔴 本纪元特有前提（C8）** | **无季节 ⇒ `A≡0` ⇒ 迁移项恒 0 ⇒ 开关形同虚设** ⇒ `enabled ∧ ¬(tilt_rad≠0 ∧ season_period>1)` **必须 fail-loud**（H3 M2）。不报错就会得到"开了迁徙但没反应"的**假阴性** |
-| **默认与路径** | 🔴 **默认全关 ⇒ 整块跳过 ⇒ 逐位等价**（C7 digest `(574887, 11266.746993)` 不动）；**全程 Python 路径**（§14.7）：`enabled ∧ use_sim_core` ⇒ 构造期硬报错（H3 **M1**） |
+| **默认与路径** | 🔴 **默认全关 ⇒ 整块跳过 ⇒ 逐位等价**（C7 digest `(574887, 11266.746993)` 不动）；**全程 Python 路径**（§14.7）：`enabled ∧ use_sim_core` ⇒ 构造期硬报错（H3 **M1**）。🔴 **M1 必须排在 season 守卫之前**——否则 M1 永不可达（见"状态"） |
 | **🔴 判据（预注册，B8 不得自改）** | 主 = **个体级** `ρ(半季净纬向位移, g23)` 显著为正（**禁用种群质心**——13.7 的质心往返已被"原地更替"伪造）｜支持 1 = 迁徙臂个体位移 > **有季节无迁徙空臂**（配对 seed）｜支持 2 = 高 g23 组位移符号与 `sign(δ)` 一致率 > 0.5｜第四态 = `tick < 3×season_period` ⇒ 不可执行 |
-| **状态（2026-09-25）** | 🔵 **方案定稿，派工已发**：`docs/设计文档/设计-日历罗盘式定向迁徙-20260925.md` + `docs/tasks/派工-云端-迁徙-20260925.md`（**含 fish 授权 S1→S3 全部跑批**）。⏳ 待 S1 骨架 |
+| **状态（2026-09-25，`[云端]` 云归）** | 🚧 **S1 骨架 ✅**（分支 `work-13.8`，基于 `main 563788e`）：①`MigrationConfig` 挂进 `SimConfig` + `__post_init__` 校验 ②`Gene.RESERVED(23)→MIGRATE_BIAS(23)`（**值不变 ⇒ 基因组仍 24 位**）+ `GENE_SEMANTICS[23]` 改名 + `GENE_WIRED` + `GeneMeta` + Rust `G_MIGRATE_BIAS` 重命名（**Rust 侧不消费该位**）③`photoperiod()` 解析式 + 逐 tick 缓存 + 极点 `tan` 守卫 + `isfinite`/`[0,1]` 断言 ④引擎 `__slots__` 登记 + `__init__` 逐格 `\|φ\|` 预计算 + 移动段一项 + 6 计数器 ⑤**H3 双守卫 M1/M2**（M1 已前置修死代码）⑥a4 CLI `--migration`/`--migration-gain`/`--migration-min-abs-anomaly` + 工具侧 fail-loud + `switches` 读回 + `result.migration` 读数块 ⑦`tests/test_138_migration.py` **13 例全绿**（含 DEL-8 逐档变异）⑧§十三 本段登记。🔴 **实测教训（已认账）**：`test_s5` 抓出 **H3 M1 曾是不可达死代码**（season 守卫先触发）⇒ 已把 M1 **前置**于 season 守卫之前修复。|
 
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 

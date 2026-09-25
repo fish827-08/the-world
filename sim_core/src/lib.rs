@@ -86,7 +86,7 @@ fn validate_gene_wiring(
         ("G_HEDONISM", G_HEDONISM),
         ("G_PROCESSING", G_PROCESSING),
         ("G_TRUST_GENE", G_TRUST_GENE),
-        ("G_RESERVED", G_RESERVED),
+        ("G_MIGRATE_BIAS", G_MIGRATE_BIAS),
     ];
 
     let mut drift = Vec::new();

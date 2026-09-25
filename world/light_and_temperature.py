@@ -75,6 +75,10 @@ class LightAndTemperature:
         "_cache_illum_all",
         "_cache_temp_all",
         "_cache_base_all",
+        # 13.8 日历—罗盘式定向迁徙：日照时长占比 P ∈ [0,1]（半日角 / π），
+        # 每 tick 缓存一次（与光照/温度同范式）。
+        "_cache_pp_all",
+        "_cache_pp_tick",
         # 预计算表（永久不变）
         "_pre_rows",
         "_pre_cols",
@@ -154,6 +158,9 @@ class LightAndTemperature:
         self._cache_illum_all = None
         self._cache_temp_all = None
         self._cache_base_all = None
+        # 13.8：日照时长缓存（独立 tick 键 ⇒ 季节关时不产生任何额外计算）
+        self._cache_pp_all = None
+        self._cache_pp_tick = -1
         # 预计算：全格 cos(纬度)（永久不变，避免每 tick 重复算）
         all_flat = np.arange(self.world.n_cells, dtype=np.int64)
         all_rows, all_cols = self.world.flat_to_rc(all_flat)
@@ -280,6 +287,96 @@ class LightAndTemperature:
 
         # 从全格缓存中索引（无论是全格还是子集，都走这条路）
         out = self._cache_illum_all[flat]
+        return out.item(0) if scalar else out
+
+    # ---- 日照时长（13.8 日历—罗盘式定向迁徙） ------------------------------
+
+    def photoperiod(self, flat, tick: int) -> np.ndarray:
+        """日照时长占比 P ∈ [0, 1]（= 半日角 H₀ / π）。无季节时恒 0.5。
+
+        定义
+        ----
+        该纬度在该"日"内，太阳位于地平线以上的时间占比：
+
+            cos(H₀) = −tan(φ)·tan(δ(t)) ,  H₀ = arccos(clip(·, −1, 1)) ∈ [0, π]
+            P(φ, t) = H₀ / π
+
+        语义对照：``H₀ = π/2``（P=0.5）⇒ 昼夜等长；``H₀ = 0`` ⇒ 极夜（P=0）；
+        ``H₀ = π`` ⇒ 极昼（P=1）。
+
+        🔴 **绝不用 `illumination` 反推 P** —— ``illumination`` 是**光照强度**
+        且被 ``lat_base_ref`` 的纬度因子乘过；``P`` 是**昼夜时间占比**。
+        两者是不同的量，互推会把它们混成一个（C9 型错误）。
+        本方法用**独立的解析式**，只消费已有的 ``tilt_rad`` / ``season_period``。
+
+        与真实鸟类的对应：日照时长是**跨类群的主导迁徙触发器**，且它是**先行信号**
+        （光照变化**发生在食物变化之前**，且绝对可靠）⇒ 鸟在食物**还充足**时就开始迁徙
+        （Gwinner 1986/1996；Berthold 1996/2001）。这正是本方法存在的理由：
+        13.7 已证明"感知食物梯度"这条路被信噪比堵死（食物带移动比个体随机运动慢
+        17–20 倍），故改用一个**远离噪声的日历信号**。
+
+        参数
+        ----
+        flat : int | NDArray[int64]
+            全格平坦索引（单格或数组均可）。
+        tick : int
+            当前时间步。查季节相位用。
+
+        返回
+        ----
+        float（标量输入）或 NDArray[float64]，形状与 `flat` 一致，值域 [0, 1]。
+
+        实现要点
+        --------
+        * **每 tick 缓存一次**（`_cache_pp_all` / `_cache_pp_tick`，照 `_ensure_cache` 范式）。
+        * 🔴 **极点数值守卫**：``|φ| → π/2`` 时 ``tan(φ) → ∞``。用
+          ``φ_clip = clip(φ, ±(π/2 − ε))``（ε=1e-9）截断，**并断言结果 `isfinite`**。
+          这是本设计**最可能产生 NaN 并静默污染全批**的点（设计稿 §3.3 守卫 2 / 风险 R1）。
+        * 无季节（``_season_on=False``，即 δ≡0）⇒ ``P ≡ 0.5``，
+          **不进新分支、不影响任何既有行为**。
+        """
+        flat_arr = np.asarray(flat, dtype=np.int64)
+        scalar = flat_arr.ndim == 0
+        flat_arr = flat_arr.reshape(-1)
+
+        if self._cache_pp_tick != tick:
+            if not self._season_on:
+                # 无季节：δ ≡ 0 ⇒ tanδ = 0 ⇒ cos H₀ = 0 ⇒ H₀ = π/2 ⇒ P ≡ 0.5
+                self._cache_pp_all = np.full(
+                    self.world.n_cells, 0.5, dtype=np.float64)
+            else:
+                # 太阳赤纬 δ(t)（与 `_ensure_cache` 季节分支**逐字同式**）
+                decl = self.tilt_rad * np.sin(
+                    2.0 * np.pi * (tick % self.season_period) / self.season_period
+                )
+                # 🔴 极点守卫：|φ| → π/2 时 tan(φ) → ∞ ⇒ 必须先截断，
+                #    否则 cos_h0 出 ±inf，arccos 出 NaN，静默污染全批（R1）。
+                eps = 1e-9
+                lat_rows = self.world.latitude_of(
+                    np.arange(self.world.rows, dtype=np.int64)).astype(np.float64)
+                phi_c = np.clip(lat_rows, -(np.pi / 2.0 - eps),
+                                np.pi / 2.0 - eps)
+                cos_h0 = -np.tan(phi_c) * np.tan(decl)
+                cos_h0 = np.clip(cos_h0, -1.0, 1.0)     # 极昼/极夜：|·|>1 ⇒ 饱和
+                h0 = np.arccos(cos_h0)                  # ∈ [0, π]
+                pp_rows = h0 / np.pi                    # ∈ [0, 1]
+                # 展开到每格（同一行内所有格共用该行纬度）
+                self._cache_pp_all = np.ascontiguousarray(
+                    np.repeat(pp_rows, self.world.cols))
+            # 🔴 P3 断言：NaN / 越界 ⇒ 立刻 fail-loud（不许静默污染全批）
+            if not np.isfinite(self._cache_pp_all).all():
+                raise FloatingPointError(
+                    "photoperiod 产生非有限值（NaN/Inf）——极点 tan(φ) 守卫失效。"
+                    "这会在全批静默传播，故 fail-loud（设计稿 R1 / P3）。"
+                )
+            if not ((self._cache_pp_all >= 0.0) & (self._cache_pp_all <= 1.0)).all():
+                raise FloatingPointError(
+                    f"photoperiod 越界 [0,1]（min={self._cache_pp_all.min():.6g}, "
+                    f"max={self._cache_pp_all.max():.6g}）（设计稿 P3）。"
+                )
+            self._cache_pp_tick = tick
+
+        out = self._cache_pp_all[flat_arr]
         return out.item(0) if scalar else out
 
     # ---- 温度 --------------------------------------------------------------

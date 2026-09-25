@@ -55,5 +55,7 @@ pub const G_HEDONISM: usize = 20;
 pub const G_PROCESSING: usize = 21;
 // g22 信任阈值（预留）
 pub const G_TRUST_GENE: usize = 22;
-// g23 预留
-pub const G_RESERVED: usize = 23;
+// g23 迁徙倾向（日历—罗盘式定向迁徙，13.8）—— ⚠️ Rust 侧**未实现**该机制，
+// 本常量仅作「索引 ↔ 语义」对齐用；值与历史 G_RESERVED 相同（=23，**基因组长度不变**）。
+// Rust 移动路径**不消费**本基因位（13.8 强制 Python 路径，fail-loud 由引擎侧守卫负责）。
+pub const G_MIGRATE_BIAS: usize = 23;

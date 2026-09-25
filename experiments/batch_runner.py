@@ -1036,7 +1036,89 @@ PRESETS = {
                        "starve-frac=0.30", "exhaust-frac=0.17",
                        "max-energy=600", "initial-energy=300",
                        "patch-count=10", "patch-radius=1", "patch-mult=2.47"],
-                 template="_rerun_logs/terrain_desert/desert_s{seed}.csv"),
+                  template="_rerun_logs/terrain_desert/desert_s{seed}.csv"),
+        ],
+    ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 13.8 S3：日历—罗盘式定向迁徙（2026-09-25，R198 派工 §五；fish 授权 S1→S3）
+    # ══════════════════════════════════════════════════════════════════════════
+    # 目的：为主判据（**个体级** ρ(半季净纬向位移, g23) 显著为正）提供四臂对照。
+    # 四臂（唯一差别 = 迁徙开关与 gain；季节**全臂相同** ⇒ 可比）：
+    #   mig_base     : 季节开、**迁徙关** ⇒ **空臂 A**（支持 1 的对照基线）
+    #   mig_g        : 季节开、迁徙开、gain=20（S2 扫档推荐：项≈觅食量级的十分之一）
+    #   mig_2g       : 季节开、迁徙开、gain=40（2× ⇒ 剂量响应：ρ 应随 gain 单调↑）
+    #   mig_noseason : **季节关**、迁徙关 ⇒ 纯基线（与 13.7 关档批可比）
+    # 🔴 `season_period=6000` **与 S4/S5 一致**（可与非迁徙读数的季节相位对齐）。
+    # 🔴 `tilt-deg=23.44` = 真实黄赤交角 ⇒ 极圈 ~66.6°，日长结构最强。
+    # 🔴 规模：4 臂 × 6 seed（42/7/11/13/17/23）× 18000 tick（= 3× season_period，
+    #    满足预注册"`tick ≥ 3×season_period` 才可判"，否则落**第四态=不可执行**）。
+    # 🔴 各自**专属快照目录**（F-R12/F-R13 血泪：默认目录+重名 ⇒ 静默从旧快照续跑）。
+    # ⚠️ `mig_noseason` **不得**传 `--migration`（无季节 ⇒ 引擎 M2 硬报错）——它本来就
+    #    是"季节关了、迁徙也关"的纯基线臂。
+    "mig_base": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13,17,23"],
+        fixed=["mode=on", "arm=main", "ticks=18000",
+               "max-count=3240", "snapshot-every=6000",
+               "snapshot-dir=_rerun_logs/mig_base_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0",
+               # 13.7 季节身份（全臂相同 ⇒ 可比）
+               "tilt-deg=23.44", "season-period=6000"],
+        variants=[
+            dict(name="base",
+                 args=[],
+                 template="_rerun_logs/mig_base/base_s{seed}.csv"),
+        ],
+    ),
+    "mig_g": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13,17,23"],
+        fixed=["mode=on", "arm=main", "ticks=18000",
+               "max-count=3240", "snapshot-every=6000",
+               "snapshot-dir=_rerun_logs/mig_g_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0",
+               "tilt-deg=23.44", "season-period=6000"],
+        variants=[
+            dict(name="g20",
+                 args=["migration", "migration-gain=20"],
+                 template="_rerun_logs/mig_g/g20_s{seed}.csv"),
+        ],
+    ),
+    "mig_2g": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13,17,23"],
+        fixed=["mode=on", "arm=main", "ticks=18000",
+               "max-count=3240", "snapshot-every=6000",
+               "snapshot-dir=_rerun_logs/mig_2g_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0",
+               "tilt-deg=23.44", "season-period=6000"],
+        variants=[
+            dict(name="g40",
+                 args=["migration", "migration-gain=40"],
+                 template="_rerun_logs/mig_2g/g40_s{seed}.csv"),
+        ],
+    ),
+    "mig_noseason": dict(
+        script="experiments/a4_verify_capacity.py",
+        grid=["seed=42,7,11,13,17,23"],
+        fixed=["mode=on", "arm=main", "ticks=18000",
+               "max-count=3240", "snapshot-every=6000",
+               "snapshot-dir=_rerun_logs/mig_noseason_snap",
+               "distribution=patchy", "signal-alphabet=16",
+               "soft-cap-target=0.6", "energy-cap=true",
+               "forage-tradeoff-k=0.0"],
+        variants=[
+            # 🔴 纯基线：季节关 + 迁徙关（**不传 --migration**：无季节时引擎 M2 硬报错）
+            dict(name="noseason",
+                 args=[],
+                 template="_rerun_logs/mig_noseason/noseason_s{seed}.csv"),
         ],
     ),
 }

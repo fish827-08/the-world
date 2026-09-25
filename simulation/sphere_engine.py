@@ -395,6 +395,24 @@ class SphereEngine:
         # cap 读数（T3）：满格剔除计数 / 留本格兜底计数
         "_cap_blocked_n",     # Σ 因满格被剔除的候选选择（cap 生效时的决策数）
         "_cap_stay_n",        # Σ 全候选满 ⇒ 留本格的个体数（兜底）
+        # ---- 13.8 日历—罗盘式定向迁徙（本线 = [云端·开发] 云归）----
+        # 🔴 __slots__ 是硬约束：新属性**必须**登记，否则运行期 AttributeError。
+        # 位置约定：**加在块尾**（与既有各线分开，减少同文件并发冲突面）。
+        "_mig_on",            # 开关快照（构造期取一次；关档整段不执行 ⇒ 逐位等价）
+        "_mig_gain",          # 全局增益（config.migration.gain）
+        "_mig_min_abs",       # |A| 门槛（config.migration.min_abs_anomaly；A∈[−0.5,0.5]）
+        "_lat_abs",           # 逐格 |φ|（弧度；**一次性**预计算，罗盘轴的"米尺"）
+        "_pp_anom",           # 逐格 (P−0.5)（日历轴；**逐 tick** 刷新，见 _refresh_pp_anom）
+        "_pp_anom_tick",      # 上列数组对应的 tick（去重；−1 = 尚未刷新）
+        # 读数（B4 口径；关档全部不累加 ⇒ migration_probe() 返回 None = "未适用"）
+        "_mig_dec_n",         # 求值的个体数（分母；len(nb)==1 已提前 continue）
+        "_mig_term_sum",      # Σ|项|（按候选；**绝对值**，用于 P6 量级非僭越判定）
+        "_mig_term_n",        # 候选数（分母）
+        "_mig_zero_n",        # 其中"项跨候选恒为 0"的个体数（= 自熄：A≈0 或全同纬）
+        "_mig_flat_n",        # 🔴 其中"跨候选取同值"的个体数（R148-1 反退化必报）
+        "_mig_skip_n",        # 其中因 |A| ≤ 门槛而**提前跳过**的个体数（分段诊断）
+        "_mig_pp_lo",         # 运行期内 A 的**最小值**（累积；P3/P2 诊断：跨季是否真有结构）
+        "_mig_pp_hi",         # 运行期内 A 的**最大值**（累积）
     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -652,6 +670,27 @@ class SphereEngine:
                 " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
                 "（§14.7：新机制强制 Python 路径）。"
             )
+        # ── H3（13.8）：migration 开启时必须 **fail-loud**（两条守卫，都需）──────────
+        # 🔴 顺序要求（R198 实测修正）：**M1 必须排在 season 守卫之前**。
+        #    原因：M1（enabled ∧ use_sim_core）与 season 守卫的触发条件在"合法配置"
+        #    下**必然同时成立**（M2 要求 migration 必须配 season ⇒ 想测 M1 就一定开着
+        #    season）⇒ 若 season 守卫在前，它会**先**报 ⇒ M1 变成**永不可达的死代码**
+        #    （曾如此，被 `test_s5` 抓出）。把 M1 前置后，迁徙用户拿到的是**针对迁徙的
+        #    可操作报错**，而不是被误导向"季节没下沉 Rust"。
+        # 设计稿 §3.5：日历—罗盘式定向迁徙（g23）只在 **Python 移动路径**实现 ——
+        # Rust 的移动段**不消费** g23（sim_core/src/genes.rs 里 G_MIGRATE_BIAS 仅作
+        # 「索引↔语义」对齐常量）⇒ use_sim_core=True 时开启会**静默走旧移动路径**
+        # （开关开了行为却不变 = 静默 no-op 的同族形态）⇒ 构造期硬报错。
+        # 【M1】enabled ∧ use_sim_core ⇒ 静默 no-op（同族形态）。
+        _migcfg0 = getattr(config, "migration", None)
+        _mig_on0 = bool(getattr(_migcfg0, "enabled", False))
+        if _scfg0.use_sim_core and _mig_on0:
+            raise NotImplementedError(
+                "migration（日历—罗盘式定向迁徙，13.8）尚未下沉 Rust："
+                "use_sim_core=True 时开启会**静默走旧移动路径**（开关开了行为却不变"
+                " = 静默 no-op 的同族形态）⇒ 硬报错。请设 use_sim_core=False"
+                "（§14.7：新机制强制 Python 路径）。"
+            )
         # ── H3（13.7）：season 开启时必须 **fail-loud** ──────────────────────
         # 季节光照公式（太阳赤纬 δ(t)）只在 Python 路径实现
         # （`LightAndTemperature._ensure_cache` 的季节分支）——Rust 的
@@ -704,6 +743,25 @@ class SphereEngine:
                 "use_sim_core=True 时开启 corpse_enabled/wound_enabled/contest_enabled 会"
                 "**静默走旧路径** ⇒ 硬报错。请设 use_sim_core=False。"
             )
+        # ── H3（13.8）：migration 的第二条守卫（M1 已前置在 season 守卫之前）──────
+        # 【M2】enabled ∧ 无季节 ⇒ **数学上恒等于 no-op**（比 M1 更隐蔽，必须另拦）：
+        #   季节关 ⇒ 赤纬 δ(t) ≡ 0 ⇒ 逐格日长 P(φ) ≡ 0.5（解析式
+        #   cos H₀ = −tan φ·tan δ = 0 ⇒ H₀ = π/2 ⇒ P = 0.5，**与纬度无关**）⇒
+        #   日历轴异常 A_i = P − 0.5 ≡ 0 ⇒ 迁移项逐候选 **恒 0** ⇒ argmax 逐位不变。
+        #   ⚠️ 此时若放行，实验会读出"迁徙无效"的**假阴性**（错在实验设计而非机制）
+        #   ⇒ 正是 B2「不许 no-op」要防的形态 ⇒ 构造期硬报错（fail-loud，不发警告）。
+        _lcfg1 = getattr(config, "light", None)
+        _season_on1 = (abs(float(getattr(_lcfg1, "tilt_rad", 0.0))) > 1e-12
+                       and int(getattr(_lcfg1, "season_period", 0)) > 1)
+        if _mig_on0 and not _season_on1:
+            raise ValueError(
+                "migration.enabled=True 但季节未开（light.tilt_rad=0 或 "
+                "light.season_period≤1）：无季节 ⇒ 赤纬 δ(t)≡0 ⇒ 逐格日长 P≡0.5"
+                "（与纬度无关）⇒ 日历轴异常 A≡0 ⇒ 迁移项**逐候选恒 0**"
+                "（argmax 逐位不变）⇒ 实验只会读出「迁徙无效」的**假阴性**"
+                "（错在实验设计，不在机制）。⇒ 硬报错。请同时开 season"
+                "（tilt_rad≠0 且 season_period>1），或令 migration.enabled=False。"
+            )
 
         n = config.population.initial_count
         self._flat = np.zeros(n, dtype=np.int64)
@@ -728,6 +786,38 @@ class SphereEngine:
         # 13.4 波 2B（T3）：cap 读数计数器（关档不累加 ⇒ probe None/0 口径）
         self._cap_blocked_n = 0
         self._cap_stay_n = 0
+        # ---- 13.8 日历—罗盘式定向迁徙（本线 = [云端·开发] 云归）----
+        # 🔴 关档（enabled=False）时：`_mig_on=False` ⇒ 移动段整段不执行（无 RNG、无状态
+        #    改变）⇒ 与旧行为**逐位等价**（C7 digest 钉死）。数组**仍然**建好（代价 = 一次
+        #    `|lat|` 的 O(格数) 计算，与"关档特判"相比少一个特例 = 少一个坑）。
+        self._mig_on = bool(getattr(_migcfg0, "enabled", False))
+        self._mig_gain = float(getattr(_migcfg0, "gain", 0.0))
+        self._mig_min_abs = float(getattr(_migcfg0, "min_abs_anomaly", 0.0))
+        # 罗盘轴"米尺"：逐格 |φ|（弧度）。**一次性**预计算 ⇒ 热路径零三角函数。
+        # ⚠️ `latitude_of` 的入参是**行号**（不是扁平格号）⇒ 逐行算再按列重复
+        #    （与 `LightAndTemperature.photoperiod` 同一写法，保证两轴口径一致）。
+        # 🔴 用 |φ| 而非带符号 φ ⇒ **南北半球自动都正确**，不需要半球分支
+        #    （南半球个体向北 = |φ| 增大 = 朝赤道，与"回北方繁殖"的语义一致）。
+        _lat_rows = np.abs(
+            self.world.latitude_of(np.arange(self.world.rows, dtype=np.int64))
+        ).astype(np.float64)
+        self._lat_abs = np.ascontiguousarray(
+            np.repeat(_lat_rows, self.world.cols))
+        # 日历轴：逐格 A = P − 0.5（初值 0 ⇒ 未刷新时中性，不会造出假信号）
+        self._pp_anom = np.zeros(self.world.n_cells, dtype=np.float64)
+        self._pp_anom_tick = -1
+        # 读数（关档全部不累加 ⇒ `migration_probe()` 返回 None = "未适用"，不是 0）
+        self._mig_dec_n = 0
+        self._mig_term_sum = 0.0
+        self._mig_term_n = 0
+        self._mig_zero_n = 0
+        self._mig_flat_n = 0
+        self._mig_skip_n = 0
+        # 🔴 A 的**运行期极值**（累积，不是末 tick 快照）：season_period=6000 时
+        #    tick=3000 恰好 δ=0 ⇒ 瞬时 A≡0 ⇒ 只看快照会误判"日历轴没结构"。
+        #    累积极值才是 P2（纬度结构）与 P3（无 NaN/越界）的正确诊断量。
+        self._mig_pp_lo = 0.0
+        self._mig_pp_hi = 0.0
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
         )
@@ -1649,6 +1739,76 @@ class SphereEngine:
                     "跨候选取同值 ⇒ **逐位 no-op**（R148-1 形态）。",
         }
 
+    def migration_probe(self) -> dict | None:
+        """13.8 日历—罗盘式定向迁徙读数（本线 = [云端·开发] 云归）。
+
+        🔴 `migration.enabled=False` ⇒ **None（未适用）**，**不是 0**
+        （R120 / §五.12 口径铁律："没测" ≠ "测出零"）。
+
+        两个**反退化**占比是段一必报项（R148-1 的形态检查）：
+        `mig_flat_frac` = "项对该个体**所有候选取同值**"的个体占比 —— 逐位 no-op 的比例。
+        ⇒ ≈1.0 意味着接了却一行行为都没改；≈0 表示逐候选真的在起作用。
+        ⚠️ 同纬候选（极点行冗余槽位 / 同一行内横移）会**天然**产生 flat>0 ⇒
+           **必须报出比例**，但不能直接判"接线失败"。
+        `mig_skip_frac` = 因 |A| ≤ `min_abs_anomaly` 而**提前跳过**的个体占比（分段诊断）。
+
+        🔴 P6 量级非僭越：`mig_term_abs_mean` 与觅食项可比（后者上界 ≈ `perc·fr·0.5`）；
+           本项过大会**压过**觅食 ⇒ 变成"只迁徙不吃"的伪机制 ⇒ S2 必扫 gain。
+        """
+        if not self._mig_on:
+            return None
+        dec_n = int(self._mig_dec_n)
+        term_n = int(self._mig_term_n)
+        return {
+            "migration_enabled": bool(self._mig_on),
+            "migration_gain": float(self._mig_gain),
+            "migration_min_abs_anomaly": float(self._mig_min_abs),
+            "migrate_gene_slot": int(Gene.MIGRATE_BIAS),
+            # 🔴 本项按**候选**求绝对均值（分母 = 候选数）：迁移项有正负、单点可为负，
+            #    用 |·| 才能与"觅食项量级"做同量纲比较（P6）。
+            "mig_term_abs_mean": (round(self._mig_term_sum / term_n, 9) if term_n else None),
+            "mig_term_n": term_n,
+            "mig_dec_n": dec_n,
+            # 🔴 两个反退化占比（段一必报）
+            "mig_flat_frac": (round(self._mig_flat_n / dec_n, 6) if dec_n else None),
+            "mig_zero_frac": (round(self._mig_zero_n / dec_n, 6) if dec_n else None),
+            "mig_skip_frac": (round(self._mig_skip_n / dec_n, 6) if dec_n else None),
+            "pp_anom_min": (round(float(self._pp_anom.min()), 6)
+                            if self._pp_anom.size else None),
+            "pp_anom_max": (round(float(self._pp_anom.max()), 6)
+                            if self._pp_anom.size else None),
+            # 🔴 主诊断量：**运行期累积**极值（末 tick 快照可能是 δ=0 的退化时刻）
+            "pp_anom_lo_run": round(float(self._mig_pp_lo), 6),
+            "pp_anom_hi_run": round(float(self._mig_pp_hi), 6),
+            "lat_abs_max": (round(float(self._lat_abs.max()), 6)
+                            if self._lat_abs.size else None),
+            "note": "mig_term_abs_mean = Σ|项|/候选数（绝对值 ⇒ 与觅食项同量纲，供 P6 判定）；"
+                    "mig_flat_frac/zero_frac 分母 = 求值个体数 mig_dec_n；flat = 项跨候选取"
+                    "同值 ⇒ **逐位 no-op**（R148-1 形态；同纬候选会天然贡献，**报比例不判死**）。"
+                    "pp_anom_lo_run/hi_run = A 的**运行期累积**极值（跨季结构诊断）；"
+                    "pp_anom_min/max 是**末 tick 快照**，season_period 整除 tick 时可能正好 δ=0"
+                    "（A≡0）⇒ **不可单独用作 P2 判定**。",
+        }
+
+    def _refresh_pp_anom(self) -> None:
+        """刷新逐格日历轴异常 A = P(φ, t) − 0.5（13.8；**逐 tick**，带 tick 去重）。
+
+        🔴 关档（`_mig_on=False`）⇒ **立即返回**，一次浮点运算都不做 ⇒ 逐位等价。
+        🔴 幂等：`LightAndTemperature.photoperiod` 内部按 tick 缓存 ⇒ 同 tick 重复调用
+           不重复算三角函数；本方法自己也按 tick 去重，热路径不会累积开销。
+        """
+        if not self._mig_on:
+            return
+        if getattr(self, "_pp_anom_tick", -1) == self._tick:
+            return
+        pp = self.light.photoperiod(
+            np.arange(self.world.n_cells, dtype=np.int64), self._tick)
+        self._pp_anom = np.ascontiguousarray(pp, dtype=np.float64) - 0.5
+        self._pp_anom_tick = self._tick
+        # 累积极值（P2/P3 诊断；末 tick 快照可能是 δ=0 的退化时刻，不可单独用于判定）
+        self._mig_pp_lo = min(self._mig_pp_lo, float(self._pp_anom.min()))
+        self._mig_pp_hi = max(self._mig_pp_hi, float(self._pp_anom.max()))
+
     def corpse_probe(self) -> dict:
         """尸体—食腐层读数（设计稿 §5.2 项 9 / §5.3）。
 
@@ -1969,6 +2129,8 @@ class SphereEngine:
 
         # 温度相关量（一次算出全种群的那份，避免反复调用）
         activity = self.light.activity_factor(self._flat, self._tick)
+        # 13.8：日历轴（逐格日长异常 A=P−0.5）**逐 tick 刷新**（关档 = 立即返回，零开销）。
+        self._refresh_pp_anom()
         # 13.4 波 2B（T3）：span/cap 开关在**函数级**定义（移动段 Nm=0 时也需捕食段可用）
         _span2_on = (int(getattr(self.config.simulation,
                                  "perception_span", 1)) == 2)
@@ -2601,6 +2763,13 @@ class SphereEngine:
                     #   F3 闸：该格 ring1+2 > cap ⇒ 降级为 1 圈（`_span_eff2` 为 False）。
                     #   span=1（默认）⇒ **走原路径**（逐位等价）。
                     _cell_i = int(self._flat[idx])
+                    # ── 13.8 日历—罗盘式定向迁徙：开关在**个体循环内**取一次 ─────────
+                    # （`_cell_i` 与 `nb` 都是本循环的局部量 ⇒ 项必须在此求值）
+                    # 关档 ⇒ `_mig_on=False` ⇒ 整段不执行（无 RNG、无状态改变）
+                    # ⇒ **逐位等价**（C7）。
+                    _mig_on = bool(self._mig_on)
+                    _mig_gain = self._mig_gain
+                    _mig_min_abs = self._mig_min_abs
                     if _span2_on and self._span_eff2[_cell_i]:
                         _row = self._span_table[_cell_i]
                         nb = _row[_row >= 0]
@@ -2706,6 +2875,41 @@ class SphereEngine:
                                 score = score - _fh
                                 if float(_fh.max() - _fh.min()) < 1e-12:
                                     self._fearh_flat_n += 1
+                    # ── 13.8 日历—罗盘式定向迁徙（本线 = [云端·开发] 云归）──────
+                    # 机制（设计稿 §3.4，**一行项**）：候选 n 的分数加
+                    #   score(n) += gain · g23_i · A_i(t) · Δ|φ|(n)
+                    # 其中 A_i = 个体**所在格**的日长异常（"日历"：本地是不是夏天），
+                    #     Δ|φ|(n) = |φ_n| − |φ_self|（"罗盘"：候选格比本格离极点**更远**还是更近）。
+                    # 🔴 语义：**本地是夏天**（A>0）⇒ 想往**离极点更远**（|φ|↑，即过夏区）走；
+                    #    **本地是冬天**（A<0）⇒ 反向 ⇒ 自动成为"春北秋南"的往返迁徙
+                    #    （Gwinner 1986/1996 内源年节律；Berthold 1996/2001 光周期是跨类群
+                    #    主导触发且是**超前信号**）。光周期是**日历**而非食物梯度 ⇒ 远离噪音
+                    #    （R195/R196 已证食物带 SNR 致命：0.0015°/tick vs 个体 0.025°/tick）。
+                    # 🔴 用 |φ| 而非带符号 φ ⇒ **南北半球自动都正确**，无需半球分支。
+                    # 🔴 只用**1 圈内可直读**的量（信息自洽，§3.2）：本格 A（`_pp_anom[cell]`）
+                    #    + 候选格与本格的 |φ|（`_lat_abs` 逐格预计算）⇒ 零距离-2 信息。
+                    # 🔴 关档（_mig_on=False）⇒ 整段不执行（无 RNG、无状态改变）⇒ 逐位等价（C7）。
+                    if _mig_on:
+                        self._mig_dec_n += 1
+                        _A = float(self._pp_anom[_cell_i])
+                        if abs(_A) <= _mig_min_abs:
+                            # |A| 门槛：本地日长≈半天（换季窗口/赤道）⇒ 日历信号无信息 ⇒
+                            # 跳过是**有意设计**（不是 bug）⇒ 单独计数以便诊断（非退化计数）。
+                            self._mig_skip_n += 1
+                        else:
+                            _dabs = self._lat_abs[nb] - self._lat_abs[_cell_i]
+                            _m = ((_mig_gain * float(genes[idx, Gene.MIGRATE_BIAS]))
+                                  * _A * _dabs)
+                            score = score + _m
+                            self._mig_term_sum += float(np.abs(_m).sum())
+                            self._mig_term_n += int(_m.size)
+                            if float(np.abs(_m).max()) < 1e-12:
+                                # 细分：**恒为 0** = 自熄（A≠0 但 Δ|φ|≡0 ⇒ 项无信息）
+                                self._mig_zero_n += 1
+                            if float(_m.max() - _m.min()) < 1e-12:
+                                # 🔴 R148-1 反退化：对**所有候选**取同值 ⇒ argmax 逐位不变
+                                #    ⇒ "接了却一行行为没改"。同纬候选天然贡献 ⇒ 报比例不判死。
+                                self._mig_flat_n += 1
                     # ── 13.4 波 2B（T3）：单格个体上限（score 层剔除满格）──────
                     # 🔴 三条硬约束（任务书 T3 / 设计稿 §2.4）：
                     #   1. **只约束"进入"，不约束"留在"**：候选 = 本格（steps=0）不受限。
