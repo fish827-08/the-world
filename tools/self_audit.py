@@ -385,9 +385,23 @@ def check_digest(python: str | None = None) -> int:
         return 1
     print(f"命中 {len(files)} 个文件：" + "、".join(f"`{f}`" for f in files))
 
-    exe = python or str(ROOT / ".venv" / "Scripts" / "python.exe")
-    if not Path(exe).exists():
-        exe = sys.executable
+    # 🔴 R199（云归 R198 ⑥-A 报的**工具缺陷**，非他那轮的引入）：
+    #   原实现 `exe = python or .venv/Scripts/python.exe`，再 `if not exists: exe =
+    #   sys.executable` ⇒ **显式给了 `--python` 也会被静默覆盖**（Linux 上
+    #   `.venv/Scripts/python.exe` 不存在 ⇒ 恒定回落 `sys.executable`）。
+    #   后果实例：`sim_core.so` 为 **3.12** 编译、驱动解释器是 **3.11** ⇒
+    #   `import sim_core` **段错误（exit 139 / SIGSEGV）** ⇒ digest 门报"未全绿"
+    #   却**看不到任何 pytest 失败** ⇒ 假报警且无从诊断（假报警会淹没真报警）。
+    #   修法：**显式指定就必须生效**（不存在 ⇒ fail-loud）；未指定才按 .venv → 当前解释器。
+    if python:
+        exe = python
+        if not Path(exe).exists():
+            print(f"🔴 `--python` 指定的解释器不存在：{exe}（未回落，fail-loud）")
+            return 1
+    else:
+        exe = str(ROOT / ".venv" / "Scripts" / "python.exe")
+        if not Path(exe).exists():
+            exe = sys.executable
     base = tempfile.mkdtemp(prefix="sa_basetemp_")       # 🔴 仓库外 + 每次全新
     cmd = [exe, "-m", "pytest", *files, "-q", "--basetemp", base]
     print("运行：" + " ".join(cmd))
@@ -396,6 +410,21 @@ def check_digest(python: str | None = None) -> int:
     tail = [l for l in (p.stdout or "").splitlines() if l.strip()][-6:]
     for l in tail:
         print("   " + l)
+    if p.returncode < 0:
+        # 负返回码 = 被信号杀死（Linux 常见 −11 SIGSEGV）；段错误**不是** pytest 失败，
+        #   pytest 报告里不会有失败项 ⇒ 必须显式提示，否则只能看到"未全绿"四个字。
+        import signal as _sig
+        try:
+            name = _sig.Signals(-p.returncode).name
+        except Exception:
+            name = f"signal {-p.returncode}"
+        print(f"\n🔴 pytest 进程被信号杀死（{name}，returncode={p.returncode}）"
+              " ⇒ **不是测试失败**，而是解释器进程崩溃。"
+              "\n   最常见原因：`sim_core` 扩展与驱动解释器的 Python 次版本 ABI 不匹配"
+              "（如 `.so`/`.pyd` 为 3.12 编译、却用 3.11 跑 ⇒ `import sim_core` 段错误）。"
+              "\n   ⇒ 用 `--python <与 sim_core 同版本的解释器>` 重跑；"
+              "或在本机重建 sim_core 后再跑。")
+        return 1
     if p.returncode != 0:
         print("\n🔴 digest 测试未全绿 ⇒ 关档**不再逐位等价**。"
               "要么回退，要么按 B1 登记纪元并说明（**不许悄悄改基线**）。")
