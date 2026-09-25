@@ -31,7 +31,7 @@ BASE_CELLS = 60 * 120
 BASE_PATCHES = 30
 
 
-def make_cfg(seed: int, rows: int, cols: int, pop: int) -> SimConfig:
+def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int = 0) -> SimConfig:
     c = SimConfig(seed=seed)
     c.world.rows = rows
     c.world.cols = cols
@@ -43,7 +43,9 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int) -> SimConfig:
     c.resources.distribution = "patchy"
     c.resources.bg_production_zero = True
     # 斑块数按面积等比 ⇒ 斑块**密度**不变（否则测的是食物变化，不是世界变化）
-    c.resources.patch_count = max(4, int(round(BASE_PATCHES * rows * cols / BASE_CELLS)))
+    # patches>0 ⇒ 固定斑块数（世界变大则斑块间距变大、"找食物"变难）
+    c.resources.patch_count = (int(patches) if patches > 0
+                               else max(4, int(round(BASE_PATCHES * rows * cols / BASE_CELLS))))
     c.resources.patch_radius = 2
     c.resources.patch_regrowth_mult = 1.195
     o = c.organisms
@@ -60,9 +62,9 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int) -> SimConfig:
     return c
 
 
-def measure(rows: int, cols: int, pop: int, ticks: int, reps: int) -> dict:
+def measure(rows: int, cols: int, pop: int, ticks: int, reps: int, patches: int = 0) -> dict:
     t_build = time.perf_counter()
-    eng = SphereEngine(make_cfg(42, rows, cols, pop))
+    eng = SphereEngine(make_cfg(42, rows, cols, pop, patches))
     build = time.perf_counter() - t_build
     n0 = len(eng._flat)
     best = float("inf")
@@ -83,6 +85,7 @@ def main(argv=None) -> int:
     ap.add_argument("--pops", default="200,2000")
     ap.add_argument("--ticks", type=int, default=150)
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--patches", type=int, default=0)
     a = ap.parse_args(argv)
 
     sizes = []
@@ -101,7 +104,7 @@ def main(argv=None) -> int:
               f"{'每格μs':>8} {'每个体μs':>9}")
         b0 = None
         for (r, c) in sizes:
-            m = measure(r, c, pop, a.ticks, a.reps)
+            m = measure(r, c, pop, a.ticks, a.reps, a.patches)
             if b0 is None:
                 b0 = m["ms_tick"]
             cells = m["cells"]
