@@ -49,10 +49,11 @@ pub const G_DIET: usize = 17;
 pub const G_DEFENSE: usize = 18;
 // g19 植物化扎根
 pub const G_ROOTING: usize = 19;
-// g20 享乐敏感（预留）
-pub const G_HEDONISM: usize = 20;
-// g21 处理位（预留）
-pub const G_PROCESSING: usize = 21;
+// g20 赶路惯性（ARS 14.9）—— ⚠️ Rust 侧**未实现**该机制（ARS 强制 Python 路径），
+//   本常量仅作「索引 ↔ 语义」对齐用；引擎侧 fail-loud 由 sphere_engine 守卫负责。
+pub const G_PERSISTENCE: usize = 20;
+// g21 失望阈值（ARS 14.9）—— 同上，仅对齐用。
+pub const G_GIVE_UP: usize = 21;
 // g22 信任阈值（预留）
 pub const G_TRUST_GENE: usize = 22;
 // g23 迁徙倾向（日历—罗盘式定向迁徙，13.8）—— ⚠️ Rust 侧**未实现**该机制，

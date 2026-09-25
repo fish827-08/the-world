@@ -83,8 +83,8 @@ fn validate_gene_wiring(
         ("G_DIET", G_DIET),
         ("G_DEFENSE", G_DEFENSE),
         ("G_ROOTING", G_ROOTING),
-        ("G_HEDONISM", G_HEDONISM),
-        ("G_PROCESSING", G_PROCESSING),
+        ("G_PERSISTENCE", G_PERSISTENCE),
+        ("G_GIVE_UP", G_GIVE_UP),
         ("G_TRUST_GENE", G_TRUST_GENE),
         ("G_MIGRATE_BIAS", G_MIGRATE_BIAS),
     ];

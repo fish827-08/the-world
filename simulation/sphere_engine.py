@@ -410,10 +410,30 @@ class SphereEngine:
         "_mig_term_n",        # 候选数（分母）
         "_mig_zero_n",        # 其中"项跨候选恒为 0"的个体数（= 自熄：A≈0 或全同纬）
         "_mig_flat_n",        # 🔴 其中"跨候选取同值"的个体数（R148-1 反退化必报）
-        "_mig_skip_n",        # 其中因 |A| ≤ 门槛而**提前跳过**的个体数（分段诊断）
-        "_mig_pp_lo",         # 运行期内 A 的**最小值**（累积；P3/P2 诊断：跨季是否真有结构）
-        "_mig_pp_hi",         # 运行期内 A 的**最大值**（累积）
-    )
+         "_mig_skip_n",        # 其中因 |A| ≤ 门槛而**提前跳过**的个体数（分段诊断）
+         "_mig_pp_lo",         # 运行期内 A 的**最小值**（累积；P3/P2 诊断：跨季是否真有结构）
+         "_mig_pp_hi",         # 运行期内 A 的**最大值**（累积）
+         # ---- 14.9 ARS 双模式觅食（本线 = [所有者·天平]）--------------------------
+         "_ars_on",            # 开关快照（关档 ⇒ 整段不执行 ⇒ 逐位等价）
+         "_ars_gain",          # 惯性权重 w_pers
+         "_ars_theta",         # 快 < θ×慢 ⇒ 切赶路
+         "_ars_kappa",         # 油箱对称耦合系数
+         "_ars_giveup",        # 赶路模式连走多少 tick 没咬到就重选方向
+         "_ars_fast_tau", "_ars_slow_tau", "_ars_lat_exempt",
+         "_ars_cos",           # (8,8) 槽位方向余弦矩阵（由参考格邻居表推导）
+         "_out_taken",         # 本 tick 每个体**实际咬到**的质量（本格+邻格；食腐不计）
+         "_feed_fast",         # 快平均 EMA（τ=fast_tau）
+         "_feed_slow",         # 慢平均 EMA（τ=slow_tau）＝"个体自己的期待"
+         "_ars_extensive",     # True = 赶路模式（False = 驻留/原打分）
+         "_heading",           # 上一步移动方向槽位（0–7；-1 = 未知/极区）
+         "_giveup_ct",         # 赶路模式下已连走多少 tick 没咬到
+         "_ars_dec_n",         # 求值个体数
+         "_ars_inertia_sum",   # Σ|惯性项|（P6 量级诊断）
+         "_ars_flat_n",        # 跨候选取同值的个体数（R148-1 反退化）
+         "_ars_sw_ie_n",       # 驻留→赶路 切换次数
+         "_ars_sw_ei_n",       # 赶路→驻留 切换次数
+         "_ars_rerand_n",      # 失望重选方向次数
+     )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
     # 基因位与行为的一一映射就定义在本文件（引擎热路径），不依赖其他模块：
@@ -818,6 +838,54 @@ class SphereEngine:
         #    累积极值才是 P2（纬度结构）与 P3（无 NaN/越界）的正确诊断量。
         self._mig_pp_lo = 0.0
         self._mig_pp_hi = 0.0
+
+        # ── 14.9 ARS 双模式觅食（本线 = [所有者·天平]）────────────────────────
+        # H3-A1（fail-loud）：ARS 只在 Python 移动路径实现（§14.7）⇒
+        # use_sim_core=True 时开启会静默走旧移动路径（= 静默 no-op 同族）⇒ 硬报错。
+        _arscfg0 = getattr(config, "ars", None)
+        self._ars_on = bool(getattr(_arscfg0, "enabled", False))
+        if self._ars_on and self._use_sim_core:
+            raise NotImplementedError(
+                "ars（ARS 双模式觅食，14.9）尚未下沉 Rust：use_sim_core=True 时开启会"
+                "**静默走旧移动路径**（开关开了行为却不变 = 静默 no-op 的同族形态）"
+                "⇒ 硬报错。请设 use_sim_core=False（§14.7：新机制强制 Python 路径）。"
+            )
+        self._ars_gain = float(getattr(_arscfg0, "gain", 0.0))
+        self._ars_theta = float(getattr(_arscfg0, "theta", 0.5))
+        self._ars_kappa = float(getattr(_arscfg0, "kappa", 0.0))
+        self._ars_giveup = int(getattr(_arscfg0, "giveup", 20))
+        self._ars_fast_tau = float(getattr(_arscfg0, "fast_tau", 50.0))
+        self._ars_slow_tau = float(getattr(_arscfg0, "slow_tau", 500.0))
+        self._ars_lat_exempt = float(getattr(_arscfg0, "lat_exempt_deg", 85.0))
+        # 槽位方向余弦矩阵：由**参考格**（中纬度）的 8 邻表推导槽位 → (dr,dc)，
+        # 归一化后内积 ⇒ (8,8)。🔴 不硬编码列序（A4 教训：列序曾导致半平面 bug）。
+        _ref = (self.world.rows // 2) * self.world.cols + self.world.cols // 2
+        _nb_ref = np.asarray(self.world.neighbors(_ref))
+        _rc = np.asarray([divmod(int(x), self.world.cols) for x in _nb_ref])
+        _r0, _c0 = divmod(_ref, self.world.cols)
+        _dr = _rc[:, 0].astype(np.float64) - _r0
+        _dc = _rc[:, 1].astype(np.float64) - _c0
+        _dc = np.where(_dc > self.world.cols / 2, _dc - self.world.cols,
+                       np.where(_dc < -self.world.cols / 2, _dc + self.world.cols, _dc))
+        _ln = np.sqrt(_dr * _dr + _dc * _dc)
+        _ln[_ln < 1e-12] = 1.0
+        _unit = np.stack([_dr / _ln, _dc / _ln], axis=1)     # (8,2)
+        self._ars_cos = (_unit @ _unit.T).astype(np.float64)  # (8,8)
+        # 个体状态数组（关档仍建 ⇒ 少一个特例 = 少一个坑；关档不消费 ⇒ 零轨迹影响）
+        self._out_taken = np.zeros(n, dtype=np.float64)
+        self._feed_fast = np.zeros(n, dtype=np.float64)
+        self._feed_slow = np.zeros(n, dtype=np.float64)
+        self._ars_extensive = np.ones(n, dtype=bool)          # 出生即赶路（还没咬到过）
+        self._heading = np.full(n, -1, dtype=np.int64)        # -1 = 未知/极区
+        self._giveup_ct = np.zeros(n, dtype=np.int64)
+        # 读数（关档全 0/None）
+        self._ars_dec_n = 0
+        self._ars_inertia_sum = 0.0
+        self._ars_flat_n = 0
+        self._ars_sw_ie_n = 0
+        self._ars_sw_ei_n = 0
+        self._ars_rerand_n = 0
+
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
         )
@@ -1790,6 +1858,34 @@ class SphereEngine:
                     "（A≡0）⇒ **不可单独用作 P2 判定**。",
         }
 
+    def ars_probe(self) -> dict | None:
+        """14.9 ARS 双模式觅食读数（本线 = [所有者·天平]）。
+
+        🔴 `ars.enabled=False` ⇒ **None（未适用）**，**不是 0**（R120 / §五.12 口径铁律）。
+        """
+        if not self._ars_on:
+            return None
+        dec = int(self._ars_dec_n)
+        return {
+            "ars_enabled": True,
+            "ars_gain": float(self._ars_gain),
+            "ars_theta": float(self._ars_theta),
+            "ars_kappa": float(self._ars_kappa),
+            "ars_giveup": int(self._ars_giveup),
+            "ars_gene_slots": (int(Gene.PERSISTENCE), int(Gene.GIVE_UP)),
+            "ars_dec_n": dec,
+            "ars_inertia_sum": round(float(self._ars_inertia_sum), 6),
+            "ars_flat_n": int(self._ars_flat_n),
+            "ars_flat_frac": (round(self._ars_flat_n / dec, 6) if dec else None),
+            "ars_sw_ie_n": int(self._ars_sw_ie_n),
+            "ars_sw_ei_n": int(self._ars_sw_ei_n),
+            "ars_rerand_n": int(self._ars_rerand_n),
+            "ars_extensive_frac": (
+                round(float(self._ars_extensive[: len(self._flat)].mean()), 6)
+                if len(self._flat) else None
+            ),
+        }
+
     def _refresh_pp_anom(self) -> None:
         """刷新逐格日历轴异常 A = P(φ, t) − 0.5（13.8；**逐 tick**，带 tick 去重）。
 
@@ -2210,6 +2306,11 @@ class SphereEngine:
             #    metabolic_mult = 0.5 + g1×1.5（基因放大代谢快慢）
             metab_mult = 0.5 + genes[:, Gene.METABOLIC] * 1.5
             digest_rate = ocfg.base_metabolism * metab_mult * eff_activity
+            # 14.9 ARS（D3 对称耦合）：油箱大 ⇒ 维持也贵（否则=给高 pers 个体发能量补贴）
+            if self._ars_on and self._ars_kappa > 0.0:
+                digest_rate = digest_rate * (
+                    1.0 + self._ars_kappa * np.clip(genes[:P, Gene.PERSISTENCE], 0.0, 1.0)
+                )
             # 每 tick 最多转化这么多；不得超出胃里有的
             digest = np.minimum(stomach, digest_rate)
             # 🔴 13.5（S2）：**吸收率**（吃进去多少变成能量）+ **未吸收回流本格植物池**。
@@ -2316,6 +2417,9 @@ class SphereEngine:
             self._step_fruit_charge(P, genes)
 
         # 4) 进食：从格子里吃进胃（先吃后扣基础维持，保证当天能吃到）
+        #    14.9 ARS：本 tick 每个体**实际咬到量**先清零（ARS 关时不消费 ⇒ 零轨迹影响）
+        if self._ars_on:
+            self._out_taken[:P] = 0.0
         #    饱食度：胃容量上限（基础 = max_energy/eat_efficiency/2，g5 缩放 0.5~2 倍）
         #    进食量：每 tick 最多 eat_amount（g4 缩放 0.5~1.5 倍）
         # 内评 §三 观察项 1：取出上一 tick 的 oracle 成交落点（**只消费一次**，保证
@@ -2337,6 +2441,11 @@ class SphereEngine:
             )
         # 🔴 13.5（S2）：**进食阈值** —— 胃低于容量的该比例才进食（"不饿不吃"）。
         #   默认 1.0 ⇒ 旧判定 `stomach < stomach_cap`（逐位一致）。
+        # 14.9 ARS（D3 对称耦合）：油箱随 pers 变大（κ 上限 0.5 ⇒ 最多 +50%）
+        if self._ars_on and self._ars_kappa > 0.0:
+            stomach_cap = stomach_cap * (
+                1.0 + self._ars_kappa * np.clip(genes[:, Gene.PERSISTENCE], 0.0, 1.0)
+            )
         _eat_frac = float(getattr(ocfg, "eat_threshold_frac", 1.0) or 1.0)
         _eat_gate = stomach_cap * _eat_frac
         # S2/S3 尸体—争夺（设计稿 §5.3/5.4）：开关只读一次，供 4.3/4.3b 复用
@@ -2371,6 +2480,9 @@ class SphereEngine:
             else:
                 taken = self.resources.consume_many(self._flat[eaters], want)
             stomach[eaters] += taken
+            # 14.9 ARS：本格咬到计入（通道 1/3）
+            if self._ars_on:
+                self._out_taken[eaters] += taken
             # 13.4 波 2A（T2）：每格被吃量**质量**累计（note_tick 的 intake 输入；
             # 关档 `_rd_intake_sum` 不消费 ⇒ 零轨迹影响）。
             if _rd_on:
@@ -2406,6 +2518,9 @@ class SphereEngine:
                 else:
                     taken2 = self.resources.consume_many(targets, short[hf])
                 stomach[hf] += taken2
+                # 14.9 ARS：邻格咬到计入（通道 2/3；g10 邻格觅食）
+                if self._ars_on:
+                    self._out_taken[hf] += taken2
                 # 13.4 波 2A（T2）：邻格取食同样计入 per-cell intake（质量单位）。
                 if _rd_on:
                     np.add.at(self._rd_intake_sum, targets, taken2)
@@ -2414,6 +2529,29 @@ class SphereEngine:
             #       （RHP + 持有者优势 + 升级阈值 + 撤退）。🔴 确定性数值（零 RNG）。
             if bool(getattr(_cwc_scav, "contest_enabled", False)):
                 self._step_contest(P, eaters, genes, energy)
+
+        # ── 14.9 ARS：期待更新 + 模式切换（进食结算后、移动决策前）────────────────
+        #   快平均 = 最近几十 tick 的摄入（"现在这一口还行吗"）
+        #   慢平均 = 最近几百 tick 的摄入（"我最近过得算不错吗" = 个体自己的期待）
+        #   驻留→赶路：快 < θ×慢（吃得明显不如之前）或 从未咬到（fast≈0）
+        #   赶路→驻留：咬到了（out_taken > 0）
+        if self._ars_on:
+            _df = 1.0 - 1.0 / self._ars_fast_tau
+            _ds = 1.0 - 1.0 / self._ars_slow_tau
+            _ot = self._out_taken[:P]
+            self._feed_fast[:P] = _df * self._feed_fast[:P] + _ot / self._ars_fast_tau
+            self._feed_slow[:P] = _ds * self._feed_slow[:P] + _ot / self._ars_slow_tau
+            _was = self._ars_extensive[:P]
+            _to_ext = (~_was) & (
+                (self._feed_fast[:P] < self._ars_theta * self._feed_slow[:P])
+                | (self._feed_fast[:P] <= 1e-12)
+            )
+            _to_int = _was & (_ot > 0.0)
+            self._ars_extensive[:P] = np.where(
+                _to_ext, True, np.where(_to_int, False, _was)
+            )
+            self._ars_sw_ie_n += int(_to_ext.sum())
+            self._ars_sw_ei_n += int(_to_int.sum())
 
         # 4.3) S2 食腐（设计稿 §5.3 项 4；`corpse_enabled`）：按 g16 Hill 平滑从所在格取
         #      尸体**入胃**（受胃容量限）。🔴 确定性数值（无 RNG 消费）⇒ 关档零轨迹影响。
@@ -2770,6 +2908,7 @@ class SphereEngine:
                     _mig_on = bool(self._mig_on)
                     _mig_gain = self._mig_gain
                     _mig_min_abs = self._mig_min_abs
+                    _ars_on = self._ars_on
                     if _span2_on and self._span_eff2[_cell_i]:
                         _row = self._span_table[_cell_i]
                         nb = _row[_row >= 0]
@@ -2910,6 +3049,37 @@ class SphereEngine:
                                 # 🔴 R148-1 反退化：对**所有候选**取同值 ⇒ argmax 逐位不变
                                 #    ⇒ "接了却一行行为没改"。同纬候选天然贡献 ⇒ 报比例不判死。
                                 self._mig_flat_n += 1
+                    # ── 14.9 ARS：赶路惯性（仅 extensive；极区/非 8 邻豁免）────────────
+                    # cos 矩阵对反向天然 = −1 ⇒ **不回头软惩罚内建**（食物项可覆盖 ⇒
+                    # 满足 fish「也可以往回走、评估什么价值大」）。
+                    if _ars_on and bool(self._ars_extensive[idx]):
+                        self._ars_dec_n += 1
+                        self._giveup_ct[idx] += 1
+                        if self._giveup_ct[idx] > self._ars_giveup:
+                            # 失望：连走 giveup tick 没咬到 ⇒ **确定性右转 90°**（+2 槽位）
+                            # 🔴 零 RNG（保住 L1 块"不新增随机抽取"的契约，test_l1_terms）；
+                            #    且这是 fish 要的「轻微转向」——不是随机乱换方向。
+                            self._heading[idx] = (self._heading[idx] + 2) % 8
+                            self._giveup_ct[idx] = 0
+                            self._ars_rerand_n += 1
+                        _hd = int(self._heading[idx])
+                        _lat_deg = float(self._lat_abs[_cell_i]) * 57.29577951308232
+                        # 🔴 候选可能是 4 邻（D2 Von Neumann，默认 radius=4）或 8 邻（Moore）
+                        #    ⇒ cos 行按候选子集取；极点（120 邻）/span=2（16 邻）豁免。
+                        if (_lat_deg <= self._ars_lat_exempt and 0 <= _hd < 8
+                                and len(nb) in (4, 8)):
+                            if len(nb) == 8:
+                                _cos_row = self._ars_cos[_hd, :]
+                            else:
+                                _cos_row = self._ars_cos[_hd, :][
+                                    list(self.world._VON_NEUMANN_IDX)
+                                ]
+                            _pers_i = float(genes[idx, Gene.PERSISTENCE])
+                            _m = (self._ars_gain * _pers_i) * _cos_row
+                            score = score + _m
+                            self._ars_inertia_sum += float(np.abs(_m).sum())
+                            if float(_m.max() - _m.min()) < 1e-12:
+                                self._ars_flat_n += 1
                     # ── 13.4 波 2B（T3）：单格个体上限（score 层剔除满格）──────
                     # 🔴 三条硬约束（任务书 T3 / 设计稿 §2.4）：
                     #   1. **只约束"进入"，不约束"留在"**：候选 = 本格（steps=0）不受限。
@@ -2975,6 +3145,18 @@ class SphereEngine:
                         targets[i] = nb[int(rand_choice[i] % len(nb))]
                     else:
                         targets[i] = nb[int(np.argmax(score))]
+                    # ── 14.9 ARS：记录本步方向（供下一 tick 的惯性项用）──────────────
+                    # 🔴 heading 统一存 **Moore 槽位（0–7）**：4 邻模式下把 nb 内下标
+                    #    经 `_VON_NEUMANN_IDX` 映射回 Moore 槽位（两模式共用一个 cos 矩阵）。
+                    if _ars_on and len(nb) in (4, 8):
+                        _same = np.flatnonzero(nb == targets[i])
+                        if len(_same) == 1:
+                            if len(nb) == 8:
+                                self._heading[idx] = int(_same[0])
+                            else:
+                                self._heading[idx] = int(
+                                    self.world._VON_NEUMANN_IDX[int(_same[0])]
+                                )
                     # ── R146/R149 L2 第二段：冲刺者改走 2 格（**盲选**）─────────────
                     # 位置：**在 score/softmax 之后** ⇒ `u = self.rng.random()` 仍按个体消费
                     # ⇒ 每 tick 随机抽取数与关档**逐字一致**（H2/H1 的形状要求）。
@@ -3606,6 +3788,19 @@ class SphereEngine:
             # L10a：子代果实蓄力清零，种子携带清零
             self._fruit_charge = np.concatenate([self._fruit_charge, np.zeros(K, dtype=np.float64)])
             self._seed_carried = np.concatenate([self._seed_carried, np.zeros(K, dtype=np.int32)])
+            # 14.9 ARS：子代扩容（出生即赶路模式；heading 未知；期待从零开始）
+            self._out_taken = np.concatenate(
+                [self._out_taken, np.zeros(K, dtype=np.float64)])
+            self._feed_fast = np.concatenate(
+                [self._feed_fast, np.zeros(K, dtype=np.float64)])
+            self._feed_slow = np.concatenate(
+                [self._feed_slow, np.zeros(K, dtype=np.float64)])
+            self._ars_extensive = np.concatenate(
+                [self._ars_extensive, np.ones(K, dtype=bool)])
+            self._heading = np.concatenate(
+                [self._heading, np.full(K, -1, dtype=np.int64)])
+            self._giveup_ct = np.concatenate(
+                [self._giveup_ct, np.zeros(K, dtype=np.int64)])
             born = K
             new_max = int(self._generation.max())
             if new_max > self._max_generation:
@@ -3634,6 +3829,19 @@ class SphereEngine:
             # 用切片赋值而非拼接 ⇒ 与上面 `[:P][keep]` 的语义逐位一致）。
             self._sub_r = np.concatenate([self._sub_r[:P][keep], self._sub_r[P:]])
             self._sub_c = np.concatenate([self._sub_c[:P][keep], self._sub_c[P:]])
+            # 14.9 ARS：随死亡压缩（**同一 `keep` 掩码**；漏掉 ⇒ 与个体错位 ⇒ 惯性项乱指）
+            self._out_taken = np.concatenate(
+                [self._out_taken[:P][keep], self._out_taken[P:]])
+            self._feed_fast = np.concatenate(
+                [self._feed_fast[:P][keep], self._feed_fast[P:]])
+            self._feed_slow = np.concatenate(
+                [self._feed_slow[:P][keep], self._feed_slow[P:]])
+            self._ars_extensive = np.concatenate(
+                [self._ars_extensive[:P][keep], self._ars_extensive[P:]])
+            self._heading = np.concatenate(
+                [self._heading[:P][keep], self._heading[P:]])
+            self._giveup_ct = np.concatenate(
+                [self._giveup_ct[:P][keep], self._giveup_ct[P:]])
             # S1 骨架：血条随死亡压缩（与 _energy 同节拍）；机制不接线，仅保数组同长
             self._health = np.concatenate(
                 [self._health[:P][keep], self._health[P:]]

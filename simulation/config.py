@@ -931,6 +931,50 @@ class MigrationConfig:
 
 
 @dataclass
+class ArsConfig:
+    """ARS 双模式觅食（14.9；fish 2026-09-25 批准；设计稿 §9–§11 v4）。
+
+    机制（两腿，默认关 ⇒ 逐位等价）
+    -------------------------------
+    * **赶路腿（extensive）**：个体按 `Gene.PERSISTENCE`(g20) 沿上一步方向继续走
+      （`score += gain · pers · cos(heading→候选)`；cos 对反向天然 = −1 ⇒ **不回头软惩罚**）；
+      连走 `giveup` tick 没咬到 ⇒ **随机重选方向**（排除由 cos 隐式完成）。
+    * **期待腿**：`_out_taken`（本 tick 实际咬到量）更新**快/慢两个 EMA**；
+      **快 < θ·慢 ⇒ 切赶路**（= 个体自己的"最近吃得不如之前好"）；
+      **咬到 ⇒ 切回驻留**。这就是 MVT 的"跟自己最近的经验比"，不依赖全局平均。
+    * **油箱对称耦合（D3，fish 09-25）**：`stomach_cap ×= (1+κ·pers)` **且**
+      `base_metabolism ×= (1+κ·pers)` ⇒ 油箱大的维持也贵 ⇒ **不是白来的补贴**，
+      净效果由环境决定（食物稀 ⇒ 油箱大的赢）。
+
+    🔴 三条硬约束
+    -------------
+    * **I1** `enabled=False` ⇒ 不进任何新代码路径 ⇒ C7 逐位等价
+    * **I2** 只在 Python 路径 ⇒ `enabled ∧ use_sim_core` 构造期硬报错（H3-A1）
+    * **I3** 极区豁免：`|lat| > lat_exempt_deg` 的个体**不加惯性项**（极点邻居 = 整行 120 个，
+      0–7 方向编码不成立；实测保持东西向 120 步绕回原点 ⇒ 持续长度必须有限）
+    """
+
+    enabled: bool = False          # 默认关 ⇒ 整块跳过 ⇒ C7 逐位等价
+    gain: float = 1.0              # 惯性权重 w_pers（实验旋钮）
+    theta: float = 0.5             # 快 < θ×慢 ⇒ 切赶路（θ 越高越容易"失望"）
+    kappa: float = 0.0             # 油箱对称耦合系数（0=关；≤0.5 上限）
+    giveup: int = 20               # 赶路模式下连走多少 tick 没咬到就重选方向（≈1–3×自由程）
+    fast_tau: float = 50.0         # 快平均时间常数（tick）
+    slow_tau: float = 500.0        # 慢平均时间常数（tick）；必须 > fast_tau
+    lat_exempt_deg: float = 85.0   # 极区豁免阈值（度）
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.enabled, bool), "ars.enabled 必须是布尔值"
+        assert self.gain >= 0.0, "ars.gain 非负"
+        assert 0.0 < self.theta <= 2.0, "ars.theta 须在 (0, 2]"
+        assert 0.0 <= self.kappa <= 0.5, "ars.kappa ∈ [0, 0.5]（fish D3：总格数不超太多）"
+        assert int(self.giveup) >= 1, "ars.giveup ≥ 1"
+        assert self.fast_tau > 1.0 and self.slow_tau > self.fast_tau, (
+            "ars.slow_tau 必须大于 fast_tau（否则'快/慢'无意义）")
+        assert 0.0 <= self.lat_exempt_deg <= 90.0, "ars.lat_exempt_deg ∈ [0, 90]"
+
+
+@dataclass
 class ResourceDynamicsConfig:
     """斑块"休耕—死亡—轮作"（13.4 波 2；fish 01:20 构想 / R176 §12）。
 
@@ -1012,6 +1056,9 @@ _RESOURCE_DYNAMICS_FIELDS: frozenset = frozenset(
 #: 13.8 迁徙配置白名单（同 `_RESOURCE_DYNAMICS_FIELDS` 规格：旧存档缺键回退默认）。
 _MIGRATION_FIELDS: frozenset = frozenset(f.name for f in fields(MigrationConfig))
 
+#: 14.9 ARS 配置白名单（同规格）。
+_ARS_FIELDS: frozenset = frozenset(f.name for f in fields(ArsConfig))
+
 
 @dataclass
 class SimConfig:
@@ -1039,6 +1086,8 @@ class SimConfig:
     # ---- 13.4 波 2：斑块"休耕—死亡—轮作"（默认关 = 旧行为逐位等价）----
     #   实现落在新文件 `world/resource_dynamics.py`；本配置是它的参数契约。
     resource_dynamics: ResourceDynamicsConfig = field(default_factory=ResourceDynamicsConfig)
+    # ---- 14.9 ARS 双模式觅食（默认关 = 旧行为**逐位一致**）----
+    ars: ArsConfig = field(default_factory=ArsConfig)
     # ---- 13.8 日历—罗盘式定向迁徙（默认关 = 旧行为**逐位等价**）----
     #   消费 13.7 的 δ(t)（**不改** illumination / light_sensitivity），只**新增**
     #   `LightAndTemperature.photoperiod`。挂进 SimConfig ⇒ 经 `asdict` **自动进指纹**
@@ -1131,6 +1180,14 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("migration") or {}).items()
                     if k in _MIGRATION_FIELDS
+                }
+            ),
+            # 14.9：ARS 双模式觅食；旧存档缺失 ⇒ 回退默认（enabled=False = 旧行为）。
+            ars=ArsConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("ars") or {}).items()
+                    if k in _ARS_FIELDS
                 }
             ),
             # D-8：oracle 配置；旧存档缺失时回退默认关闭（C-6/C-7 先例同 reputation_weight）。

@@ -55,8 +55,8 @@ class Gene(IntEnum):
     DIET = 17                # 食性（未接线，预留）
     DEFENSE = 18             # 防御（未接线，预留）
     ROOTING = 19             # 植物化扎根（移动概率 ×(1-g19) + 额外光合，L4）
-    HEDONISM = 20            # 享乐敏感（未接线，预留）
-    PROCESSING = 21          # 处理位（未接线，预留）
+    PERSISTENCE = 20         # 赶路惯性（ARS 14.9：extensive 模式下沿上一步方向继续走的强度）
+    GIVE_UP = 21             # 失望阈值（ARS 14.9：extensive 模式下连走多少格没咬到就重选方向）
     TRUST_GENE = 22          # 信任阈值（未接线，预留）
     MIGRATE_BIAS = 23        # 迁徙倾向（日历—罗盘式定向迁徙，13.8 接线；原 RESERVED）
 
@@ -128,8 +128,8 @@ GENE_SEMANTICS: tuple[str, ...] = (
     "食性（未接线）",      # g17
     "防御（未接线）",      # g18
     "植物化扎根",          # g19
-    "享乐敏感（未接线）",  # g20
-    "处理位（未接线）",    # g21
+    "赶路惯性（ARS）",    # g20
+    "失望阈值（ARS）",    # g21
     "信任阈值（未接线）",  # g22
     "迁徙倾向（日历—罗盘）",  # g23（13.8 接线；原「预留」）
 )
@@ -143,6 +143,7 @@ _GENE_WIRED: set[int] = {
     int(Gene.REPRO_COOLDOWN), int(Gene.SOCIABILITY), int(Gene.PERCEPTION),
     int(Gene.SIGNAL_STRENGTH), int(Gene.AGGRESSION), int(Gene.ROOTING),
     int(Gene.MIGRATE_BIAS),
+    int(Gene.PERSISTENCE), int(Gene.GIVE_UP),
 }
 GENE_WIRED: frozenset[int] = frozenset(_GENE_WIRED)
 
@@ -186,8 +187,8 @@ GENE_META: tuple[GeneMeta, ...] = (
     GeneMeta(0.10, 0),    # g17 食性（预留）：默认
     GeneMeta(0.10, 0),    # g18 防御（预留）：默认
     GeneMeta(0.08, 1),    # g19 植物化扎根：高值有利（静态生态位）
-    GeneMeta(0.10, 0),    # g20 享乐敏感（预留）：默认
-    GeneMeta(0.10, 0),    # g21 处理位（预留）：默认
+    GeneMeta(0.10, 0),    # g20 赶路惯性（ARS）：中性，环境决定方向
+    GeneMeta(0.10, 0),    # g21 失望阈值（ARS）：中性，环境决定方向
     GeneMeta(0.10, 0),    # g22 信任阈值（预留）：默认
     GeneMeta(0.10, 0),    # g23 迁徙倾向（13.8 接线；探索性位，宽松突变）
 )
