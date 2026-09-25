@@ -60,6 +60,13 @@ _DURATION_FIELDS: list[tuple[str, str]] = [
     ("ars", "slow_tau"),
     ("ars", "giveup"),
     ("oracle", "persistence"),
+    # 🔴 P0.0 A1（2026-09-26）：繁殖冷却换算系数原为引擎里硬编码的 `* 60.0`，
+    #    现搬进 `SimConfig.organisms`。量纲 = **基因 × 每单位基因的 tick 数**
+    #    = tick 时长 ⇒ 时间压缩时 **÷ k**。（不改 ⇒ 冷却相对"世界日"缩短 k 倍。）
+    ("organisms", "repro_cooldown_gene_scale"),
+    # 🔴 P0.0 A1（2026-09-26）：信号场寿命原为引擎里硬编码的 `duration=50`，
+    #    现搬进 `SimConfig.signals`。量纲 = tick 时长 ⇒ **÷ k**。
+    ("signals", "duration_ticks"),
 ]
 # ⚠️ `pleasure.expectation_size` **不是时长**：它是 `_expectation` 的**数组宽度**
 #    （`(n, expectation_size)`）⇒ 擅自 ÷k 会直接 IndexError。属于"计数类，不变"。
@@ -100,7 +107,7 @@ def rescale_config(cfg: Any, k: float) -> dict[str, Any]:
     if k <= 0:
         raise ValueError(f"k 必须 > 0，收到 {k!r}")
     if abs(k - 1.0) < 1e-12:
-        return {"signals_duration": 50}      # 引擎默认值（硬编码，见模块 docstring）
+        return {"signals_duration": 50}      # k=1 ⇒ 不改（与默认 50 一致）
 
     for grp, name in _RATE_FIELDS:
         sub = getattr(cfg, grp)
@@ -127,14 +134,15 @@ def rescale_config(cfg: Any, k: float) -> dict[str, Any]:
              "oracle": {"persistence": 1},
              "info_structure": {"learning_maturity_ticks": 10},
              "corpse_wound": {"corpse_decay_ticks": 10},
-             "light": {"rotation_period": 8}}
+             "light": {"rotation_period": 8},
+             "signals": {"duration_ticks": 1}}
     for grp, names in _mins.items():
         sub = getattr(cfg, grp)
         for name, lo in names.items():
             if getattr(sub, name) < lo:
                 setattr(sub, name, int(lo) if isinstance(getattr(sub, name), int) else float(lo))
 
-    return {"signals_duration": max(1, int(round(50.0 / k)))}
+    return {"signals_duration": int(cfg.signals.duration_ticks)}
 
 
 def apply_post_build(eng: Any, notes: dict[str, Any]) -> None:

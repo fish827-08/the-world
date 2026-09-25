@@ -562,7 +562,12 @@ class SphereEngine:
             ),
         )
         # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
-        self.signals = SignalField(self.world, duration=50)
+        # 🔴 P0.0 A1（2026-09-26）：寿命原为硬编码 `duration=50`，现读配置
+        #    （`signals.duration_ticks`，默认 50 = 旧行为**逐位等价**）。
+        #    它是**以 tick 计价**的时长 ⇒ 时间压缩时必须 ÷k；硬编码会让机械清点扫不到。
+        self.signals = SignalField(
+            self.world, duration=config.signals.duration_ticks
+        )
 
         # 预计算统一邻居表（L6 Rust 下沉用）：普通格 8 邻，极点格 cols 邻，
         # 统一到 nb_stride 列，未用位置填 -1。世界不变，只需构建一次。
@@ -3762,8 +3767,14 @@ class SphereEngine:
                 energy[ri] -= child_energy
                 stomach[ri] -= child_stomach
                 self._stomach_scav[ri] -= child_stomach_scav
-                # 生完进入冷却（g12）：间隔 = g12 × 60 tick，冷却没到攒再多也不生
-                self._repro_cooldown[ri] = genes[ri, Gene.REPRO_COOLDOWN] * 60.0
+                # 生完进入冷却（g12）：间隔 = g12 × 换算系数 tick，冷却没到攒再多也不生
+                # 🔴 P0.0 A1（2026-09-26）：换算系数原为硬编码 `60.0`，现读配置
+                #    （`organisms.repro_cooldown_gene_scale`，默认 60.0 = 旧行为**逐位等价**）。
+                #    它是 **基因 ⇒ tick** 的换算 ⇒ 以 tick 计价 ⇒ 时间压缩时必须 ÷k。
+                self._repro_cooldown[ri] = (
+                    genes[ri, Gene.REPRO_COOLDOWN]
+                    * self.config.organisms.repro_cooldown_gene_scale
+                )
                 # 愉悦度：子代继承亲代 expectation + 噪声（文化传递载体）
                 pcfg = self.config.pleasure
                 child_exp = self._expectation[ri].copy()
