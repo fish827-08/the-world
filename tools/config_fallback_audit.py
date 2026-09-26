@@ -23,6 +23,8 @@
 覆盖自检**恒跑**：目录不存在／文件数过少／命中数过少 ⇒ `CoverageError` ⇒ 退出码 2。
 （A2b 教训：清单/兜底写死 ⇒ 必然腐坏；覆盖必须 glob 派生 + 数量下限。）
 
+报告含 `hits`（逐点：位置／字段／兜底／默认）——供 R213 §六 的"闸型兜底固定值"守卫复用。
+
 用法
 ----
     .venv\\Scripts\\python.exe tools/config_fallback_audit.py
@@ -160,6 +162,7 @@ def scan(root: Path = ROOT, dirs: tuple[str, ...] = SCAN_DIRS,
         raise CoverageError(f"总文件数 {len(files)} < 下限 {min_files_total}")
 
     mism, ambig, unknown = [], [], []
+    hits: list[dict] = []
     n_hits = n_none = n_alias_files = 0
     for p in files:
         try:
@@ -177,14 +180,17 @@ def scan(root: Path = ROOT, dirs: tuple[str, ...] = SCAN_DIRS,
             n_hits += 1
             where = f"{rel}:{lineno}"
             found = cfgdef.get(field)
+            uniq = found[0] if found and len({v for _, v in found}) == 1 else None
+            hits.append({"where": where, "field": field, "fallback": repr(default),
+                         "config_default": (repr(uniq[1]) if uniq else None)})
             if not found:
                 unknown.append({"where": where, "field": field, "fallback": repr(default)})
-            elif len({v for _, v in found}) > 1:
+            elif uniq is None:
                 ambig.append({"where": where, "field": field, "fallback": repr(default),
                               "candidates": [[c, repr(v)] for c, v in found]})
-            elif found[0][1] != default:
+            elif uniq[1] != default:
                 mism.append({"where": where, "field": field, "fallback": repr(default),
-                             "config_default": repr(found[0][1]), "config_class": found[0][0]})
+                             "config_default": repr(uniq[1]), "config_class": uniq[0]})
 
     if n_hits < min_hits:
         raise CoverageError(f"命中数 {n_hits} < 下限 {min_hits} —— 解析或覆盖可疑")
@@ -192,7 +198,7 @@ def scan(root: Path = ROOT, dirs: tuple[str, ...] = SCAN_DIRS,
         "scan_files": [p.relative_to(root).as_posix() for p in files],
         "coverage": {"n_files": len(files), "n_hits": n_hits, "n_none_fallback": n_none,
                      "n_alias_files": n_alias_files},
-        "mismatches": mism, "ambiguous": ambig, "unknown": unknown,
+        "mismatches": mism, "ambiguous": ambig, "unknown": unknown, "hits": hits,
     }
 
 

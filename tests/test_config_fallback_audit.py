@@ -15,6 +15,7 @@
   S4/S5 覆盖 fail-loud：目录缺失 / 文件数过少 -> CoverageError
   S6 CLI：真仓 rc=0；`--json` 真落盘
   S7 R98：入口 UTF-8 兜底存在（工具 print 含非 GBK 字符）
+  S8 R213 §六：4 处"闸型"兜底固定为"兜底 == config 默认值"（不许回退成旧闸值）
 
 注：本文件不用 print；断言串保持 GBK 可编码（R98 守卫扫 tests/）。
 """
@@ -143,3 +144,34 @@ def test_s6_cli_real_repo_rc0_and_json(tmp_path):
 def test_s7_gbk_guard_present_in_tool():
     """R98：工具 print 含非 GBK 字符（字段歧义等），入口必须有 UTF-8 兜底。"""
     assert 'reconfigure(encoding="utf-8"' in TOOL.read_text(encoding="utf-8")
+
+
+def test_s8_r213_gate_type_fallbacks_pin_config_defaults():
+    """R213 §六：4 处"闸型"兜底维持"兜底 == config 默认值"（不回退成旧闸值）。
+
+    背景：这 4 处的**旧兜底**语义上分别是"机制关/更严"（w_fear_health 0.0 关血条恐惧项、
+    need_aggression_k 0.0 关饥饿激进、eat_threshold_frac 1.0 更严、assim_return_frac 0.0 不回灌）。
+    按 R208 §三 字面（兜底 == 当前默认）已对齐；R213 §六 裁定维持对齐、不做 enabled 闸门。
+    本守卫把裁定值钉死：任何回退或私自改值都会红（若 config 默认属裁定变更，请一并更新本表）。
+    """
+    rep = cfa.scan()
+    gates = {
+        "w_fear_health": {"0.5"},
+        "need_aggression_k": {"0.5"},
+        "eat_threshold_frac": {"0.0"},
+        "assim_return_frac": {"1.0"},
+    }
+    hits_by_field: dict[str, list[dict]] = {}
+    for h in rep["hits"]:
+        hits_by_field.setdefault(h["field"], []).append(h)
+    for field, expected in gates.items():
+        rows = hits_by_field.get(field, [])
+        assert rows, f"{field} 没有兜底点（覆盖可疑/字段被改名）——R213 §六 守卫失效"
+        for r in rows:
+            assert r["fallback"] == r["config_default"], (
+                f"R213 §六：兜底须 == config 默认值；{r['where']} {field} "
+                f"兜底 {r['fallback']} vs 默认 {r['config_default']}")
+            assert r["fallback"] in expected, (
+                f"R213 §六 已裁定 {field} 兜底为 {expected}，实际 {r['fallback']}"
+                f"（{r['where']}）——回退须回板重裁")
+    assert [m for m in rep["mismatches"]] == []
