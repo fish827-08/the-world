@@ -1065,9 +1065,31 @@ class SphereEngine:
             )
 
         # 出生位置：均匀随机格（不做地形障碍过滤，球面无障碍）
-        self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
-            np.int64
-        )
+        # 🔴 14.9 T1b（青梧找回）：`init_patch_frac>0` ⇒ 混合投放——按比例把创始代撒进
+        #   食物格（斑块内），其余仍均匀随机。默认 0.0 = 走原路径（逐位等价；RNG 序列不变）。
+        #   用途：斑块出生子集测"富斑耗尽→失望离开"（卡点1）、荒漠出生子集测"找路"（卡点2），
+        #   两子集读数分列。**实验投放参数，不改世界规则**（斑块布局/再生全不动）。
+        _init_pf = float(getattr(config.population, "init_patch_frac", 0.0))
+        if _init_pf > 0.0:
+            _patch_cells = np.flatnonzero(self.resources._grid > 0.0)
+            if len(_patch_cells) == 0:
+                raise RuntimeError(
+                    "init_patch_frac>0 但当前世界无任何食物格（patchy 布局未生效？）"
+                )
+            _n_patch = int(round(n * min(_init_pf, 1.0)))
+            if _n_patch > n:
+                _n_patch = n
+            _fp = self.rng.choice(_patch_cells, size=_n_patch, replace=True).astype(
+                np.int64
+            )
+            _fr = self.rng.integers(
+                0, self.world.n_cells, size=n - _n_patch
+            ).astype(np.int64)
+            self._flat = np.concatenate([_fp, _fr])
+        else:
+            self._flat = self.rng.integers(0, self.world.n_cells, size=n).astype(
+                np.int64
+            )
         # 🔴 13.4 波 1：**撒点之后必须重新同步亚格坐标** ——
         # 上面 `_flat = np.zeros(n)` 时做的 `_sub_init` 是基于"全 0"的，而撒点把 `_flat`
         # 整体替换成随机格 ⇒ 不同步就会**脱钩**（I2 被破坏：亚格指向格 0、`_flat` 指向随机格）。
