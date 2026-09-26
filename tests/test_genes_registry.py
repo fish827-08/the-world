@@ -79,7 +79,8 @@ class TestGeneWiringValidation:
         py_values[percep_idx] = 15  # 原本是 14
         drift = sim_core.validate_gene_wiring(py_names, py_values)
         assert len(drift) > 0, "篡改后应检测到漂移，但返回空"
-        assert any(d[0] == "PERCEPTION" for d in drift), f"漂移应包含 PERCEPTION: {drift}"
+        # R204 起条目名带 `|KIND` 归因后缀（如 `PERCEPTION|VALUE_MISMATCH`），比名字段
+        assert any(d[0].split("|")[0] == "PERCEPTION" for d in drift), f"漂移应包含 PERCEPTION: {drift}"
 
     def test_drift_detected_when_py_name_changed(self):
         """故意改 Python 侧名字→校验必须返回非空。"""
@@ -109,7 +110,7 @@ class TestGeneWiringValidation:
             idx = py_names.index(target_gene.name)
             py_values[idx] = (py_values[idx] + 1) % 24  # 改成不同的值
             drift = sim_core.validate_gene_wiring(py_names, py_values)
-            assert any(d[0] == target_gene.name for d in drift), \
+            assert any(d[0].split("|")[0] == target_gene.name for d in drift), \
                 f"{target_gene.name} 篡改后未被检测到（可能未覆盖此基因）"
 
 
