@@ -12,8 +12,12 @@ pub fn culture_learn_with_csr(
     age: &[i64],
     maturity_age: &[f64],
     neighbors: &[i64],
+    pole_nb: &[i64],
     n_cells: usize,
     nb_stride: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     alpha: f64,
     cell_indptr: &[usize],
     cell_indices: &[usize],
@@ -33,10 +37,12 @@ pub fn culture_learn_with_csr(
         }
 
         // 收集邻格所有个体（排序+去重，与 Python np.isin 集合操作一致）
+        // P0.1：普通格主表 8 项；极点格极点带整行（与旧 fat 表逐位同序）
         let mut neighbor_inds: Vec<usize> = Vec::with_capacity(16);
-        let nb_start = c * nb_stride;
-        for nb_off in 0..nb_stride {
-            let nbc = neighbors[nb_start + nb_off];
+        let nb = crate::neighbors::nb_slice(
+            neighbors, pole_nb, c, n_cols, nb_stride, pole_top, pole_bottom,
+        );
+        for &nbc in nb {
             if nbc < 0 {
                 continue;
             }
@@ -87,8 +93,12 @@ pub fn culture_learn(
     age: &[i64],
     maturity_age: &[f64],
     neighbors: &[i64],
+    pole_nb: &[i64],
     n_cells: usize,
     nb_stride: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     alpha: f64,
 ) {
     let n = flat.len();
@@ -120,7 +130,8 @@ pub fn culture_learn(
 
     culture_learn_with_csr(
         interpret, flat, age, maturity_age,
-        neighbors, n_cells, nb_stride, alpha,
+        neighbors, pole_nb, n_cells, nb_stride,
+        n_cols, pole_top, pole_bottom, alpha,
         &cell_indptr, &cell_indices,
     );
 }

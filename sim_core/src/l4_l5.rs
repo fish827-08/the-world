@@ -26,9 +26,13 @@ pub fn predation_and_culture(
     rand_prey: &[i64],
     rand_success: &[f64],
     neighbors: &[i64],
+    pole_nb: &[i64],
     n_cells: usize,
     nb_stride: usize,
     gene_count: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     max_energy: f64,
     eat_efficiency: f64,
     culture_alpha: f64,
@@ -71,7 +75,8 @@ pub fn predation_and_culture(
         predation::predation_attack_with_csr(
             energy, stomach, predation_mask,
             flat, genes, attackers, rand_prey, rand_success,
-            neighbors, n_cells, nb_stride, gene_count,
+            neighbors, pole_nb, n_cells, nb_stride, gene_count,
+            n_cols, pole_top, pole_bottom,
             max_energy, eat_efficiency,
             attack_cost, success_gene_gain, success_floor, success_ceil,
             transfer_ratio, stomach_transfer,
@@ -82,7 +87,8 @@ pub fn predation_and_culture(
     // ── 6.5 文化学习（用共用 CSR）──
     culture::culture_learn_with_csr(
         interpret, flat, age, maturity_age,
-        neighbors, n_cells, nb_stride, culture_alpha,
+        neighbors, pole_nb, n_cells, nb_stride,
+        n_cols, pole_top, pole_bottom, culture_alpha,
         &cell_indptr, &cell_indices,
     );
 }

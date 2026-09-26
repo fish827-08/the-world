@@ -19,6 +19,7 @@ mod culture;
 mod genes;
 mod l4_l5;
 mod movement;
+mod neighbors;
 mod pleasure;
 mod predation;
 mod regrow;
@@ -401,7 +402,8 @@ fn step_vectors_stage2(
 /// culture_learn：文化学习（L5），幼体向邻格成体学习信号解读表。
 ///
 /// 语义与 sphere_engine 步骤 6.5 逐位等价。interpret (N,16) 就地更新。
-/// neighbors 是展平的 (n_cells*8,) 邻居表（普通格 8 邻，极点格可能含重复/负值）。
+/// neighbors 是展平的 (n_cells*8,) 邻居表（P0.1 紧凑：普通格 8 邻）；
+/// pole_nb 是 (2*n_cols,) 极点带（极点格邻居 = 相邻纬度带整行）。
 #[pyfunction]
 fn culture_learn(
     interpret: Bound<'_, PyArray2<f64>>,
@@ -409,8 +411,12 @@ fn culture_learn(
     age: PyReadonlyArray1<'_, i64>,
     maturity_age: PyReadonlyArray1<'_, f64>,
     neighbors: PyReadonlyArray1<'_, i64>,
+    pole_nb: PyReadonlyArray1<'_, i64>,
     n_cells: usize,
     nb_stride: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     alpha: f64,
 ) -> PyResult<()> {
     let n = flat.as_array().len();
@@ -435,6 +441,13 @@ fn culture_learn(
             n_cells * nb_stride
         )));
     }
+    let pole_len = pole_nb.as_array().len();
+    if pole_len != 2 * n_cols {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "pole_nb: 长度 {pole_len} 应为 2*n_cols = {}",
+            2 * n_cols
+        )));
+    }
 
     let mut interp = unsafe { interpret.as_slice_mut()? };
     culture::culture_learn(
@@ -443,8 +456,12 @@ fn culture_learn(
         age.as_slice()?,
         maturity_age.as_slice()?,
         neighbors.as_slice()?,
+        pole_nb.as_slice()?,
         n_cells,
         nb_stride,
+        n_cols,
+        pole_top,
+        pole_bottom,
         alpha,
     );
     Ok(())
@@ -466,8 +483,12 @@ fn predation_attack(
     rand_prey: PyReadonlyArray1<'_, i64>,
     rand_success: PyReadonlyArray1<'_, f64>,
     neighbors: PyReadonlyArray1<'_, i64>,
+    pole_nb: PyReadonlyArray1<'_, i64>,
     n_cells: usize,
     nb_stride: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     max_energy: f64,
     eat_efficiency: f64,
 ) -> PyResult<()> {
@@ -498,6 +519,13 @@ fn predation_attack(
             n_cells * nb_stride
         )));
     }
+    let pole_len = pole_nb.as_array().len();
+    if pole_len != 2 * n_cols {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "pole_nb: 长度 {pole_len} 应为 2*n_cols = {}",
+            2 * n_cols
+        )));
+    }
 
     let mut e = unsafe { energy.as_slice_mut()? };
     let mut s = unsafe { stomach.as_slice_mut()? };
@@ -510,7 +538,9 @@ fn predation_attack(
         rand_prey.as_slice()?,
         rand_success.as_slice()?,
         neighbors.as_slice()?,
-        n_cells, nb_stride, gene_count, max_energy, eat_efficiency,
+        pole_nb.as_slice()?,
+        n_cells, nb_stride, gene_count,
+        n_cols, pole_top, pole_bottom, max_energy, eat_efficiency,
     );
     Ok(())
 }
@@ -533,8 +563,12 @@ fn predation_and_culture(
     rand_prey: PyReadonlyArray1<'_, i64>,
     rand_success: PyReadonlyArray1<'_, f64>,
     neighbors: PyReadonlyArray1<'_, i64>,
+    pole_nb: PyReadonlyArray1<'_, i64>,
     n_cells: usize,
     nb_stride: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     max_energy: f64,
     eat_efficiency: f64,
     culture_alpha: f64,
@@ -582,6 +616,13 @@ fn predation_and_culture(
             n_cells * nb_stride
         )));
     }
+    let pole_len = pole_nb.as_array().len();
+    if pole_len != 2 * n_cols {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "pole_nb: 长度 {pole_len} 应为 2*n_cols = {}",
+            2 * n_cols
+        )));
+    }
 
     let mut e = unsafe { energy.as_slice_mut()? };
     let mut s = unsafe { stomach.as_slice_mut()? };
@@ -596,7 +637,9 @@ fn predation_and_culture(
         rand_prey.as_slice()?,
         rand_success.as_slice()?,
         neighbors.as_slice()?,
+        pole_nb.as_slice()?,
         n_cells, nb_stride, gene_count,
+        n_cols, pole_top, pole_bottom,
         max_energy, eat_efficiency, culture_alpha,
         attack_cost, success_gene_gain, success_floor, success_ceil,
         transfer_ratio, stomach_transfer,
@@ -622,6 +665,7 @@ fn step_movement(
     densities: PyReadonlyArray1<'_, f64>,
     signal_marks: PyReadonlyArray1<'_, u8>,
     neighbors: PyReadonlyArray1<'_, i64>,
+    pole_nb: PyReadonlyArray1<'_, i64>,
     move_inds: PyReadonlyArray1<'_, i64>,
     rand_choice: PyReadonlyArray1<'_, i64>,
     move_cost_ind: PyReadonlyArray1<'_, f64>,
@@ -629,6 +673,8 @@ fn step_movement(
     nb_stride: usize,
     // A′ 记忆朝向梯度（2026-09-19）：mode 0=none（原式）/ 1=orientation（朝向梯度）
     n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     mem_grad_mode: u8,
     mem_grad_gain: f64,
 ) -> PyResult<()> {
@@ -684,6 +730,13 @@ fn step_movement(
             n_cells * nb_stride
         )));
     }
+    let pole_len = pole_nb.as_array().len();
+    if pole_len != 2 * n_cols {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "pole_nb: 长度 {pole_len} 应为 2*n_cols = {}",
+            2 * n_cols
+        )));
+    }
 
     let mut f = unsafe { flat.as_slice_mut()? };
     let mut e = unsafe { energy.as_slice_mut()? };
@@ -694,10 +747,11 @@ fn step_movement(
         food_ratio.as_slice()?, sig_present.as_slice()?, densities.as_slice()?,
         signal_marks.as_slice()?,
         neighbors.as_slice()?,
+        pole_nb.as_slice()?,
         move_inds.as_slice()?, rand_choice.as_slice()?,
         move_cost_ind.as_slice()?,
         n_cells, nb_stride, gene_count,
-        n_cols, mem_grad_mode, mem_grad_gain,
+        n_cols, pole_top, pole_bottom, mem_grad_mode, mem_grad_gain,
     );
     Ok(())
 }

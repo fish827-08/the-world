@@ -287,6 +287,8 @@ class SphereEngine:
         "_repro_cooldown",
         "_valence", "_arousal", "_expectation", "_baseline", "_trust",
         "_work_memory", "_mem_ptr", "_interpret", "_nb_table",
+        # P0.1（T1）：紧凑邻居表 —— `_nb_table` 引用 world 的 `(n_cells,8)`，极点带另存
+        "_pole_nb", "_pole_top", "_pole_bottom",
         # A′ 记忆朝向梯度计数器（2026-09-19）—— 本类用 `__slots__`，**新属性必须登记否则无法赋值**
         "_mem_grad_dec", "_mem_grad_slots", "_mem_grad_trig", "_mem_grad_counts_valid",
         "_codebook", "_learning_count",  # D2 信息结构：任意性码本 + 学习瓶颈计数
@@ -569,22 +571,27 @@ class SphereEngine:
             self.world, duration=config.signals.duration_ticks
         )
 
-        # 预计算统一邻居表（L6 Rust 下沉用）：普通格 8 邻，极点格 cols 邻，
-        # 统一到 nb_stride 列，未用位置填 -1。世界不变，只需构建一次。
+        # 预计算统一邻居表（L6 Rust 下沉用）：**P0.1（T1）紧凑化** —— 直接复用 world 的
+        # 紧凑缓存（`(n_cells, 8)` int64 ≈ 29.5 MB @480×960），不再自建
+        # `(n_cells, max(8, cols))` 的 fat 表（480×960 下 3 538.9 MB = 单 run 内存 94.7%）。
+        # 极点格（邻居 = 相邻纬度带整行 cols 个）**不进主表**（主表极点行为 -1 占位），
+        # 由 `_pole_nb` (2, cols) 承载；消费端（Rust 4 入口 + Python 文化学习）按
+        # "行号 == 极行"分支取 ⇒ **邻居集合与顺序与旧 fat 表逐位相同** ⇒ 纯结构重构。
+        self._nb_table = self.world._nb_table
+        self._pole_nb = self.world._pole_nb
+        self._pole_top = int(self.world._pole_top)
+        self._pole_bottom = int(self.world._pole_bottom)
         n_cells = self.world.n_cells
-        nb_stride = max(8, self.world.cols)
-        self._nb_table = np.full((n_cells, nb_stride), -1, dtype=np.int64)
-        for c in range(n_cells):
-            nbs = self.world.neighbors(c)
-            self._nb_table[c, :len(nbs)] = nbs
         # 🔴 F1 修复（任务书 T3，C9 型缺陷）：**每格实际邻居数**（span=1 语义）。
         #   此前 `densities` 用 `_nb_table.shape[1]`（= stride 120）当分母 ⇒ 社交项被
         #   静默弱化 15×（注释写"0~8"但代码除 120）。改为逐格实际邻居数（众数 8、
         #   极区 120）⇒ 社交项恢复应有量级 = **构造级变更**（digest 变，须同步测试）。
         #   ⚠️ 只在 `social_norm="auto"` 时生效；数字串 ⇒ 冻结常量（兼容设计稿提议）。
-        self._nb_len = np.array(
-            [int((self._nb_table[c] >= 0).sum()) for c in range(n_cells)],
-            dtype=np.float64,
+        #   P0.1：旧值 = 旧表每行"非负项计数"= 非极 8 / 极 cols；新式按同一语义直接
+        #   生成（极行整带在 `_pole_nb`，主表极行是 -1 占位 ⇒ 不能再数主表）⇒ 逐位相同。
+        self._nb_len = np.where(
+            self.world.is_pole(np.arange(n_cells)),
+            float(self.world.cols), 8.0,
         )
         _snorm0 = str(getattr(config.simulation, "social_norm", "auto"))
         if _snorm0 != "auto":
@@ -2806,10 +2813,11 @@ class SphereEngine:
                     self._flat[:P], energy, genes, self._trust[:P],
                     self._work_memory[:P].reshape(-1), self._interpret[:P],
                     food_ratio, sig_present, densities, signal_marks,
-                    self._nb_table.reshape(-1),
+                    self._nb_table.reshape(-1), self._pole_nb.reshape(-1),
                     mi.astype(np.int64), rand_choice, move_cost_ind,
                     self.world.n_cells, self._nb_table.shape[1],
                     int(self.world.cols),
+                    self._pole_top, self._pole_bottom,
                     1 if _ifc_mg.memory_gradient == "orientation" else 0,
                     float(_ifc_mg.memory_gradient_gain),
                 )
@@ -3448,8 +3456,9 @@ class SphereEngine:
                 energy, stomach, predation_mask, self._interpret,
                 self._flat[:P], genes, self._age[:P], maturity_age,
                 attackers.astype(np.int64), rand_prey, rand_success,
-                self._nb_table.reshape(-1),
+                self._nb_table.reshape(-1), self._pole_nb.reshape(-1),
                 self.world.n_cells, self._nb_table.shape[1],
+                int(self.world.cols), self._pole_top, self._pole_bottom,
                 ocfg.max_energy, ocfg.eat_efficiency, 0.1,
                 pcfg.attack_cost, pcfg.success_gene_gain,
                 pcfg.success_floor, pcfg.success_ceil,
@@ -3597,7 +3606,9 @@ class SphereEngine:
                     _cell_adults.setdefault(int(self._flat[int(_a)]), []).append(int(_a))
                 for idx in j_idx:
                     _c = int(self._flat[int(idx)])
-                    _nb = self._nb_table[_c, :int(self._nb_len[_c])]
+                    # P0.1：紧凑表下极点格邻居在 `_pole_nb`（整带），走 world 的分支查询
+                    # （与 Python 参考路径其它取邻处同一入口；语义 = 旧 fat 表该整行）
+                    _nb = self.world.neighbors(_c)
                     _lst: list[int] = []
                     for _nc in _nb:
                         _v = _cell_adults.get(int(_nc))

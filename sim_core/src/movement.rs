@@ -25,13 +25,15 @@ use crate::genes::{G_PERCEPTION, G_SOCIABILITY};
 /// - `sig_present`: (n_cells,) 每格是否有信号（0/1）
 /// - `densities`: (n_cells,) 每格个体密度
 /// - `signal_marks`: (n_cells,) 每格信号标记（0~15，0=无信号）
-/// - `neighbors`: (n_cells * nb_stride,) 展平邻居表
+/// - `neighbors`: (n_cells * nb_stride,) 展平邻居表（P0.1：普通格紧凑 8 列）
+/// - `pole_nb`: (2 * n_cols,) 极点带（行 0 = 上极整带，行 1 = 下极整带）
 /// - `move_inds`: (n_move,) 移动个体的索引（Python 侧已筛选 move_mask & energy>cost）
 /// - `rand_choice`: (n_move,) 预生成随机选择（得分无差异时用，% n_valid_nb）
 /// - `move_cost_ind`: (N,) 每个个体的移动耗能
 /// - `n_cells`: 格子总数
-/// - `nb_stride`: 每行邻居数
+/// - `nb_stride`: 主表每行邻居数（普通格）
 /// - `gene_count`: 基因数
+/// - `pole_top` / `pole_bottom`: 上下极点带的行号（`neighbors.rs::nb_slice`）
 #[allow(clippy::too_many_arguments)]
 pub fn step_movement(
     flat: &mut [i64],
@@ -45,6 +47,7 @@ pub fn step_movement(
     densities: &[f64],
     signal_marks: &[u8],
     neighbors: &[i64],
+    pole_nb: &[i64],
     move_inds: &[i64],
     rand_choice: &[i64],
     move_cost_ind: &[f64],
@@ -52,6 +55,8 @@ pub fn step_movement(
     nb_stride: usize,
     gene_count: usize,
     n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     mem_grad_mode: u8,
     mem_grad_gain: f64,
 ) {
@@ -75,14 +80,15 @@ pub fn step_movement(
         let trust_val = trust[idx];
 
         // 收集有效邻居（>=0），同时计算得分
-        // 极点格最多 cols 个邻居，用 Vec 动态分配避免大世界越界
-        let mut valid_nb: Vec<i64> = Vec::with_capacity(nb_stride);
-        let mut scores: Vec<f64> = Vec::with_capacity(nb_stride);
+        // P0.1：普通格取主表 8 项；极点格取极点带整行（cols 项，与旧 fat 表逐位同序）
+        let nb = crate::neighbors::nb_slice(
+            neighbors, pole_nb, c, n_cols, nb_stride, pole_top, pole_bottom,
+        );
+        let mut valid_nb: Vec<i64> = Vec::with_capacity(nb.len());
+        let mut scores: Vec<f64> = Vec::with_capacity(nb.len());
         let mut n_valid = 0usize;
 
-        let nb_base = c * nb_stride;
-        for nb_off in 0..nb_stride {
-            let nbc = neighbors[nb_base + nb_off];
+        for &nbc in nb {
             if nbc < 0 {
                 continue;
             }

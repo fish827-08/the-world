@@ -22,9 +22,13 @@ pub fn predation_attack_with_csr(
     rand_prey: &[i64],
     rand_success: &[f64],
     neighbors: &[i64],
+    pole_nb: &[i64],
     n_cells: usize,
     nb_stride: usize,
     gene_count: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     max_energy: f64,
     eat_efficiency: f64,
     attack_cost: f64,
@@ -56,9 +60,11 @@ pub fn predation_attack_with_csr(
         }
 
         let mut prey_list: Vec<usize> = Vec::with_capacity(16);
-        let nb_base = c * nb_stride;
-        for nb_off in 0..nb_stride {
-            let nbc = neighbors[nb_base + nb_off];
+        // P0.1：普通格主表 8 项；极点格极点带整行（与旧 fat 表逐位同序）
+        let nb = crate::neighbors::nb_slice(
+            neighbors, pole_nb, c, n_cols, nb_stride, pole_top, pole_bottom,
+        );
+        for &nbc in nb {
             if nbc < 0 {
                 continue;
             }
@@ -118,9 +124,13 @@ pub fn predation_attack(
     rand_prey: &[i64],
     rand_success: &[f64],
     neighbors: &[i64],
+    pole_nb: &[i64],
     n_cells: usize,
     nb_stride: usize,
     gene_count: usize,
+    n_cols: usize,
+    pole_top: usize,
+    pole_bottom: usize,
     max_energy: f64,
     eat_efficiency: f64,
 ) {
@@ -154,7 +164,8 @@ pub fn predation_attack(
     predation_attack_with_csr(
         energy, stomach, predation_mask, flat, genes,
         attackers, rand_prey, rand_success,
-        neighbors, n_cells, nb_stride, gene_count,
+        neighbors, pole_nb, n_cells, nb_stride, gene_count,
+        n_cols, pole_top, pole_bottom,
         max_energy, eat_efficiency,
         0.1, 0.5, 0.1, 0.9, 0.4, 0.4,  // A2 收编前的旧默认值（独立对拍接口不动）
         &cell_indptr, &cell_indices,
