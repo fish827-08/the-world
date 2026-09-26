@@ -1,0 +1,17 @@
+# T2T3 证据清单 —— sha256sum 格式（生成于 2026-09-26 08:32:16）
+c08b57ac1da2ada82878336e44674ae8454bcf81ff11d6bfa6713c2df2aa41d6         1,858  _rerun_logs/t2t3_smoke/cap_kp_table.txt
+8f08d087096fff098fe17a76bab0b94ed2a724691a18454fc2ea2abe7946ef28         3,058  _rerun_logs/t2t3_smoke/commit_msg_t2t3_code.txt
+108036807db6df7065ba8dc7a85391afbe16a80f50149b895782dcbebe8339b3            98  _rerun_logs/t2t3_smoke/del8_M1_subdiv40_green.txt
+d6e7fc291346a8733fc32fb35fb6110a89f44de3501179d28dc42b1a2241784c           920  _rerun_logs/t2t3_smoke/del8_M1_subdiv40_red.txt
+4ae14dbeffefbba53d44715f9f2ea067aaa2085312a70a4adf93619260f07e6c            98  _rerun_logs/t2t3_smoke/del8_M2_defaultk_green.txt
+9b95a7359211df1cc5ec01216c10e62f438ea9339b1475432f602625c831ec64         1,698  _rerun_logs/t2t3_smoke/del8_M2_defaultk_red.txt
+5e543f29a4eb05457b5977f4cbc260b68e523eb574deb26481d58901b0cffd5f            98  _rerun_logs/t2t3_smoke/del8_M3_coolscale_green.txt
+6e7c8ec9132831af58c304be6874f48dbbb71e602db5c989a1d455d802dbc4b5         1,508  _rerun_logs/t2t3_smoke/del8_M3_coolscale_red.txt
+3e02ba96b2cbbd42a7f7fff68dc2c2ec18762683585c91ceea3a826f61e80561         1,342  _rerun_logs/t2t3_smoke/ladder_analytic.txt
+33e3e4da7533297aed38376e3e1e7035bdb19d408093f43c2c0654da2ff93380         4,861  _rerun_logs/t2t3_smoke/pytest_full.txt
+d335056435f1573906d5100e959a18e39c8017c760418c3cf569e84318767890         4,358  _rerun_logs/t2t3_smoke/pytest_full_final.txt
+f341502a7eee24b434a09d67ae2d59ec421c4184c6cbfdd46ae7937104de7656         3,696  _rerun_logs/t2t3_smoke/quant_realrun.txt
+d4423b07c2147c8578062aff8f3fd3bc555408ed538427ed7aacf820cca533a2         1,635  _rerun_logs/t2t3_smoke/self_audit_digest.txt
+b8988996445e3791c07aa85cdd030b0a0390d23a945ca11ba36fb4219886e7cf         1,611  _rerun_logs/t2t3_smoke/smoke_ds_default.txt
+d7cba134ca55e9adcff3fd2ce4669034f8defa83f20c36718b218e64a22f5ed8         1,365  _rerun_logs/t2t3_smoke/smoke_steady_k.txt
+5a3f679e3c32f4e23a6c61cbcb0f0a41086c247c2cf59c610d44c64f3af42a86         7,996  tests/test_1410_k25_wiring.py
