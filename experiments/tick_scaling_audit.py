@@ -28,6 +28,14 @@ from simulation.config import SimConfig                      # noqa: E402
 from simulation.genes import Gene                            # noqa: E402
 from simulation.sphere_engine import SphereEngine            # noqa: E402
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
+
 
 def age_factor_of(age: np.ndarray, lifespan: np.ndarray, ocfg) -> np.ndarray:
     af = np.ones_like(age, dtype=np.float64)

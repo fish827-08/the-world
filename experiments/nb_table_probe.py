@@ -45,6 +45,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from simulation.config import SimConfig                      # noqa: E402
 from simulation.sphere_engine import SphereEngine            # noqa: E402
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
+
 
 def _cfg(seed: int, rows: int, cols: int, pop: int, sim_core: bool) -> SimConfig:
     c = SimConfig(seed=seed)

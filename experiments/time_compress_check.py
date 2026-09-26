@@ -37,6 +37,13 @@ from experiments.scaling_rescale import (                    # noqa: E402
     ancher_consistent_speed, apply_post_build, gain_for, rescale_config, subdiv_for,
 )
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 A_AGE = 0.60          # 年龄因子均值（experiments/tick_scaling_audit.py 实测）
 R_TARGET = 40.0       # 档位数目标 R = v_max × subdiv
 
