@@ -53,6 +53,10 @@ def build_cmd(rgm: float, seed: int, out_dir: Path, max_minutes: float,
         "--speed-max", str(T4["speed_max"]), "--gain", str(T4["gain"]),
         "--subdiv", str(T4["subdiv"]), "--k", str(T4["k"]),
         "--max-count", str(T4["max_count"]), "--max-minutes", str(max_minutes),
+        # 🔴 关早停（`--stop-stable 0`）：默认 4 段 <3% 会在**瞬态**上误触发
+        #   （2026-09-27 实测：8 250/11 000/13 250 tick 就"平台"了，K 只有 513–742、
+        #    代数 31–64 —— 而全长档同期仍在爬升）⇒ **K 必须取全长（40k）的末端**
+        "--stop-stable", "0",
         "--patch-regrowth-mult", str(rgm),
         "--out", str(out_dir / f"rgm{rgm:g}_s{seed}.csv"),
     ]
@@ -67,6 +71,9 @@ def main() -> None:
     ap.add_argument("--max-minutes", type=float, default=150.0, help="单 run 墙钟上限")
     ap.add_argument("--python", default=None,
                     help="解释器路径（冻结树场景必给：本仓的 .venv/Scripts/python.exe）")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="已有完整 summary（final_tick ≥ ticks）的 run 跳过 ⇒ 可续跑")
+    ap.add_argument("--retries", type=int, default=1, help="每个 run 失败后重试次数")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -86,23 +93,50 @@ def main() -> None:
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    def complete(r: float, s: int) -> bool:
+        sp = out_dir / f"rgm{r:g}_s{s}.summary.json"
+        if not sp.exists():
+            return False
+        try:
+            rr = json.loads(sp.read_text(encoding="utf-8"))["result"]
+        except Exception:
+            return False
+        return int(rr.get("final_tick", 0)) >= T4["ticks"]
+
     t0 = time.time()
     done: list[dict] = []
     for rnd in range(0, len(jobs), a.jobs):
         batch = jobs[rnd:rnd + a.jobs]
-        procs = []
-        for r, s in batch:
-            log = open(out_dir / f"rgm{r:g}_s{s}.log", "w", encoding="utf-8")
-            cmd = build_cmd(r, s, out_dir, a.max_minutes, py)
-            print(f"  ▶ 启动 rgm={r:g} seed={s}", flush=True)
-            procs.append((r, s, subprocess.Popen(cmd, cwd=str(ROOT), stdout=log,
-                                                 stderr=subprocess.STDOUT), log))
-        for r, s, p, log in procs:
-            rc = p.wait()
-            log.close()
-            print(f"  ✔ 结束 rgm={r:g} seed={s} rc={rc}"
-                  f"（累计 {time.time() - t0:.0f}s）", flush=True)
-            done.append({"rgm": r, "seed": s, "rc": rc})
+        todo = [(r, s) for r, s in batch if not (a.skip_existing and complete(r, s))]
+        if not todo:
+            print(f"  ⏭ 该批已完成（跳过 {len(batch)} 个）", flush=True)
+            done.extend({"rgm": r, "seed": s, "rc": 0} for r, s in batch)
+            continue
+        for attempt in range(a.retries + 1):
+            procs = []
+            for r, s in todo:
+                log = open(out_dir / f"rgm{r:g}_s{s}.log", "w", encoding="utf-8")
+                cmd = build_cmd(r, s, out_dir, a.max_minutes, py)
+                print(f"  ▶ 启动 rgm={r:g} seed={s}"
+                      + (f"（第 {attempt + 1} 次）" if attempt else ""), flush=True)
+                procs.append((r, s, subprocess.Popen(cmd, cwd=str(ROOT), stdout=log,
+                                                     stderr=subprocess.STDOUT), log))
+            failed = []
+            for r, s, p, log in procs:
+                rc = p.wait()
+                log.close()
+                ok = complete(r, s)
+                print(f"  ✔ 结束 rgm={r:g} seed={s} rc={rc} 完整={ok}"
+                      f"（累计 {time.time() - t0:.0f}s）", flush=True)
+                if not ok:
+                    failed.append((r, s))
+                else:
+                    done.append({"rgm": r, "seed": s, "rc": rc})
+            if not failed:
+                break
+            print(f"  ↻ 待重试：{failed}", flush=True)
+            todo = failed
 
     print(f"\n== 全部结束：{len(done)}/{len(jobs)}，总墙钟 {(time.time() - t0) / 60:.1f} min ==")
     bad = [d for d in done if d["rc"] != 0]
