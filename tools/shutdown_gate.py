@@ -102,6 +102,9 @@ def main() -> int:
                     help="python 进程 CPU 秒数超过此值视为'在跑'（默认 120）")
     ap.add_argument("--require-summary", default=None,
                     help="要求该目录下每个 *.csv 都有对应 *.summary.json（防半截产物）")
+    ap.add_argument("--require-in-data", default=None,
+                    help="要求**数据仓**里存在该相对路径且非空（实验结果不进主仓，"
+                         "只提交主仓 = 云端拿不到 ⇒ 这一项专治该漏洞）")
     ap.add_argument("--shutdown", action="store_true", help="全绿才真的关机（90s 宽限）")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
@@ -133,6 +136,16 @@ def main() -> int:
             print(f"❌ 产物：{len(miss)} 个 run 缺 summary（例：{miss[:4]}）⇒ 未跑完")
         else:
             print(f"✅ 产物：{len(csvs)} 个 run 均有 summary")
+
+    if a.require_in_data:
+        tgt = DATA / a.require_in_data
+        n = len(list(tgt.glob("*"))) if tgt.is_dir() else (1 if tgt.exists() else 0)
+        if n == 0:
+            all_ok = False
+            print(f"❌ 数据仓：缺 `{a.require_in_data}`（空或不存在）"
+                  f" ⇒ 实验结果没进数据仓，云端拿不到 ⇒ 不许关机")
+        else:
+            print(f"✅ 数据仓：已含 `{a.require_in_data}`（{n} 项）")
 
     print()
     if not all_ok:
