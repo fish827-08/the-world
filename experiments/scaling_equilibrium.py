@@ -27,6 +27,15 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
+
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 
 DAY0 = 2400.0            # 现状一昼夜 tick
 LIFE0 = 8.0 * DAY0       # 现状最大寿命 tick（lifespan_mult=1、g3=1 ⇒ ×8）
