@@ -399,6 +399,7 @@ def test_consume_many_bitwise_equal(seed, n_cells, n_org):
     py_field = ResourceField.__new__(ResourceField)  # 不触构造，直接用裸数组
     py_grid, py_cap = grid.copy(), np.full(n_cells, 1e9)
     py_field._grid, py_field._capacity = py_grid, py_cap
+    py_field._lazy = False  # __new__ 绕过 __init__，需手动补惰性再生关（同 __init__ 默认）
     py_taken = py_field.consume_many(flats, amounts)
 
     rs_grid = grid.copy()

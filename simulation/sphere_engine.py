@@ -295,6 +295,9 @@ class SphereEngine:
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
+        # R217 §五 #1 稀疏化 B：范围闸（配置开关 ∧ py 路径 ∧ ¬资源动态）；
+        #   逐字段惰性/稀疏开关在 `resources._lazy` / `signals._sparse`
+        "_sparse_fields",
         "_fruit_grid", "_fruit_charge", "_seed_carried",  # L10a
         # ---- D-17/D-18/D-8（⑤⑥ 探针 + oracle）----
         # 按 _id 键控的终身账本（长度 = _next_id，只增不压缩；死亡个体保留行——
@@ -817,6 +820,20 @@ class SphereEngine:
         _rdcfg0 = getattr(config, "resource_dynamics", None)
         self._rd = _ResourceDynamics.from_field(
             _rdcfg0, self.resources, self.world)
+        # ---- R217 §五 #1 稀疏化 B：惰性再生 / 稀疏信号（默认关 ⇒ 全场路径逐位不变）----
+        # 🔴 范围锁（缺一不可）：① 配置开关；② Python 路径（Rust `consume_many` /
+        #    `regrow_patchy` / `signal_emit` **直写** `_grid`/`_marks`，打脏点覆盖不到）；
+        #    ③ 资源动态关（每 tick 改 `_capacity`/斑块掩码，"净格恒净"前提被破坏）。
+        # 资源侧另有前提校验（`enable_lazy`：temp_sensitivity/light_sensitivity/倍率符号）
+        # ⇒ 不满足时它返回 False 并**保持全场路径**（安全回退；`resources._lazy` 即真值）。
+        self._sparse_fields = bool(
+            getattr(config.simulation, "sparse_fields", False)
+            and not self._use_sim_core
+            and not bool(getattr(self._rd, "enabled", False))
+        )
+        if self._sparse_fields:
+            self.resources.enable_lazy()
+            self.signals.enable_sparse()
         self._rd_intake_sum = np.zeros(self.world.n_cells, dtype=np.float64)
         self._rd_growth_sum = np.zeros(self.world.n_cells, dtype=np.float64)
         # 13.4 波 2B（T3）：cap 读数计数器（关档不累加 ⇒ probe None/0 口径）
@@ -1328,7 +1345,7 @@ class SphereEngine:
                     0.0, self.resources._capacity[cells] - self.resources._grid[cells]
                 )
                 put = np.minimum(ret, room)
-                self.resources._grid[cells] += put
+                self.resources._grid[cells] += put   # sparse:inc（尸体归还，只增）
                 # 腐烂处 patch_boost：+50% 持续 2000 tick
                 self._corpse_boost[cells] = 2000
                 self._corpse_energy[cells] = 0.0
@@ -1343,7 +1360,7 @@ class SphereEngine:
             room = np.maximum(
                 0.0, self.resources._capacity[bo] - self.resources._grid[bo]
             )
-            self.resources._grid[bo] += np.minimum(boost_amt[bo], room)
+            self.resources._grid[bo] += np.minimum(boost_amt[bo], room)   # sparse:inc（腐烂 boost，只增）
             self._corpse_boost[bo] -= 1
 
     def _step_scavenging(self, P: int, stomach, stomach_cap, genes) -> None:
@@ -2204,12 +2221,12 @@ class SphereEngine:
             self._rd_intake_sum[:] = 0.0          # 逐 tick 重建 intake（note_tick 输入）
             self._rd_growth_sum = self.resources._regrowth_amount(self._tick)
             growth = self._rd_growth_sum * self._rd.growth_multiplier()
-            np.minimum(self.resources._capacity, self.resources._grid + growth,
+            np.minimum(self.resources._capacity, self.resources._grid + growth,   # sparse:n/a（rd 路径）
                        out=self.resources._grid)
         elif self._use_sim_core and self.resources.distribution == "uniform":
             # 3.4：资源再生长沉到 Rust（与 ResourceField.regrow 逐位等价，
             # 默认 temp_sensitivity=1.0 时严格一致；≠1 有 ≤1-ULP 差异）
-            self._sim_core.regrow(
+            self._sim_core.regrow(   # sparse:n/a（Rust 直写；范围锁已排除）
                 self.resources._grid, self.resources._capacity,
                 self.light.temperature(
                     np.arange(self.world.n_cells), self._tick
@@ -2223,7 +2240,7 @@ class SphereEngine:
             and hasattr(self._sim_core, "regrow_patchy")
         ):
             # L7e：patchy 再生下沉 Rust（斑块格×patch_mult / 背景格×bg_mult，守恒）
-            self._sim_core.regrow_patchy(
+            self._sim_core.regrow_patchy(   # sparse:n/a（Rust 直写；范围锁已排除）
                 self.resources._grid, self.resources._capacity,
                 self.light.temperature(
                     np.arange(self.world.n_cells), self._tick
@@ -2755,7 +2772,7 @@ class SphereEngine:
             # 3.5：批量进食双路径（Rust consume_many 与 numpy consume_many 逐位等价）
             if self._use_sim_core:
                 taken = np.empty(len(eaters), dtype=np.float64)
-                self._sim_core.consume_many(
+                self._sim_core.consume_many(   # sparse:n/a（Rust 直写；范围锁已排除）
                     self.resources._grid, self._flat[eaters], want, taken
                 )
             else:
@@ -2793,7 +2810,7 @@ class SphereEngine:
                     targets[j] = nb[int(self.rng.integers(0, len(nb)))]
                 if self._use_sim_core:
                     taken2 = np.empty(len(hf), dtype=np.float64)
-                    self._sim_core.consume_many(
+                    self._sim_core.consume_many(   # sparse:n/a（Rust 直写；范围锁已排除）
                         self.resources._grid, targets, short[hf], taken2
                     )
                 else:
@@ -2886,7 +2903,7 @@ class SphereEngine:
             self.config.info_structure.enabled and self.config.info_structure.arbitrary_codebook
         ):
             dens = occ.astype(np.float64)
-            self._sim_core.signal_emit(
+            self._sim_core.signal_emit(   # sparse:n/a（Rust 直写；范围锁已排除）
                 self._flat[:P], energy, signal_gene, rand_emit,
                 dens, self.resources._grid, self.resources._capacity,
                 self.signals._marks, self.signals._age,
@@ -4749,7 +4766,7 @@ class SphereEngine:
         if self._use_sim_core:
             # L7a C2：愉悦度更新下沉 Rust，双路径逐位一致
             densities = np.bincount(flat, minlength=self.world.n_cells).astype(np.float64)
-            self._sim_core.pleasure_update(
+            self._sim_core.pleasure_update(   # sparse:n/a（Rust 侧只读；且在范围锁外）
                 flat, energy_now, energy_before,
                 densities, self.resources._grid, self.resources._capacity,
                 self.signals._marks,
@@ -5169,7 +5186,7 @@ class SphereEngine:
             else np.zeros(_P, dtype=np.int64))
 
         # --- 8. 恢复世界状态 ---
-        engine.resources._grid = data["resource_grid"].copy()
+        engine.resources._grid = data["resource_grid"].copy()   # sparse:reset（下方 rebuild_lazy）
         engine.resources._capacity = data["resource_capacity"].copy()
         _pm = data["resource_patch_mask"]
         engine.resources._patch_mask = _pm.copy() if _pm.size > 0 else None
@@ -5200,8 +5217,13 @@ class SphereEngine:
             )
         engine.resources._bg_regrowth_mult = float(data["resource_bg_regrowth_mult"])
         engine.resources._patch_regrowth_mult = float(data["resource_patch_regrowth_mult"])
-        engine.signals._marks = data["signal_marks"].copy()
-        engine.signals._age = data["signal_age"].copy()
+        engine.signals._marks = data["signal_marks"].copy()   # sparse:reset（下方 rebuild_sparse）
+        engine.signals._age = data["signal_age"].copy()   # sparse:reset（下方 rebuild_sparse）
+        # R217 §五 #1 稀疏化 B：脏格集/活跃集是**派生量**（不进快照）⇒ 整体替换
+        #   `_grid` / `_marks` / `_age` 之后必须按不变量重建，否则陈旧集合会漏结算（破等价）。
+        #   （未启用时这两个方法是 no-op。）
+        engine.resources.rebuild_lazy()
+        engine.signals.rebuild_sparse()
 
         # --- 8.5 恢复运行统计 ---
         engine._run_born = int(data["run_born"])

@@ -76,6 +76,9 @@ class ResourceField:
         "_patch_regrowth_mult",
         "_bg_regrowth_mult",
         "bg_production_zero",
+        # ---- R217 §五 #1 稀疏化 B：惰性再生（默认关；见 `enable_lazy`）----
+        "_lazy",
+        "_dirty_mask",
     )
 
     def __init__(
@@ -201,7 +204,7 @@ class ResourceField:
             )
             # 5) 初始填充：patch 格填满，背景格填 background_fill
             #   ⚠️ 背景归零 ⇒ `_capacity` 为 0 ⇒ `_grid` 自动为 0（连初始存量也不给）
-            self._grid = np.where(
+            self._grid = np.where(       # sparse:init（构造期；派生集尚不存在）
                 patch_mask,
                 self._capacity * 1.0,
                 self._capacity * background_fill,
@@ -209,11 +212,14 @@ class ResourceField:
             self.bg_production_zero = bool(bg_production_zero)
         else:
             self._capacity = base_cap
-            self._grid = self._capacity * initial_fill
+            self._grid = self._capacity * initial_fill   # sparse:init（构造期）
             self._patch_mask = None
             self._patch_regrowth_mult = 1.0
             self._bg_regrowth_mult = 1.0
             self.bg_production_zero = False
+        # ---- R217 §五 #1 稀疏化 B：惰性再生（默认关 = 全场路径逐位不变）----
+        self._lazy = False
+        self._dirty_mask = None
 
     # ---- 查询（只看不吃） ---------------------------------------------------
 
@@ -288,7 +294,13 @@ class ResourceField:
         i = int(np.asarray(flat, dtype=np.int64))
         available = float(self._grid[i])
         taken = min(amount, available)
-        self._grid[i] = available - taken
+        self._grid[i] = available - taken            # sparse:mark（减写入 ⇒ 下面打脏）
+        if self._lazy:
+            # R217 稀疏化 B：能**减** `_grid` 的写入 ⇒ 必须打脏（本类 consume/consume_many
+            # 之外，py 非 rd 路径上没有别的减写入）。🔴 漏标 = 破等价的唯一途径；
+            # 多标无害（净格再结算一次是逐位 no-op）。只增写入（deposit / 尸体归还 /
+            # patch_boost）造不出 `grid < cap` ⇒ 不必打脏。
+            self._dirty_mask[i] = True
         return taken
 
     def consume_many(self, flats, amount: float) -> np.ndarray:
@@ -314,6 +326,9 @@ class ResourceField:
         NDArray[float64] : 每只生物实际吃到的量（与入参一一对应）。
         """
         flats = np.asarray(flats, dtype=np.int64)
+        if self._lazy and flats.size:
+            # R217 稀疏化 B：批量打脏（重复索引对 bool 赋值幂等 ⇒ 无需去重）
+            self._dirty_mask[flats] = True
         # 统计每个格子同时被多少只吃（np.add.at 对重复索引累加）
         cnt = np.zeros(self._grid.size, dtype=np.int64)
         np.add.at(cnt, flats, 1)
@@ -321,7 +336,7 @@ class ResourceField:
         avail = self._grid[flats]
         per_cell = np.minimum(avail, amount * cnt[flats])
         share = per_cell / np.maximum(1, cnt[flats])
-        np.subtract.at(self._grid, flats, share)
+        np.subtract.at(self._grid, flats, share)     # sparse:mark（减写入 ⇒ 上面打脏）
         return share
 
     # ---- 再生（食物慢慢长回来） -----------------------------------------------
@@ -356,7 +371,7 @@ class ResourceField:
         # ⚠️ 不用 `np.clip(..., out=...)`：标量入参时 `room` 是 numpy 标量（无 out 支持）
         room = np.maximum(self._capacity[flat] - self._grid[flat], 0.0)
         actual = np.minimum(np.maximum(add, 0.0), room)
-        np.add.at(self._grid, flat, actual)
+        np.add.at(self._grid, flat, actual)          # sparse:inc（只增 ⇒ 无需打脏）
         return actual
 
     def regrow(self, tick: int) -> None:
@@ -376,10 +391,75 @@ class ResourceField:
         ----
         None。直接修改内部存量数组。
         """
+        if self._lazy:
+            # R217 §五 #1 稀疏化 B：只结算脏格（逐位等价论证见 `_regrow_lazy`）
+            self._regrow_lazy(tick)
+            return
         growth = self._regrowth_amount(tick)
-        np.minimum(self._capacity, self._grid + growth, out=self._grid)
+        np.minimum(self._capacity, self._grid + growth,   # sparse:full（默认分支，逐位不变）
+                   out=self._grid)
 
-    def _regrowth_amount(self, tick: int) -> NDArray[np.float64]:
+    # ---- 惰性再生（R217 §五 #1 稀疏化 B；默认关 ⇒ 全场路径逐位不变）------------
+
+    def enable_lazy(self) -> bool:
+        """启用惰性再生（只结算脏格）。**返回是否启用**；前提不满足 ⇒ False（退回全场）。
+
+        🔴 逐位等价前提（全满足才可开；少一条都可能破等价 —— 逐条理由）：
+          ① `temp_sensitivity == 1.0` ⇒ 跳过 `np.power`：pow 的**子集执行**与全场执行
+             不保证同位（SIMD 通道/尾块处理差异），值域无法先验排除 ⇒ 不赌；
+          ② `light_sensitivity == 0.0` ⇒ 无光照因子（其归一化分支是**全场归约**
+             `lf.mean()`，子集算不出）；
+          ③ `regrowth_rate / _patch_regrowth_mult / _bg_regrowth_mult ≥ 0`
+             ⇒ 增长非负 ⇒ 夹取引理 `min(cap, cap+g) == cap` 成立。⚠️ **patchy 非归零档
+             `_bg_regrowth_mult` 可为负**（守恒式 `(1−pm·patch_frac)/bg_frac`）——负增长会把
+             净格拉低 ⇒ 惰性必须退场（本档实测默认参数下可为负，不是假想情形）；
+          ④ `distribution == "patchy"` 且掩码在：本机制的目标档（uniform 档全体初始半满
+             ⇒ 脏格≈全场，收益≈0，且首段反而多一次 `flatnonzero`）。
+        """
+        if self.distribution != "patchy" or self._patch_mask is None:
+            return False
+        if self.temp_sensitivity != 1.0 or self.light_sensitivity != 0.0:
+            return False
+        if (self.regrowth_rate < 0.0 or self._patch_regrowth_mult < 0.0
+                or self._bg_regrowth_mult < 0.0):
+            return False
+        self._lazy = True
+        self.rebuild_lazy()
+        return True
+
+    def rebuild_lazy(self) -> None:
+        """（重）建脏格集 = `_grid < _capacity`。
+
+        **启用时与快照恢复后必须调用**（脏格集是派生量，不进快照；`_grid` 被整体替换
+        的路径 —— 快照恢复 —— 会把既有掩码变成陈旧的"欠标" ⇒ 会破等价）。
+        """
+        if not self._lazy:
+            return
+        self._dirty_mask = self._grid < self._capacity
+
+    def _regrow_lazy(self, tick: int) -> None:
+        """惰性结算：只对脏格推进**一 tick** 的再生。
+
+        逐位等价论证（三条）：
+          ① **窗口恒 1 tick**：每 tick 都结算全部脏格 ⇒ 无多 tick 合并、无欠账
+             ⇒ 与全场路径**逐步同式**（不是"数学上收敛到同一值"）；
+          ② **净格不动**：`grid == cap` 且 `g ≥ 0`（见 `enable_lazy` 前提③）
+             ⇒ `min(cap, cap+g) == cap`（IEEE 下 `cap+g ≥ cap` 恒成立）⇒ 跳过 = 逐位 no-op；
+          ③ **子集执行 == 全场执行**：`min(cap_i, grid_i + g_i)` 全是逐元素 IEEE 定值算子，
+             与数组长度无关（已排除 pow / 光照归约 / 负增长三类风险）。
+        """
+        idx = np.flatnonzero(self._dirty_mask)      # 0.28 ms @460800（掩码扫描，O(n_cells)）
+        if idx.size == 0:
+            return
+        growth = self._regrowth_amount(tick, idx)   # 子集链，O(|脏格|)
+        cap = self._capacity[idx]
+        new = self._grid[idx] + growth
+        np.minimum(cap, new, out=new)
+        self._grid[idx] = new                        # sparse:lazy（子集结算；脏标记同函数内维护）
+        # 到顶格转净（未到顶的留脏，下 tick 继续；`>=` 而非 `==`：min 后不可能 > cap）
+        self._dirty_mask[idx[new >= cap]] = False
+
+    def _regrowth_amount(self, tick: int, idx=None) -> NDArray[np.float64]:
         """计算每格本 tick 应恢复的食物量（内部函数）。
 
         规则：恢复量 = 基准恢复率 × **温度因子** × **光照因子**（后者可选）。
@@ -397,12 +477,21 @@ class ResourceField:
         ----
         tick : int
             当前时间步（用于查温度、光照）。
+        idx : NDArray[int64] | None, 默认 None（R217 §五 #1 稀疏化 B）
+            `None` ⇒ 全场（**旧行为，逐位不变**）；给子集 ⇒ 只算这些格（惰性再生用）。
+            子集版与全场版**逐元素同式**（同算子、同顺序、无归约）⇒ 前提成立时逐位一致。
 
         返回
         ----
-        NDArray[float64] : 形状 (n_cells,)，每格本 tick 的恢复量。
+        NDArray[float64] : 形状与请求的格集一致（`idx=None` ⇒ (n_cells,)）。
         """
-        temps = self.lt.temperature(np.arange(self.world.n_cells), tick)
+        if idx is None:
+            cells = np.arange(self.world.n_cells)
+            pm = self._patch_mask        # 原样引用（不拷贝）⇒ 全场路径与旧版逐位/逐字相同
+        else:
+            cells = np.asarray(idx, dtype=np.int64)
+            pm = self._patch_mask[cells] if self._patch_mask is not None else None
+        temps = self.lt.temperature(cells, tick)
         # 因子 = (温度+20)/20，clip 到 [0,1]：
         #   ≥0° → 1（满速）；-20° → 0（停摆）；中间线性过渡
         factor = np.clip((temps + 20.0) / 20.0, 0.0, 1.0)
@@ -410,7 +499,7 @@ class ResourceField:
         growth = self.regrowth_rate * factor
         # ---- 🔴 R196 光驱动再生（light_sensitivity=0 时下面整块恒等跳过）----
         if self.light_sensitivity > 0.0:
-            ill = self.lt.illumination(np.arange(self.world.n_cells), tick)
+            ill = self.lt.illumination(cells, tick)
             lf = np.power(np.clip(ill, 0.0, 1.0), self.light_sensitivity)
             if self.light_normalize:
                 # 按全球均值归一化 ⇒ 只改空间分布，不改全球总量
@@ -419,9 +508,9 @@ class ResourceField:
                     lf = lf / m
             growth = growth * lf
         # patchy 守恒：斑块格 × patch_mult，背景格 × bg_mult，周期总再生量不变
-        if self.distribution == "patchy" and self._patch_mask is not None:
+        if self.distribution == "patchy" and pm is not None:
             growth = np.where(
-                self._patch_mask,
+                pm,
                 growth * self._patch_regrowth_mult,
                 growth * self._bg_regrowth_mult,
             )

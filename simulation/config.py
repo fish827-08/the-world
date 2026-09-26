@@ -380,6 +380,21 @@ class SimulationConfig:
     # 🔴 "看见才出手"（T3）：`perception_span` 统一供给资源/信号/猎物/威胁感知；
     #    `attack_range` 独立恒 1 格（看得见 ≠ 够得着）。该开关随 `perception_span=2` 生效。
     attack_range: int = 1            # 攻击射程（恒 1，独立于感知范围）
+    # ===== R217 §五 #1 稀疏化 B（惰性/稀疏结算；**由 [本地开发·性能线] 添加**）=====
+    # 目标：消"大世界每 tick 固定烧全场"的地板税（480×960 T4 档实测：N=0 时
+    #   regrow 全场链 ≈40 ms + LT ≈5 ms + 信号场 ≈6 ms 墙钟/tick，占稳态 130 ms 的 ~1/3）。
+    # 开 ⇒ **Python 路径**下：① 资源再生只结算"脏格"（`_grid < _capacity`）；
+    #   ② 信号场只推进"有标记（`age>0`）"的格。两者都是**逐位等价**改写
+    #   （论证见 `world/resource_field.py::_regrow_lazy` 与 `world/signal_field.py::tick`）：
+    #   窗口恒 1 tick、子集执行与全场逐元素同式、净格在非负增长下是逐位 no-op。
+    # ⚠️ **范围锁**（引擎侧，任一不满足 ⇒ 退回全场路径，静默无害）：
+    #   `use_sim_core=False`（Rust 直写 `_grid`/`_marks`，打脏点覆盖不到）
+    #   且 `resource_dynamics` 关（每 tick 改 `_capacity`/掩码，勤耕前提被破坏）；
+    #   资源侧另有前提校验（`ResourceField.enable_lazy`，如 `temp_sensitivity==1.0`）。
+    # 🔴 默认 False = **旧行为逐位不变**（全场分支代码原样保留；本开关 = 唯一回滚点）。
+    # ⚠️ 挂进 `SimConfig` ⇒ 经 `asdict` **自动进 `fingerprint()`**（同 `subpos` 家族）：
+    #   开关不同的两份配置指纹不同（跨档续跑会被拦——它虽不改数值，但改算路）。
+    sparse_fields: bool = False
 
     def __post_init__(self) -> None:
         assert self.ticks >= 1, "至少跑一个 tick"
