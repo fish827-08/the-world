@@ -2317,6 +2317,95 @@ class SphereEngine:
         mult = float(self.config.organisms.lifespan_mult)
         return day * mult * (1.0 + g3 * 7.0)
 
+    def _culture_learn_python(
+        self, j_idx: np.ndarray, adult_qual: np.ndarray) -> None:
+        """未成年向“邻域成年均值”EWMA 学习（Python 参考路径）。
+
+        参数
+        ----
+        j_idx : NDArray[int64]
+            未成年个体索引（升序）。
+        adult_qual : NDArray[bool]
+            与全种群等长的布尔数组，True = 成年（``age_f >= maturity_age``）。
+
+        语义：每个未成年取其所在格邻域内全部成年个体的解读表行，去重 + 按个体
+        索引升序，逐行顺序求和取均值，再 ``row += 0.1 * (mean - row)``。
+        逐位对拍测试见 ``tests/test_p2_culture_vec.py``。
+
+        🔴 S2（2026-09-26 P2 向量化，`[实测]`）：逐位等价改写。旧实现（S1d 稀疏
+        字典版）逐未成年跑 Python 循环（查邻表 / 收格内成年 / sorted(set) /
+        (K,16).mean(axis=0)），T4 档行内剖析占整 tick 14.9%（P1 交付）。
+
+        改这里的代码必须保持三条不变量（否则 C7 digest 漂移）：
+        ① 求和 = 每组内“成年索引升序”逐行顺序累加。`np.mean(axis=0)` 对 C 连续
+           (K,16) 正是顺序累加（已实测逐位一致）；但 `np.add.reduceat` **不是**
+           顺序累加（分段和与顺序和实测有位差）⇒ 这里用无缓冲 `np.add.at`
+           （按索引出现顺序累加），以首行做初值 —— 首行为初值可同时覆盖 K=1 段。
+        ② 去重与升序在 **(未成年组, 成年) 对级** 完成：极点带附近邻居表有重复格
+           （球面退化，见表构造注释）⇒ 必须去重；升序 = 旧 flatnonzero 输出序。
+        ③ 均值只读成年行、更新只写未成年行 ⇒ 两集合不相交，可整体先算后写。
+        另：同格未成年邻域恒相同 ⇒ 按“所在格”归组，一组只算一次（结果不变）。
+        """
+        if not j_idx.size:
+            return
+        _cells, _cell_inv = np.unique(self._flat[j_idx], return_inverse=True)
+        _cell_inv = _cell_inv.reshape(-1)
+        # 邻居格集合：普通格取 (U,8) 主表；极点格 = 相邻整带 (cols,)
+        # （分支与 world.neighbors() 一致：极点行优先取上极带）
+        _is_pole = np.asarray(self.world.is_pole(_cells))
+        _u_np = np.flatnonzero(~_is_pole)
+        _u_pole = np.flatnonzero(_is_pole)
+        _nb_parts: list[np.ndarray] = []
+        _own_parts: list[np.ndarray] = []
+        if _u_np.size:
+            _nb_parts.append(self._nb_table[_cells[_u_np]])
+            _own_parts.append(np.repeat(_u_np, self._nb_table.shape[1]))
+        if _u_pole.size:
+            _prow = _cells[_u_pole] // self.world.cols
+            _nb_parts.append(self._pole_nb[np.where(_prow == self._pole_top, 0, 1)])
+            _own_parts.append(np.repeat(_u_pole, self.world.cols))
+        _nb_cells = np.concatenate([p.ravel() for p in _nb_parts])
+        _owner = np.concatenate(_own_parts)
+        # 成年个体按格建 CSR（stable ⇒ 格内保持个体索引升序）
+        _a_idx = np.flatnonzero(adult_qual)
+        _a_order = np.argsort(self._flat[_a_idx], kind="stable")
+        _a_cell = self._flat[_a_idx][_a_order]
+        _a_pos = _a_idx[_a_order]
+        _beg = np.searchsorted(_a_cell, _nb_cells, side="left")
+        _cnt = np.searchsorted(_a_cell, _nb_cells, side="right") - _beg
+        _tot = int(_cnt.sum())
+        if _tot:
+            # 拼接式整段收集（不补零 ⇒ 无 maxK×S 的内存退化）
+            _ex = np.concatenate(([0], np.cumsum(_cnt)[:-1]))
+            _pos = np.repeat(_beg, _cnt) + (
+                np.arange(_tot, dtype=np.int64) - np.repeat(_ex, _cnt))
+            _own_rep = np.repeat(_owner, _cnt)
+            _a_rep = _a_pos[_pos]
+            _ord = np.lexsort((_a_rep, _own_rep))
+            _own_k, _a_k = _own_rep[_ord], _a_rep[_ord]
+            _keep = np.empty(_own_k.size, dtype=bool)
+            _keep[0] = True
+            np.logical_or(_own_k[1:] != _own_k[:-1],
+                          _a_k[1:] != _a_k[:-1], out=_keep[1:])
+            _own_k, _a_k = _own_k[_keep], _a_k[_keep]
+            _seg = np.flatnonzero(np.concatenate(([True], _own_k[1:] != _own_k[:-1])))
+            _seg_cnt = np.diff(np.concatenate((_seg, [_own_k.size])))
+            _acc = self._interpret[_a_k[_seg]]
+            _rest = np.ones(_a_k.size, dtype=bool)
+            _rest[_seg] = False
+            if _rest.any():
+                np.add.at(_acc, np.repeat(np.arange(_seg.size), _seg_cnt)[_rest],
+                          self._interpret[_a_k[_rest]])
+            _means = _acc / _seg_cnt[:, None]
+            _seg_of_cell = np.full(_cells.size, -1, dtype=np.int64)
+            _seg_of_cell[_own_k[_seg]] = np.arange(_seg.size)
+            _j_seg = _seg_of_cell[_cell_inv]
+            _hit = _j_seg >= 0
+            if _hit.any():
+                _jv = j_idx[_hit]
+                _row = self._interpret[_jv]
+                self._interpret[_jv] = _row + 0.1 * (_means[_j_seg[_hit]] - _row)
+
     # ---- 单 tick 种群推进（核心热循环） -----------------------------------
 
     def _step_population(self) -> tuple[int, int, Counter]:
@@ -3584,44 +3673,12 @@ class SphereEngine:
             self._age[:P] += 1
             age_f = self._age[:P].astype(np.float64)
             # ── Python 分步：文化学习 ──
+            # S2（2026-09-26）：逐个体 Python 循环 → 批式向量化，语义逐位不变。
+            # 实现与三条不变量见 `_culture_learn_python`。
             juvenile = age_f < maturity_age
             if juvenile.any():
-                j_idx = np.flatnonzero(juvenile)
-                # 性能（2026-09-23）：预建"格→成年个体索引"表，替代逐未成年对全种群
-                # 前 P 做 O(P) np.isin（profile 占文化段 ~54%）。语义严格不变：成年集合
-                # = 邻居格内、age_f>=maturity_age 的个体；收集后按个体索引升序排序，
-                # 再 .mean(axis=0) —— 与原 flatnonzero 升序、np.mean 求和顺序逐位一致。
-                _adult_qual = age_f >= maturity_age
-                # 🔴 S1d（2026-09-25 逐行剖析，`[实测]`）：原实现
-                #   `[[] for _ in range(self.world.n_cells)]` **每 tick 创建 n_cells 个空 list**
-                #   ⇒ 480×960（46 万格）下占**整 tick 的 83.7%**（527 ms/12tick 行内时间，
-                #   profiler 放大后；按真实基线折算 ≈ 71 ms/tick），是世界放大的**头号成本**。
-                #   而行内真正被读的格只有"邻居格"那几个 ⇒ **稀疏字典即可**。
-                #   成本由 O(格数) 降为 **O(有成年个体的格数)**（≤ P）
-                #   ⇒ **即使生物铺满全世界也不退化**（这是 worst-case 保险）。
-                #   逐位等价：原来对空 list 的 `extend` 无效果，改成 `.get()` 跳过；遍历顺序
-                #   （按 `_nb`、格内按 `_a` 升序）与去重排序（`sorted(set(...))`）均不变。
-                _cell_adults: dict[int, list[int]] = {}
-                for _a in np.flatnonzero(_adult_qual):
-                    _cell_adults.setdefault(int(self._flat[int(_a)]), []).append(int(_a))
-                for idx in j_idx:
-                    _c = int(self._flat[int(idx)])
-                    # P0.1：紧凑表下极点格邻居在 `_pole_nb`（整带），走 world 的分支查询
-                    # （与 Python 参考路径其它取邻处同一入口；语义 = 旧 fat 表该整行）
-                    _nb = self.world.neighbors(_c)
-                    _lst: list[int] = []
-                    for _nc in _nb:
-                        _v = _cell_adults.get(int(_nc))
-                        if _v:
-                            _lst.extend(_v)
-                    if _lst:
-                        # sorted(set(...))：邻居表可能含重复格（球面退化），逐格收集会
-                        # 重复计入同个体；原 np.isin 成员判断天然去重，这里显式去重，
-                        # 再升序，与 flatnonzero 输出（唯一、升序）一致。
-                        _lst = sorted(set(_lst))
-                        mean_interpret = self._interpret[_lst].mean(axis=0)
-                        self._interpret[int(idx)] += 0.1 * (
-                            mean_interpret - self._interpret[int(idx)])
+                self._culture_learn_python(
+                    np.flatnonzero(juvenile), age_f >= maturity_age)
             # ── D2-4 Steels 对齐：同格相遇概率性解读表对齐 ──
             ifcfg_sa = self.config.info_structure
             if ifcfg_sa.enabled and ifcfg_sa.steels_alignment:
