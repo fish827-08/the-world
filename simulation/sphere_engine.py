@@ -2023,7 +2023,7 @@ class SphereEngine:
             "corpse_decay_ticks": int(getattr(cwc, "corpse_decay_ticks", 600)),
             "corpse_to_plant_frac": float(getattr(cwc, "corpse_to_plant_frac", 0.5)),
             "corpse_patch_boost": float(getattr(cwc, "corpse_patch_boost", 0.5)),
-            "corpse_cap_per_cell": int(getattr(cwc, "corpse_cap_per_cell", 3)),
+            "corpse_cap_per_cell": int(getattr(cwc, "corpse_cap_per_cell", 200)),
             "scav_gate": float(getattr(cwc, "scav_gate", 0.5)),
             "scav_s": float(getattr(cwc, "scav_s", 2.0)),
             # 🔴 R165 0-1：**单位标记**（可自证"这批用的是哪套单位"）
@@ -2067,7 +2067,7 @@ class SphereEngine:
             "wound_base": float(getattr(cwc, "wound_base", 0.35)),
             "wound_heal_rate": float(getattr(cwc, "wound_heal_rate", 0.001)),
             "wound_heal_energy_cost": float(getattr(cwc, "wound_heal_energy_cost", 0.05)),
-            "holder_adv": float(getattr(cwc, "holder_adv", 0.3)),
+            "holder_adv": float(getattr(cwc, "holder_adv", 1.2)),
             "escalation_gap": float(getattr(cwc, "escalation_gap", 0.25)),
             "contest_cost_energy": float(getattr(cwc, "contest_cost_energy", 0.5)),
             "w_fear_health": float(getattr(cwc, "w_fear_health", 0.5)),
@@ -2427,7 +2427,7 @@ class SphereEngine:
             #   净口径；"未吸收回流"目前只落回植物池、**无独立账户**（S3 前补一个计数）。
             _ah = float(getattr(ocfg, "assim_herb", 1.0) or 1.0)
             _ac = float(getattr(ocfg, "assim_carn", 1.0) or 1.0)
-            _ar = float(getattr(ocfg, "assim_return_frac", 0.0) or 0.0)
+            _ar = float(getattr(ocfg, "assim_return_frac", 1.0) or 0.0)   # R208 §三：兜底 == config 默认
             if _ah < 1.0 or _ac < 1.0:
                 _scf = np.clip(
                     np.divide(self._stomach_scav[:P], stomach,
@@ -2551,7 +2551,7 @@ class SphereEngine:
             stomach_cap = stomach_cap * (
                 1.0 + self._ars_kappa * np.clip(genes[:, Gene.PERSISTENCE], 0.0, 1.0)
             )
-        _eat_frac = float(getattr(ocfg, "eat_threshold_frac", 1.0) or 1.0)
+        _eat_frac = float(getattr(ocfg, "eat_threshold_frac", 0.0) or 1.0)   # 兜底==config 默认；`or 1.0` 保语义
         _eat_gate = stomach_cap * _eat_frac
         # S2/S3 尸体—争夺（设计稿 §5.3/5.4）：开关只读一次，供 4.3/4.3b 复用
         _cwc_scav = getattr(self.config, "corpse_wound", None)
@@ -2959,7 +2959,7 @@ class SphereEngine:
                 # S3 血条恐惧项（设计稿 §2.4 项 7）也需**威胁场**（载体 = 血条），
                 # 与 L1 恐惧项独立 ⇒ 任一生效时都要算 `_agg_field`（格域聚合，零 RNG）。
                 _fearh_on = (_wound_on
-                            and float(getattr(_cwc_pred, "w_fear_health", 0.0)) > 0.0)
+                            and float(getattr(_cwc_pred, "w_fear_health", 0.5)) > 0.0)  # R208 §三：兜底==config 默认
                 if _l1_on or _fearh_on:
                     _gate0 = float(self.config.predation.attack_gene_gate)  # 引用同一常量，不抄字面量
                     if _l1_seek_on:
@@ -3103,7 +3103,7 @@ class SphereEngine:
                     # 与 L1 恐惧项**独立**（载体 = 血条而非 g16）：`−w_fear_health × perc ×
                     # (1−health) × cos(候选格 ← 威胁方向)`。低血条 ⇒ 更恐惧（能力导向）。
                     # 🔴 确定性数值（零 RNG）⇒ 关档零轨迹影响。
-                    if _wound_on and float(getattr(_cwc_pred, "w_fear_health", 0.0)) > 0.0:
+                    if _wound_on and float(getattr(_cwc_pred, "w_fear_health", 0.5)) > 0.0:  # R208 §三：兜底==config 默认
                         self._fearh_dec_n += 1
                         _danger_h = nb[_agg_field[nb] > 0.0]
                         if len(_danger_h) > 0:
@@ -3399,7 +3399,7 @@ class SphereEngine:
             # S3 饥饿激进项（设计稿 §2.2 项 7；`wound_enabled` + `need_aggression_k>0`）：
             #   能量低 ⇒ 更激进（主动攻击概率↑）—— 与血条恐惧**方向相反** ⇒ 二分预测
             #   （能力导向 vs 资产保护）。k=0（D 臂）⇒ 退化为原式（逐位不变）。
-            _need_k = float(getattr(_cwc_pred, "need_aggression_k", 0.0)) if _wound_on else 0.0
+            _need_k = float(getattr(_cwc_pred, "need_aggression_k", 0.5)) if _wound_on else 0.0  # R208 §三：兜底==config 默认
             attack_prob = attack_gene * pcfg.attack_prob_coef * hunger * (1.0 + _need_k * hunger)
             # 🔴 13.4 波 2B（T3）"看见才出手"：span=2 ⇒ 出手须**视野内有猎物**。
             #   猎物代理 = 低 g16（≤ attack_gene_gate）个体；视野 = span 圈（`_span_table`

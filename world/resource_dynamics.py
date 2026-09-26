@@ -110,12 +110,12 @@ class ResourceDynamics:
     ) -> None:
         g = lambda k, d: getattr(cfg, k, d)  # noqa: E731 — 缺字段回退（向前兼容）
         self.enabled = bool(g("enabled", False))
-        self.rest_ticks = int(g("rest_ticks", 300))
+        self.rest_ticks = int(g("rest_ticks", 60))   # R208 §三：兜底必须 == config 默认（config.py:1044）
         # 波2 修 v2（fish 批准方案 A）：累计损伤三态机阈值
         self.rest_threshold = float(g("rest_threshold", 0.3))
         self.death_threshold = float(g("death_threshold", 0.8))
         self.damage_recovery = float(g("damage_recovery", 0.5))
-        self.kill_frac = float(g("kill_frac", 0.7))
+        self.kill_frac = float(g("kill_frac", 10.0))   # R208 §三：兜底 == config 默认（再生倍数口径，非比例）
         self.kill_denom = str(g("kill_denom", "regrowth"))
         self.dead_regen_ticks = int(g("dead_regen_ticks", 2000))
         self.dead_cell_max_frac = float(g("dead_cell_max_frac", 0.5))
