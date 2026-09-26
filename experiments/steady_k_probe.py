@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 import sys
 import time
 from pathlib import Path
@@ -40,6 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from simulation.config import SimConfig                      # noqa: E402
 from simulation.sphere_engine import SphereEngine            # noqa: E402
+from experiments.scaling_rescale import (                    # noqa: E402
+    apply_post_build, rescale_config,
+)
 
 # --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
 try:
@@ -59,7 +63,8 @@ def _bar(cur: int, tot: int, extra: str = "", width: int = 24) -> str:
 
 
 def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
-             subpos: bool, speed_max: float, gain: float, subdiv: int) -> SimConfig:
+             subpos: bool, speed_max: float, gain: float, subdiv: int,
+             k: float = 1.0) -> tuple[SimConfig, dict]:
     c = SimConfig(seed=seed)
     c.world.rows, c.world.cols = rows, cols
     c.resources.distribution = "patchy"
@@ -74,15 +79,19 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
         c.subpos.speed_max = float(speed_max)
         c.subpos.speed_gain = float(gain)
         c.subpos.subdiv = int(subdiv)
-    return c
+    # 时间压缩（R205/R206）：`k=1` 逐位不变；k≠1 走项目统一重标（四类量纲表）
+    notes = rescale_config(c, k) if abs(k - 1.0) > 1e-12 else {"signals_duration": int(c.signals.duration_ticks)}
+    return c, notes
 
 
 def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             sample: int, subpos: bool, speed_max: float, gain: float, subdiv: int,
-            max_minutes: float, stop_stable: int = 4) -> tuple[list[dict], dict]:
-    cfg = make_cfg(seed, rows, cols, pop, patches, subpos, speed_max, gain, subdiv)
+            max_minutes: float, stop_stable: int = 4, k: float = 1.0) -> tuple[list[dict], dict]:
+    cfg, notes = make_cfg(seed, rows, cols, pop, patches, subpos, speed_max, gain,
+                          subdiv, k)
     t0 = time.time()
     eng = SphereEngine(cfg)
+    apply_post_build(eng, notes)                 # 构造后项（信号寿命 ÷k）
     prod = eng.resources._capacity > 0
     n_prod = int(prod.sum())
     cap_sum = float(eng.resources._capacity[prod].sum())
@@ -103,14 +112,16 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             N = int(len(eng._flat))
             stock = float(eng.resources._grid[prod].sum())
             rows_out.append({
-                "seed": seed, "patches": patches, "tick": t, "pop": N,
+                "seed": seed, "patches": patches, "k": k, "tick": t, "pop": N,
                 "util": (stock / cap_sum if cap_sum > 0 else float("nan")),
                 "ms_per_tick": dt_ms,
                 "mean_energy": float(eng._energy[:N].mean()) if N else float("nan"),
                 "mean_gen": float(eng._generation[:N].max()) if N else float("nan"),
             })
+            # ETA 只用**实测样本**推（R189：禁瞬时速率外推；此处用刚测完这一段的 ms/tick）
+            eta_min = (ticks - t) * dt_ms / 1e3 / 60.0
             print("  " + _bar(t, ticks, f"t={t:<6} N={N:<7} 利用率={stock / max(cap_sum, 1e-9):.3f}"
-                                      f" {dt_ms:6.2f} ms/tick"), flush=True)
+                                      f" {dt_ms:6.2f} ms/tick  ETA {eta_min:5.1f} min"), flush=True)
             # 早停：连续 stop_stable 个采样点相对变化 < 3% ⇒ 已到平台
             if stop_stable > 0 and len(rows_out) >= stop_stable + 1:
                 _tail = [r["pop"] for r in rows_out[-(stop_stable + 1):]]
@@ -128,13 +139,19 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
     pop_tail = [r["pop"] for r in rows_out[len(rows_out) * 4 // 5:]] or [0]
     ms_tail = [r["ms_per_tick"] for r in rows_out[len(rows_out) * 4 // 5:]] or [0.0]
     util_tail = [r["util"] for r in rows_out[len(rows_out) * 4 // 5:]]
+    # 平台判据（T4 口径）：**末 3 个采样点**两两相对变化 ≤ 3%
+    tail3 = [int(r["pop"]) for r in rows_out[-3:]]
+    platform_ok = (len(tail3) == 3 and all(
+        abs(tail3[i + 1] - tail3[i]) <= 0.03 * max(tail3[i], 1) for i in range(2)))
     summary = {
-        "patches": patches, "seed": seed, "cells": rows * cols,
+        "patches": patches, "seed": seed, "cells": rows * cols, "k": k,
         "productive_cells": n_prod,
         "K_extrapolated": round(K_PER_CELL * n_prod, 1),
         "K_measured": int(np.median(pop_tail)),
         "pop_max": max((r["pop"] for r in rows_out), default=0),
         "pop_final": pop_tail[-1],
+        "tail3_pops": tail3,
+        "platform_reached": bool(platform_ok),
         "util_tail": round(float(np.median(util_tail)), 4) if util_tail else None,
         "ms_per_tick_tail": round(float(np.median(ms_tail)), 2),
         "max_gen": max((r["mean_gen"] for r in rows_out if r["mean_gen"] == r["mean_gen"]),
@@ -160,6 +177,8 @@ def main() -> None:
     ap.add_argument("--gain", type=float, default=0.25)
     ap.add_argument("--subdiv", type=int, default=20)
     ap.add_argument("--max-minutes", type=float, default=25.0)
+    ap.add_argument("--k", type=float, default=1.0,
+                    help="时间压缩倍率（R205 定档 k=2.5 ⇒ 昼夜 960）；k=1 逐位不变")
     ap.add_argument("--stop-stable", type=int, default=4,
                     help="连续 N 个采样点相对变化 < 3 个百分点即判平台并早停（0=关）")
     ap.add_argument("--out", default="results/steady_k_probe.csv")
@@ -170,7 +189,7 @@ def main() -> None:
 
     print(f"== 稳态 K 探针：{a.rows}x{a.cols}（{a.rows * a.cols:,} 格）"
           f"，斑块 {patch_list}，初始 {a.pop}，{a.ticks} tick，"
-          f"subpos={a.subpos}，seed {seeds} ==")
+          f"subpos={a.subpos}，k={a.k:g}，seed {seeds} ==")
     print(f"   旧标定外推公式：K ≈ {K_PER_CELL:.2f} × 产能格\n")
 
     all_rows: list[dict] = []
@@ -180,7 +199,7 @@ def main() -> None:
             print(f"--- 斑块 {p} / seed {sd} ---", flush=True)
             rows_out, s = run_one(sd, a.rows, a.cols, a.pop, p, a.ticks, a.sample,
                                   a.subpos == "on", a.speed_max, a.gain, a.subdiv,
-                                  a.max_minutes, a.stop_stable)
+                                  a.max_minutes, a.stop_stable, a.k)
             all_rows.extend(rows_out)
             summaries.append(s)
             print(f"    ⇒ 产能格 {s['productive_cells']}｜外推 K {s['K_extrapolated']}"
@@ -190,14 +209,14 @@ def main() -> None:
 
     print("=" * 100)
     print(f"{'斑块数':>7}{'产能格':>9}{'外推K':>9}{'实测K':>9}{'比值':>8}"
-          f"{'峰值':>8}{'利用率':>9}{'ms/tick':>9}{'墙钟s':>8}{'代数':>6}  终止")
+          f"{'峰值':>8}{'利用率':>9}{'ms/tick':>9}{'墙钟s':>8}{'代数':>6}{'平台':>5}  终止")
     print("-" * 100)
     for s in summaries:
         ratio = (s["K_measured"] / s["K_extrapolated"]) if s["K_extrapolated"] else float("nan")
         print(f"{s['patches']:>7}{s['productive_cells']:>9}{s['K_extrapolated']:>9.0f}"
               f"{s['K_measured']:>9}{ratio:>8.2f}{s['pop_max']:>8}"
               f"{s['util_tail']:>9}{s['ms_per_tick_tail']:>9.2f}{s['wall_s']:>8.0f}"
-              f"{s['max_gen']:>6.0f}  {s['stop']}")
+              f"{s['max_gen']:>6.0f}{'是' if s['platform_reached'] else '否':>4}  {s['stop']}")
 
     out = Path(a.out)
     if a.out and all_rows:
@@ -207,6 +226,27 @@ def main() -> None:
             w.writeheader()
             w.writerows(all_rows)
         print(f"\n明细已写入 {out}（{len(all_rows)} 行）")
+        # 伴生 summary.json：供 `experiments/batch_runner.py` 判 done（`result.final_N` + 跑满
+        # `switches.ticks_target`）；单 run 调用时顶层即该 run，多 run 时附全量于 `runs`
+        last = summaries[-1]
+        doc = {
+            "switches": {"ticks_target": int(a.ticks), "rows": a.rows, "cols": a.cols,
+                         "patches": last["patches"], "k": last["k"], "seeds": seeds,
+                         "subpos": a.subpos, "speed_max": a.speed_max, "gain": a.gain,
+                         "subdiv": a.subdiv},
+            "result": {"final_N": int(last["pop_final"]), "final_tick": int(last["ticks_done"]),
+                       "platform_reached": bool(last["platform_reached"]),
+                       "K_measured": last["K_measured"],
+                       "K_extrapolated": last["K_extrapolated"],
+                       "tail3_pops": last["tail3_pops"], "max_gen": last["max_gen"],
+                       "util_tail": last["util_tail"],
+                       "ms_per_tick_tail": last["ms_per_tick_tail"], "stop": last["stop"]},
+            "runs": summaries,
+        }
+        sp = out.with_suffix(".summary.json")
+        with io.open(sp, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, ensure_ascii=False, indent=2)
+        print(f"summary 已写入 {sp}")
 
     print("\n读法：")
     print("  · **实测 K / 外推 K < 1** ⇒ 评审说得对，线性外推高估了（世界放大后食物找不到）")
