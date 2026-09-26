@@ -1,0 +1,10 @@
+# SHARD-E2E 证据清单 —— sha256sum 格式（生成于 2026-09-26 18:50:41）
+2a5286da2395c6b81d1b49e27ea2d755f18bf0789178eb24ec764bbe25d6df0b         2,766  _rerun_logs/snap_shard_smoke/acc_shard_e2e.txt
+53cdc799d5496aeba861ea8b803fc18a2d26776319eba5ef106d5d75804ba767         1,695  _rerun_logs/snap_shard_smoke/self_audit_digest_main.txt
+3f39f8f031143602e538894a2f21018c92d85d8be6227889aa0075b0fb4165ea         4,620  _rerun_logs/snap_shard_smoke/shard_demo/full.csv
+f5a2f739f689ff3dece744294b295a750061420b20aedc55946bb94e72573ba0         9,606  _rerun_logs/snap_shard_smoke/shard_demo/full.log
+c619361e268d393261333fb25c61a30277fdbf03f46f666d684a86ebb70c4f6d         2,367  _rerun_logs/snap_shard_smoke/shard_demo/sh1.csv
+4f254197485ae23027b90ad5d02573fc88d2ef3fa185d95e52cf2a74194c5766         5,993  _rerun_logs/snap_shard_smoke/shard_demo/sh1.log
+971db6a603e961a574961319d8c04b8ddffe7528f33b476e1f7e7b7e986f3741         2,352  _rerun_logs/snap_shard_smoke/shard_demo/sh2.csv
+679f13e002f1c8db8d9bc36baa3e69689127c1470fdaad5aab1923a6f47dbe4e         5,984  _rerun_logs/snap_shard_smoke/shard_demo/sh2.log
+948c30ab2a08853002272c33b47285ab9718a6c16170ee4d71c3e6fdac790928         5,126  _rerun_logs/snap_shard_smoke/shard_e2e.py
