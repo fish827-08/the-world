@@ -226,6 +226,13 @@ class OrganismConfig:
     far_cap: int = 32                   # strict 2 圈规模 > 该值的格**不可冲刺**（拓扑退化）
     #                                     `[实测]` 不变区间 [16,119] ⇒ 非可调旋钮
 
+    # ============ P0.0 阶段 A1（2026-09-26）：硬编码 tick 常数搬进配置 ============
+    #   🔴 原位置 `sphere_engine.py`：`_repro_cooldown[ri] = genes[.., REPRO_COOLDOWN] * 60.0`
+    #   量纲：**基因 × 每单位基因的 tick 数** = tick 时长 ⇒ 时间压缩时 **÷ k**。
+    #   为什么它是"tick 常数"：`g12` 是**无量纲基因**，`60.0` 才是把基因翻译成
+    #     世界时间的换算系数 ⇒ 昼夜一变，同一条 `g12` 的物理含义就变了（F4）。
+    repro_cooldown_gene_scale: float = 60.0
+
     def __post_init__(self) -> None:
         assert self.initial_energy < self.max_energy, "初始能量要小于上限"
         assert self.eat_amount > 0, "进食量上限为正"
@@ -245,6 +252,8 @@ class OrganismConfig:
         assert 0.0 < self.assim_herb <= 1.0, "食草吸收率 ∈ (0,1]（1.0 = 现状无损失）"
         assert 0.0 < self.assim_carn <= 1.0, "食肉吸收率 ∈ (0,1]（1.0 = 现状无损失）"
         assert 0.0 <= self.assim_return_frac <= 1.0, "回流比例 ∈ [0,1]"
+        # P0.0 A1：繁殖冷却换算系数（基因 ⇒ tick）
+        assert self.repro_cooldown_gene_scale > 0.0, "繁殖冷却换算系数为正"
         # ⚠️ 双阈值**不**强制 exhaust < starve：两者语义独立
         #   （`exhaust_frac` = 力竭，无视胃；`starve_frac` = 饿死，需胃空）。
         #   但若同时开启则应满足 `exhaust_frac ≤ starve_frac`（力竭先触发）——
@@ -254,6 +263,26 @@ class OrganismConfig:
                 "双阈值同时开启时应 exhaust_frac ≤ starve_frac（力竭先于饿死触发）；"
                 f"现值 {self.exhaust_frac} / {self.starve_frac}"
             )
+
+
+@dataclass
+class SignalsConfig:
+    """信号场参数（P0.0 阶段 A1：把引擎里的**硬编码 tick 常数**搬进配置）。
+
+    🔴 为什么必须搬进来：它是**以 tick 计价**的量 ⇒ 时间压缩（D 2400→480，k=5）时
+    必须 ÷k 才有物理意义。硬编码在引擎里 ⇒ 机械清点（`tools/tick_denomination_audit.py`）
+    扫不到 ⇒ **静默改科学**（F4）。
+    """
+
+    # 信号标记的有效寿命（tick）：写入时置为该值，每 tick −1，到 0 清除。
+    #   原位置：`simulation/sphere_engine.py` `SignalField(self.world, duration=50)`
+    #   量纲：**tick 时长** ⇒ 时间压缩时 **÷ k**。
+    #   ⚠️ 语义耦合：`oracle.attribution_ok` 用 `age >= duration - persistence`
+    #      判「最近 persistence tick 内写入」⇒ 两者必须**同量纲**地重标（都 ÷k）。
+    duration_ticks: int = 50
+
+    def __post_init__(self) -> None:
+        assert self.duration_ticks >= 1, "信号寿命至少 1 tick"
 
 
 @dataclass
@@ -1059,6 +1088,9 @@ _MIGRATION_FIELDS: frozenset = frozenset(f.name for f in fields(MigrationConfig)
 #: 14.9 ARS 配置白名单（同规格）。
 _ARS_FIELDS: frozenset = frozenset(f.name for f in fields(ArsConfig))
 
+#: P0.0 A1 信号场配置白名单（同规格；A1 之前的存档无 `signals` 键 ⇒ 回退默认）。
+_SIGNALS_FIELDS: frozenset = frozenset(f.name for f in fields(SignalsConfig))
+
 
 @dataclass
 class SimConfig:
@@ -1093,6 +1125,9 @@ class SimConfig:
     #   `LightAndTemperature.photoperiod`。挂进 SimConfig ⇒ 经 `asdict` **自动进指纹**
     #   （跨档续跑被拦，同 `subpos` / `resource_dynamics`）。
     migration: MigrationConfig = field(default_factory=MigrationConfig)
+    # ---- P0.0 阶段 A1（2026-09-26）：信号场 tick 常数（默认 50 = 旧行为逐位等价）----
+    #   挂进 SimConfig ⇒ 经 `asdict` **自动进指纹**（跨档续跑被拦，同 `subpos`）。
+    signals: SignalsConfig = field(default_factory=SignalsConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -1204,6 +1239,15 @@ class SimConfig:
             signal_mode=data.get("signal_mode", "state"),
             # R113/R121 信号字母表；旧存档回退 "16"（= 旧行为，逐位兼容）
             signal_alphabet=data.get("signal_alphabet", "16"),
+            # P0.0 A1：信号场 tick 常数；旧存档缺失 ⇒ 回退默认 50（= 旧行为逐位等价）。
+            #   同款字段白名单过滤（向后兼容：A1 之前的存档无 `signals` 键）。
+            signals=SignalsConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("signals") or {}).items()
+                    if k in _SIGNALS_FIELDS
+                }
+            ),
         )
 
     def fingerprint(self) -> str:
