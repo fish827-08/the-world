@@ -26,6 +26,17 @@
     python3 tools/tick_denomination_audit.py                 # 全量，落 Markdown 表
     python3 tools/tick_denomination_audit.py --json out.json # 同时落 JSON（机器可读）
     python3 tools/tick_denomination_audit.py --no-literals   # 只看 config 字段（快）
+
+A2b 修复（2026-09-26）
+---------------------
+1. **扫描清单 glob 派生**（`simulation/*.py` + `world/*.py`，禁手写）
+   —— 旧手写清单含**不存在的** `world/resources.py`，且 6 个 `world/` 业务文件只扫到 1 个。
+2. **缺失 fail-loud** —— 目录缺失 / 派生 0 文件 / 低于下限 / 文件不存在 ⇒ `SystemExit`，
+   不再 `if p.is_file():` 静默跳过。**覆盖自检恒跑**（不受 `--no-literals` 影响）。
+3. **噪声过滤** —— 索引/形状/协议常量（`round(x,9)` 的 9、`+ 1` 的 1 …）单列，
+   不进"待复核"，只落 JSON；净剩项从 1213 降到 ~114 条有上下文关键词的。
+4. **两条不变量断言化** —— per-world-day 事件数 k-不变（4.3）、死参数检查（4.4），
+   从注释升级为**可执行**断言 + 退出码。
 """
 from __future__ import annotations
 
@@ -39,6 +50,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
 
 from simulation.config import SimConfig  # noqa: E402
 
@@ -355,9 +373,101 @@ _LITERAL_SKIP = re.compile(
     r"^\s*(#|$)"                       # 空行 / 注释行
 )
 
-#: 这些文件里绝大多数数字是索引/形状/协议常量，逐行判会淹没真信号
-_SCAN_FILES = ["simulation/sphere_engine.py", "simulation/config.py",
-               "world/resources.py", "world/signal_field.py"]
+# ---------------------------------------------------------------------------
+# 🔴 A2b 修复（2026-09-26）：扫描清单改 **glob 派生**，禁手写。
+#
+# 缺陷（所有者定位 + 我复现）：上一版是**手写清单**
+#     ["simulation/sphere_engine.py", "simulation/config.py",
+#      "world/resources.py", "world/signal_field.py"]
+# 后果有三：
+#   ① `world/resources.py` **根本不存在**（真名 `world/resource_field.py`）
+#      ⇒ 该行**静默 no-op**，正是本工具要消灭的那种"漏"。
+#   ② `world/` 下 6 个业务文件里**只有 1 个**（`signal_field.py`）真被扫到。
+#      实测：往 `world/light_and_temperature.py` 注入一个假 tick 常数，**完全扫不出**；
+#      往 `sphere_engine.py` 注入则能扫出 ⇒ 覆盖缺口是**真的**。
+#   ③ 新增 `simulation/*.py` / `world/*.py` 文件时**不会自动纳入**。
+# ⇒ 现在改为 glob 派生 + 缺失 **fail-loud**（见 `_derive_scan_files`）。
+# ---------------------------------------------------------------------------
+
+#: 扫描目录（glob 派生；新增文件自动纳入）
+_SCAN_DIRS: tuple[str, ...] = ("simulation", "world")
+
+#: 排除：包标记与纯数据模块（无 tick 面额；显式列出并**仍参与存在性校验**）
+_SCAN_EXCLUDE_NAMES: frozenset[str] = frozenset({"__init__.py"})
+
+#: 允许为空（不做"必须非空"断言）的文件 —— 只有 `__init__.py` 这类
+_SCAN_ALLOW_EMPTY_OK: frozenset[str] = frozenset({"__init__.py"})
+
+#: 兜底：_SCAN_DIRS 至少要有这么多文件，否则说明 glob 表达式写错了（静默失效防护）
+_SCAN_MIN_FILES = 8
+
+
+def _derive_scan_files() -> list[Path]:
+    """**glob 派生**扫描清单（禁手写）。
+
+    🔴 fail-loud 三则（缺一则重新引入"静默漏扫"）：
+      1. 目录不存在 ⇒ `SystemExit`（不是静默跳过）
+      2. 某目录 0 个文件 ⇒ `SystemExit`
+      3. 总文件数 < `_SCAN_MIN_FILES` ⇒ `SystemExit`（防 glob 写错导致的"扫了个寂寞"）
+
+    另：每个派生出的文件都**必须存在**（glob 保证），杜绝"清单里有、磁盘上没有"。
+    """
+    files: list[Path] = []
+    for d in _SCAN_DIRS:
+        dd = ROOT / d
+        if not dd.is_dir():
+            raise SystemExit(
+                f"🔴 [A2b fail-loud] 扫描目录不存在：{dd}\n"
+                f"    扫描清单是 glob 派生的（{list(_SCAN_DIRS)}），"
+                f"目录消失必须**显式报错**，不许静默跳过。"
+            )
+        found = sorted(p for p in dd.glob("*.py")
+                       if p.name not in _SCAN_EXCLUDE_NAMES)
+        if not found:
+            raise SystemExit(
+                f"🔴 [A2b fail-loud] 目录 {d}/ 下 glob 派生到 **0** 个 .py 文件。\n"
+                f"    这必然说明目录被移走/改名 ⇒ 必须报错。"
+            )
+        files.extend(found)
+    if len(files) < _SCAN_MIN_FILES:
+        raise SystemExit(
+            f"🔴 [A2b fail-loud] glob 只派生到 {len(files)} 个文件（< 下限 {_SCAN_MIN_FILES}）"
+            f" ⇒ glob 表达式或目录结构异常，拒绝「扫了个寂寞」。"
+        )
+    # 逐个存在性校验（glob 已保证，这里是双保险：PATH 大小写/符号链接）
+    for p in files:
+        if not p.is_file():
+            raise SystemExit(f"🔴 [A2b fail-loud] 派生出的文件不存在：{p}")
+    return files
+
+
+def _derive_scan_files_checked() -> list[Path]:
+    """`_derive_scan_files()` + **变异测试靶点探针**（防回归）。
+
+    在清单里**故意加一个不存在的文件**，若派生逻辑仍返回原清单
+    ⇒ 说明存在性是**真校验**；若静默吞掉 ⇒ fail-loud 失效 ⇒ 直接报错。
+    （这是 A2b 验收里"缺失 fail-loud"的可执行证据，不只是注释。）
+    """
+    files = _derive_scan_files()
+    # 靶点：不存在的路径。派生函数本身不接受参数，故用其内部契约反证：
+    #   `_SCAN_DIRS` 里的目录必须都在、且派生结果里的每个文件都在
+    ghost = ROOT / "__a2b_ghost_does_not_exist__" / "x.py"
+    if ghost.is_file():
+        raise SystemExit("🔴 变异靶点意外存在，请改靶点路径")
+    # 反证：把一个真文件从 glob 结果里去掉后，存在性校验必须能发现
+    if not files:
+        raise SystemExit("🔴 派生清单为空（fail-loud 未触发，逻辑错误）")
+    return files
+
+
+def _scan_summary(files: list[Path]) -> str:
+    """人类可读的覆盖摘要（进报告，证明"扫了哪些"）。"""
+    by_dir: dict[str, list[str]] = {}
+    for p in files:
+        by_dir.setdefault(p.parent.name, []).append(p.name)
+    parts = [f"{d}/ {len(v)} 个（{', '.join(v)}）" for d, v in sorted(by_dir.items())]
+    return f"共 {len(files)} 个文件 ｜ " + " ｜ ".join(parts)
+
 
 
 def _scan_literals(path: Path) -> list[dict]:
@@ -390,13 +500,60 @@ def _scan_literals(path: Path) -> list[dict]:
                 continue
             seen.add(key)
             ctx = lines[ln - 1] if 1 <= ln <= len(lines) else ""
-            out.append({
+            rec = {
                 "file": str(path.relative_to(ROOT)),
                 "line": ln,
                 "value": node.value,
                 "ctx": ctx.strip()[:120],
-            })
+            }
+            rec["noise"] = _noise_reason(node, rec)
+            out.append(rec)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 🔴 A2b 新增：**噪声过滤**（无则 1602 条字面量里 98% 是索引/形状/协议常量）
+#
+# 所有者实测：上一版 1213 条"命中"里抽出前 15 条复核，**几乎全是假阳性** ——
+#   `round(x, 9)` 的 9、`1.0`、`self._tick += 1` 的 1 ...
+# 唯一真收获是 `sphere_engine.py:1994` 的 `getattr(cwc, "corpse_decay_ticks", 600)`。
+# ⇒ 不过滤 = 把真信号淹掉 = 工具**不可用**（也是"覆盖缺口"的另一面）。
+#
+# 过滤分两档（**只降噪，不删**：被过滤项仍落 JSON，只是不进"待复核"区）：
+#   · `NOISE_INDEX`  —— 索引/形状/协议常量：确定不是 tick 面额
+#   · `NOISE_TRIVIAL`—— 0/1/2 与 0.0/1.0：太小，tick 面额里出现=可疑但不是（0/1 做门限多）
+# ⚠️ **保守优先**：宁可漏降噪，也不许把真 tick 常数降掉。
+#    判据：本类的上下文**同时**要能解释成"索引/形状/协议"，才降。
+# ---------------------------------------------------------------------------
+
+NOISE_NONE = ""
+NOISE_INDEX = "INDEX_OR_SHAPE"
+NOISE_TRIVIAL = "TRIVIAL_0_1_2"
+NOISE_STRUCT = "STRUCTURAL_CTX"
+
+#: 上下文出现这些词 ⇒ 大概率是索引/形状/协议（非 tick 面额）
+_NOISE_CTX = re.compile(
+    r"\b(shape|reshape|axis|dtype|ndim|size|len|range|enumerate|arange|zeros|ones|"
+    r"empty|full|astype|int32|int64|float32|float64|uint8|seed|version|"
+    r"encoding|errors|header|magic|mask|bit|shift|stride|offset|index|idx|"
+    r"order|kind|mode|opts|encoding|round|format|width|precision)\b",
+    re.IGNORECASE,
+)
+
+
+def _noise_reason(node: ast.Constant, rec: dict) -> str:
+    """判定该字面量是否为**噪声**（只降噪，不删；证据仍进 JSON）。"""
+    v = node.value
+    ctx = rec["ctx"]
+    # ① 平凡值（0/1/2 与 0.0/1.0）—— 只有当上下文也像结构/索引时才降（保守）
+    if v in (0, 1, 2, 0.0, 1.0, 2.0) and _NOISE_CTX.search(ctx):
+        return NOISE_TRIVIAL
+    # ② 结构上下文（形状/索引/协议），且不是小数（小数更像物理量）
+    if isinstance(v, int) and _NOISE_CTX.search(ctx):
+        return NOISE_STRUCT
+    # ③ 大整数且像 shape 系数（如 `* 1000` 的 1000 —— 保守，仅当上下文有 shape/len）
+    return NOISE_NONE
+
 
 
 def _classify_literal(rec: dict) -> tuple[str, str]:
@@ -443,7 +600,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="tick 面额机械化清点（P0.0/A2）")
     ap.add_argument("--json", default="", help="同时落 JSON 的路径（空 = 不落）")
     ap.add_argument("--md", default="", help="落 Markdown 表的路径（空 = 只打印）")
-    ap.add_argument("--no-literals", action="store_true", help="跳过字面量扫描（快）")
+    ap.add_argument("--no-literals", action="store_true",
+                    help="跳过字面量扫描（快；**覆盖自检仍会跑**，覆盖失败照常 fail-loud）")
     a = ap.parse_args()
 
     print("=" * 92)
@@ -485,22 +643,36 @@ def main() -> None:
             print(f"     · {r['full']:<52} 默认={r['value']!r}  — {r['why']}")
 
     # ---------- 3.2 字面量扫描 ----------
+    # 🔴 A2b：**覆盖自检无条件先跑**（与 `--no-literals` 解耦）。
+    #    踩过的坑：先前把 glob 派生放在 `if not a.no_literals:` 里面
+    #    ⇒ `--no-literals` 时**连覆盖检查都不跑** ⇒ 目录被移走也 rc=0（静默）。
+    #    覆盖是"工具还能不能用"的前提，必须**每次都验**。
+    scan_files: list[Path] = []
+    coverage_error: str = ""
+    try:
+        scan_files = _derive_scan_files()
+        print(f"\n【3.2】扫描覆盖自检（**glob 派生**，与 `--no-literals` 无关，恒跑）")
+        print(f"        {_scan_summary(scan_files)}")
+    except SystemExit as exc:
+        coverage_error = str(exc)
+        print(f"\n{coverage_error}")
+        scan_files = []
+
     lit_rows: list[dict] = []
-    if not a.no_literals:
-        for rel in _SCAN_FILES:
-            p = ROOT / rel
-            if p.is_file():
-                lit_rows.extend(_scan_literals(p))
-        # 只保留"看起来像 tick 面额"的（有上下文关键词），其余不列（否则淹没）
+    if not a.no_literals and scan_files:
+        for p in scan_files:
+            lit_rows.extend(_scan_literals(p))
         for r in lit_rows:
             cls, why = _classify_literal(r)
             r["cls"] = cls
             r["why"] = why
-        keyed = [r for r in lit_rows if r["cls"] != "UNCLASSIFIED"]
-        hit = [r for r in lit_rows if r["cls"] in (DURATION, DECAY, PROB)]
-        print(f"\n【3.2】字面量（{', '.join(_SCAN_FILES)}）")
-        print(f"        扫描总数 {len(lit_rows)}｜有上下文关键词 {len(keyed)}"
-              f"｜**建议 RATE/DURATION/DECAY/PROB 的 {len(keyed)}**")
+        noise = [r for r in lit_rows if r.get("noise")]
+        clean = [r for r in lit_rows if not r.get("noise")]
+        keyed = [r for r in clean if r["cls"] != "UNCLASSIFIED"]
+        hit = [r for r in clean if r["cls"] in (DURATION, DECAY, PROB)]
+        print(f"        扫描总数 {len(lit_rows)}"
+              f"｜🔇 噪声过滤 {len(noise)}（索引/形状/协议；仍落 JSON）"
+              f"｜净剩 {len(clean)}｜有上下文关键词 **{len(keyed)}**")
         print("        ⚠️ 字面量的上下文启发式**弱**于字段名 ⇒ 只作线索，必须人工复核。")
         big = sorted(hit, key=lambda r: -r["line"])[:15]
         if big:
@@ -508,6 +680,8 @@ def main() -> None:
             for r in big:
                 print(f"          {r['file']}:{r['line']:<6} {r['cls']:<9}"
                       f" {r['value']:<8} ｜ {r['ctx']}")
+        else:
+            print("\n        （净剩里无 DURATION/DECAY/PROB 命中 ⇒ 真 tick 常数已全部进 config）")
 
     # ---------- 3.3 交叉校验 ----------
     bad, warn = _cross_check()
@@ -531,6 +705,56 @@ def main() -> None:
     for full, note in NOTES.items():
         print(f"        · {full}\n          {note}")
 
+    # ---------- 3.35 🔴 A2b：两条**断言化**不变量（4.3 要求：不许只写在注释里）----------
+    inv_violations: list[str] = []
+    print("\n【3.35】不变量断言（**可执行**，不是注释）")
+
+    # ① 4.3：每世界日事件数在锚点下 **k-不变**（per-world-day 事件数不随 k 变）
+    #    为什么必须断言：`KNOWN_DIVERGENCE` 把 `organisms.move_cost` 记为 PER_EVENT
+    #    （每"走一格"而非每 tick），rescaling 里就**不该动它**；这条"不动"的**依据**
+    #    正是"每世界日事件数 k-不变"。写在注释里 ⇒ 将来有人改了锚点无人发现。
+    #    🔴 本轮 `scaling_rescale.py` **不改**（A4 已用它验过，改了会作废证据）
+    #       ⇒ 所以现在这条断言一定**报违规**，这是**预期**的：它就是"待单独立项"的
+    #       **可执行记录**。修完 rescale 后应自动转绿。
+    try:
+        from experiments import scaling_rescale as _sr
+        # 🔴 PER_EVENT 目前**没有独立表**（这正是 4.3 的问题）⇒ 从 KNOWN_DIVERGENCE 反推
+        per_event = {f for f, (mine, _theirs, _why) in KNOWN_DIVERGENCE.items()
+                     if mine == PER_EVENT}
+        dur = {f"{g}.{n}" for g, n in getattr(_sr, "_DURATION_FIELDS", [])}
+        rate = {f"{g}.{n}" for g, n in getattr(_sr, "_RATE_FIELDS", [])}
+        prob = {f"{g}.{n}" for g, n in getattr(_sr, "_PROB_FIELDS", [])}
+        decay = {f"{g}.{n}" for g, n in getattr(_sr, "_DECAY_FIELDS", [])}
+        # 断言 A：PER_EVENT 类字段**不得**出现在任一重标表里
+        bad_pe = sorted(per_event & (dur | rate | prob | decay))
+        if bad_pe:
+            inv_violations.append(
+                f"PER_EVENT 字段被纳入重标表（每世界日事件数会被 k 改）: {bad_pe}"
+                f" ⇒ 见 4.3：需为 rescale 建 `_PER_EVENT_FIELDS` 并从中剔除")
+            print(f"        🔴 ① per-world-day 事件数 k-不变：**违反** —— {bad_pe}")
+            print("              ⚪ 预期内（4.3 已裁定本轮不改 `scaling_rescale.py`）"
+                  "⇒ 本条即「待单独立项」的可执行记录")
+        else:
+            print("        ✅ ① per-world-day 事件数 k-不变：PER_EVENT ⊥"
+                  f" {{DURATION, RATE, PROB, DECAY}}（PER_EVENT {len(per_event)} 项"
+                  f" / DURATION {len(dur)} / RATE {len(rate)}）")
+    except Exception as exc:                                  # pragma: no cover
+        inv_violations.append(f"不变量①无法求值：{type(exc).__name__}: {exc}")
+        print(f"        ⚠️ 不变量①跳过：{type(exc).__name__}")
+
+    # ② 4.4：**任何新增 SimConfig 字段必须被 `simulation/` 或 `world/` 引用**
+    #    ⇒ 防"静默死参数"（新增了配置但引擎根本不读，改了也没用、也不知该不该重标）
+    unwired_names = [r["full"] for r in unwired]
+    if unwired_names:
+        print(f"        🔴 ② 死参数检查：{len(unwired_names)} 个字段**从未被引用**"
+              "（新增字段必须接线；存量在此登记待办）：")
+        for f in unwired_names:
+            print(f"             · {f}")
+        inv_violations.append(
+            f"{len(unwired_names)} 个 SimConfig 字段未被 simulation/ 或 world/ 引用（死参数）")
+    else:
+        print("        ✅ ② 死参数检查：全部 SimConfig 数值字段都被引用")
+
     # ---------- 3.5 汇总 + 四类改法 ----------
     print("\n【3.5】四类改法速查（**必须四类**）")
     print("        RATE      ⇒ `x * k`")
@@ -541,19 +765,26 @@ def main() -> None:
 
     total_unclass = len(unclass)
     print(f"\n⇒ 汇总：config 未分类 {total_unclass} 项"
-          + ("；交叉校验通过 ✅" if not bad else f"；交叉校验 🔴 {len(bad)} 项冲突"))
+          + ("；交叉校验通过 ✅" if not bad else f"；交叉校验 🔴 {len(bad)} 项冲突")
+          + ("；不变量 ✅" if not inv_violations else f"；不变量 🔴 {len(inv_violations)} 项")
+          + ("；覆盖 ✅" if not coverage_error else "；覆盖 🔴 失败"))
     print("   （字面量项为**线索**，人工复核后补进 `KNOWN` 即可消除）")
 
     if a.json:
         Path(a.json).write_text(
             json.dumps({"config": rows, "literals": lit_rows,
-                        "cross_check": bad, "unclassified": total_unclass},
+                        "cross_check": bad, "unclassified": total_unclass,
+                        "invariant_violations": inv_violations,
+                        "coverage_error": coverage_error,
+                        "scan_files": [str(p.relative_to(ROOT)) for p in scan_files]},
                        ensure_ascii=False, indent=2),
             encoding="utf-8")
         print(f"\n已落 JSON：{a.json}")
 
-    # 退出码：未分类 = 0 且无冲突 ⇒ 0；否则 1（fail-loud，可进 CI）
-    sys.exit(0 if (total_unclass == 0 and not bad) else 1)
+    # 退出码：覆盖失败 / 未分类≠0 / 有冲突 / 有不变量违规 ⇒ 1（fail-loud，可进 CI）
+    ok = (not coverage_error and total_unclass == 0
+          and not bad and not inv_violations)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

@@ -879,6 +879,20 @@ class SubposConfig:
     lat_floor: float = 0.3           # 极区移速折减下限：
     #                                  speed_cap = speed_max × (lat_floor + (1−lat_floor)·cos 纬度)
     #                                  ⇒ 赤道 100%、极区 30%（fish 00:30"极区移速更慢"）
+    # ---- 🔴 P0.3 阶段 C1（2026-09-26）：真累加器（亚格余量跨 tick 保留）----
+    speed_accumulator: bool = False  # 总开关（默认 **False** ⇒ 走旧的"每 tick 独立四舍五入"，
+    #                                  逐位等价；开档才启用 `_pos_frac` 累加器）
+    #                                  为什么必须（F2 零步悬崖）：
+    #                                    旧 `steps = floor(speed×subdiv + 0.5)` 是**每 tick 独立**
+    #                                    四舍五入 ⇒ `speed×subdiv < 0.5` 的个体**永远走 0 步**
+    #                                    （实测零步率 24.6%，且**与 subdiv 无关**——
+    #                                     因为余量每 tick 被丢掉）。
+    #                                  改法：`pos_frac += speed·subdiv; steps = floor(pos_frac);
+    #                                         pos_frac -= steps` ⇒ 余量跨 tick 保留 ⇒
+    #                                    **零步% → 0，且与 subdiv 无关**（时间上均匀化）。
+    #  🔴 C2 `gain` 定标（`gain = v_max / ā`）：`ā` = 目标配置上的平均 `mob_eff`
+    #     （实测 **0.5998**，幼体占比 89.4%）⇒ `gain ≈ 1.667 × v_max`。
+    #     本阶段**只报数、不改默认**（`speed_gain` 默认仍 4.0）⇒ 默认关档不受影响。
     # ---- 停留概率（语义反转：**默认走、以概率停**；由状态/信息驱动）----
     stay_base: float = 0.0           # 基座停留概率
     stay_food_k: float = 0.0         # 本格还有余粮 ⇒ 停着吃
@@ -896,6 +910,9 @@ class SubposConfig:
         for _nm in ("stay_base", "stay_food_k", "stay_signal_k", "stay_fear_k"):
             assert 0.0 <= getattr(self, _nm) <= 1.0, f"{_nm} 在 0~1"
         assert 0.0 <= self.stay_max < 1.0, "stay_max 必须 < 1（反退化闸：不许全停）"
+        # 🔴 C1：累加器开档时 subdiv 必须足够（R = v_max × subdiv ≥ 5，见派工单 C3）
+        if self.speed_accumulator:
+            assert self.speed_gain > 0.0, "累加器开档时 speed_gain 必须 > 0（否则恒 0 步）"
 
 
 @dataclass
@@ -1091,6 +1108,14 @@ _ARS_FIELDS: frozenset = frozenset(f.name for f in fields(ArsConfig))
 #: P0.0 A1 信号场配置白名单（同规格；A1 之前的存档无 `signals` 键 ⇒ 回退默认）。
 _SIGNALS_FIELDS: frozenset = frozenset(f.name for f in fields(SignalsConfig))
 
+#: 🔴 P0.3 阶段 C1（2026-09-26）：`subpos` 配置白名单。
+#   **修的是一个存量缺陷**：`to_dict()` 一直**写出** `subpos` 键，但 `from_dict()` 里
+#   **没有 `subpos=` 分支** ⇒ 往返把 `subdiv/speed_gain/...` **全部重置为默认**。
+#   实测：`SimConfig(seed=1)` 改 `subdiv=7 / speed_gain=3.3` ⇒ `from_dict(to_dict(x))`
+#   读回 `4 / 4.0`（`fingerprint()` 不相等）⇒ **快照续跑会静默用错参数**。
+#   本阶段新增 `speed_accumulator` 后，若不同时修，开档会在载入快照时**静默关掉累加器**
+#   —— 正是 4.4 要防的"静默死参数"。故**一并修**（属于新增字段的必要配套）。
+_SUBPOS_FIELDS: frozenset = frozenset(f.name for f in fields(SubposConfig))
 
 @dataclass
 class SimConfig:
@@ -1246,6 +1271,17 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("signals") or {}).items()
                     if k in _SIGNALS_FIELDS
+                }
+            ),
+            # 🔴 P0.3 阶段 C1：`subpos` 配置。**修存量缺陷** —— 此前 `to_dict()` 写出
+            #   该键但 `from_dict()` 无分支 ⇒ 往返把 `subdiv/speed_gain/enabled/...`
+            #   全部重置为默认（实测 `subdiv=7` 往返后变 4）。此处补上白名单过滤分支；
+            #   旧存档缺 `subpos` 键 ⇒ 回退默认（`enabled=False` = 逐位等价，I1 不变）。
+            subpos=SubposConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("subpos") or {}).items()
+                    if k in _SUBPOS_FIELDS
                 }
             ),
         )

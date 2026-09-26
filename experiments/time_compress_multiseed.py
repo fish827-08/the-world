@@ -24,6 +24,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.time_compress_check import run_day   # noqa: E402
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
+
+
 
 def rel_series(d0, i0, i1) -> list[float]:
     n = min(len(i0["pops"]), len(i1["pops"]))

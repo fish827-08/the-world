@@ -376,6 +376,15 @@ class SphereEngine:
         # 🔴 __slots__ 是硬约束：新属性**必须**登记，否则运行期 AttributeError。
         # 位置约定：**加在块尾**（与 [本地开发] 的波 0 段分开，减少同文件并发冲突面）。
         "_sub_r", "_sub_c",
+        # ---- 13.4 波 2B：计数（C9 待改；本线 = [所有者·天平]）----
+        # 🔴 P0.3 阶段 C1（2026-09-26）：亚格**余量累加器**（单位 = 亚格）。
+        #    旧 `steps = floor(speed×subdiv + 0.5)` **每 tick 独立四舍五入** ⇒ 余量被丢掉
+        #    ⇒ `speed×subdiv < 0.5` 的个体**永远走 0 步**（实测零步率 24.6%）。
+        #    本数组把余量**跨 tick 保留** ⇒ 零步% → 0 且与 subdiv 无关。
+        #    🔴 登记陷阱：新状态数组必须**同改四处**（__slots__ / __init__ / 出生扩容 / 死亡压缩），
+        #      漏一处 ⇒ 与个体错位、静默失效（本批已踩过一次）。
+        #    关档语义：数组**恒存在**且恒为 0.0 ⇒ 不进累加路径、不读不写（I1 逐位等价）。
+        "_pos_frac",
         # 读数（B4 口径；关档全部不累加 ⇒ 探针返回 None 或 0 的口径见 subpos_probe）
         "_run_flat_move_n",   # Σ 真正**换格**的个体数（= 主判据 mean_flat_moves 的分子）
         "_run_slow_n",        # Σ 移动者中 steps==0（"白移动"）的个体数
@@ -797,6 +806,9 @@ class SphereEngine:
         # ⇒ I2（`_flat` 与亚格恒一致）从第一步就成立，不需要"关档特判"（少一个特例 = 少一个坑）。
         _subdiv0 = int(getattr(config.subpos, "subdiv", 4))
         self._sub_r, self._sub_c = _sub_init(self._flat, _subdiv0, self.world)
+        # 🔴 P0.3 C1：余量累加器。**与个体等长**，初值 0.0（"无欠步"）。
+        #    关档时此数组存在但**从不被读写**（移动块里 `_acc_on` 为假）⇒ I1 逐位等价。
+        self._pos_frac = np.zeros(self._flat.shape[0], dtype=np.float64)
         # 读数计数器（关档不累加 ⇒ `subpos_probe()` 返回 None = "未适用"，不是 0）
         self._run_flat_move_n = 0     # Σ 真正换格的个体数（主判据分子）
         self._run_slow_n = 0          # Σ 移动者中 steps==0（"白移动"）的个体数
@@ -1078,6 +1090,9 @@ class SphereEngine:
         # 整体替换成随机格 ⇒ 不同步就会**脱钩**（I2 被破坏：亚格指向格 0、`_flat` 指向随机格）。
         # 实测教训：这正是 E4/E6 两条引擎级单测第一次跑时抓到的形态。
         self._sub_r, self._sub_c = _sub_init(self._flat, _subdiv0, self.world)
+        # 🔴 P0.3 C1：撒点后余量归零（新个体"无欠步"）。必须与 `_sub_r/_sub_c` **同步重置**，
+        #    否则撒点换格后余量还指着旧格 ⇒ 第一 tick 就凭空多走一步。
+        self._pos_frac = np.zeros(self._flat.shape[0], dtype=np.float64)
         if bool(getattr(config.subpos, "enabled", False)):
             # ⚠️ **极点行**的撒点可能落在"冗余槽位"：`flat_to_rc` 与 `rc_to_flat` 在极点行
             #    **不互逆**（该行所有 col 物理上坍缩为一格，`neighbour` 返回的是整行 col）。
@@ -3272,7 +3287,38 @@ class SphereEngine:
                     _spd = np.clip(genes[mi, Gene.DEFENSE] * _af
                                    * float(_subcfg.speed_gain), 0.0, _cap)
                     _subdiv = int(_subcfg.subdiv)
-                    _st = _sub_steps(_spd, _subdiv)
+                    # 🔴 P0.3 阶段 C1（2026-09-26）：**真累加器**。
+                    # 旧法 `steps = floor(speed×subdiv + 0.5)` 是**每 tick 独立四舍五入**
+                    #   ⇒ `speed×subdiv < 0.5` 的个体**永远走 0 步**（实测零步率 24.6%，
+                    #     且该比例**与 subdiv 无关** —— 病根是余量每 tick 被丢弃，不是档位不够）。
+                    # 新法：`pos_frac += speed·subdiv; steps = floor(pos_frac); pos_frac -= steps`
+                    #   ⇒ 亚格余量**跨 tick 保留** ⇒ 慢个体每若干 tick 攒够 1 步 ⇒ **零步% → 0**。
+                    # 🔴 I3 不破坏：`_spd` 由已算好的基因/年龄确定性推导，**不新增随机抽取**
+                    #   ⇒ `rand_choice` 的位域契约（`%100`/`//100`）与关档逐字一致。
+                    # 🔴 关档：`_acc_on` 为假 ⇒ 走原 `_sub_steps` 且**不读不写 `_pos_frac`**
+                    #   ⇒ I1 逐位等价（数组存在但恒 0）。
+                    _acc_on = bool(getattr(_subcfg, "speed_accumulator", False))
+                    if _acc_on:
+                        # 亚格余量累加（在**能量门槛之前**累加 ⇒ 走不动的个体也照常攒余量，
+                        # 否则"饿到不动的个体恢复后要重攒"= 隐式惩罚，与累加器语义不符）。
+                        #
+                        # 🔴 上钳的**正确写法**（我第一版写错了，实测暴露）：
+                        #   `speed_max = 2.0` 允许 `speed > 1` ⇒ `speed·subdiv` 可达 `2·subdiv`。
+                        #   而"每 tick 每轴最多 1 格"是硬约束 ⇒ 必须把**被钳掉的部分丢掉**，
+                        #   **不能**留在余量里 —— 否则余量每 tick 多攒 `subdiv`，
+                        #   `_pos_frac` 单调爆炸（实测 `max = 1094.9`、`mean = 235.1`，
+                        #   于是 `floor(pf)` 恒 ≥ 4 ⇒ **全员顶格**，与累加器初衷相反）。
+                        #   ⇒ 先算"本 tick 实际允许的位移" `_allow = min(speed·subdiv, subdiv)`，
+                        #     余量用 `_allow` 参与，**被钳掉的部分直接丢**。
+                        _want = _spd * float(_subdiv)                 # 本 tick 想要多少亚格
+                        _allow = np.minimum(_want, float(_subdiv))    # 但每轴最多 subdiv
+                        _pf = self._pos_frac[mi] + _allow             # 🔴 只累加**允许**的部分
+                        _st = np.floor(_pf).astype(np.int64)
+                        # 下限保护：`_allow ≤ subdiv` ⇒ `_st ≤ subdiv`；仍显式上钳防浮点边界
+                        _st = np.clip(_st, 0, _subdiv)
+                        self._pos_frac[mi] = _pf - _st.astype(np.float64)
+                    else:
+                        _st = _sub_steps(_spd, _subdiv)
                     # 纯能量门槛（沿用 L2 口径）：能量不够 ⇒ 走 0 步（原地）
                     _st = np.where(
                         energy[mi] >= float(_subcfg.min_energy_frac) * _ocs.max_energy,
@@ -3827,6 +3873,11 @@ class SphereEngine:
             # 子代继承亲代的格（`_flat[ri]`）⇒ 同时继承亲代的亚格位置（连写法都对齐，便于复核）。
             self._sub_r = np.concatenate([self._sub_r, self._sub_r[ri]])
             self._sub_c = np.concatenate([self._sub_c, self._sub_c[ri]])
+            # 🔴 P0.3 C1：余量累加器随子代扩容 —— **与 `_flat`/亚格完全同型**：
+            #    子代继承亲代的格与亚格 ⇒ 同时继承亲代的**亚格余量**（否则新个体余量归 0，
+            #    相当于亲代每生一个孩子就被"清一次欠步"，与累加器语义不符）。
+            #    🔴 登记陷阱第 3 处（漏 ⇒ 数组长度与个体数不一致 ⇒ 广播报错或静默错位）。
+            self._pos_frac = np.concatenate([self._pos_frac, self._pos_frac[ri]])
 
             # S1 骨架：血条随子代扩容（初值 1.0，H1）；机制不接线，仅保数组同长
             self._health = np.concatenate([self._health, np.ones(K, dtype=np.float64)])
@@ -3920,6 +3971,11 @@ class SphereEngine:
             # 用切片赋值而非拼接 ⇒ 与上面 `[:P][keep]` 的语义逐位一致）。
             self._sub_r = np.concatenate([self._sub_r[:P][keep], self._sub_r[P:]])
             self._sub_c = np.concatenate([self._sub_c[:P][keep], self._sub_c[P:]])
+            # 🔴 P0.3 C1：余量累加器随死亡压缩（**与 `_flat`/亚格同一 `keep` 掩码**，
+            #    用切片而非拼接 ⇒ 与上面 `[:P][keep]` 语义逐位一致）。
+            #    🔴 登记陷阱第 4 处（漏 ⇒ 死一个个体后全体余量错位一格，静默且极难查）。
+            self._pos_frac = np.concatenate(
+                [self._pos_frac[:P][keep], self._pos_frac[P:]])
             # 14.9 ARS：随死亡压缩（**同一 `keep` 掩码**；漏掉 ⇒ 与个体错位 ⇒ 惯性项乱指）
             self._out_taken = np.concatenate(
                 [self._out_taken[:P][keep], self._out_taken[P:]])
@@ -4650,6 +4706,10 @@ class SphereEngine:
         # 存它是为了让"开档续跑"读到正确亚格位置，而不是被重置到格中心）。
         data["sub_r"] = self._sub_r[:P].copy()
         data["sub_c"] = self._sub_c[:P].copy()
+        # 🔴 P0.3 C1：余量累加器（缺键回退见 `load_snapshot`；关档时恒 0.0 ⇒ 与"无欠步"等价）。
+        #    存它是为了让"开档续跑"读到**正确的欠步余量**，而不是被重置为 0
+        #    （重置会丢掉最多 1 个亚格的进度 ⇒ 续跑与不中断的轨迹不同）。
+        data["pos_frac"] = self._pos_frac[:P].copy()
         data["energy"] = self._energy[:P].copy()
         data["stomach"] = self._stomach[:P].copy()
         data["stomach_scav"] = self._stomach_scav[:P].copy()   # R165 0-2 归因
@@ -4903,6 +4963,14 @@ class SphereEngine:
                 engine._flat, int(getattr(engine.config.subpos, "subdiv", 4)),
                 engine.world,
             )
+        # 🔴 P0.3 C1：余量累加器。**旧快照缺键 ⇒ 由"亚格余量 = 0"回推**
+        #    （语义正确：C1 之前的个体没有累加器概念 ⇒ 全部按"无欠步"起步）。
+        #    长度不符时也回退 0（防旧快照个体数与数组不一致 ⇒ 广播报错）。
+        _pf = data.get("pos_frac")
+        if _pf is not None and len(_pf) == len(engine._id):
+            engine._pos_frac = _pf.copy()
+        else:
+            engine._pos_frac = np.zeros(len(engine._id), dtype=np.float64)
         engine._corpse_energy = (
             data["corpse_energy"].copy()
             if "corpse_energy" in data
