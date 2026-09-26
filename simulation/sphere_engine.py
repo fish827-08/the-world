@@ -4894,6 +4894,17 @@ class SphereEngine:
         data["fearh_flat_n"] = np.array(self._fearh_flat_n)
         data["fearh_dec_n"] = np.array(self._fearh_dec_n)
 
+        # --- 3.7 14.9 ARS 六数组（按个体；R216 §四 裁定 A = **存 + 恢复**）---
+        # 这六数组是**跨 tick 状态**（期待 EMA / 双模式 / 惯性 heading / 失望计数 / 本 tick 咬到量）；
+        # 不进快照 ⇒ 续跑丢 ARS 状态、且长度停在构造期 initial_count ⇒ 恢复后首次死亡压缩即
+        # IndexError（R215-b）。与 §七-1 的账本长度缺陷**同族**：快照不完整 ⇒ 恢复后静默错位。
+        data["out_taken"] = self._out_taken[:P].copy()
+        data["feed_fast"] = self._feed_fast[:P].copy()
+        data["feed_slow"] = self._feed_slow[:P].copy()
+        data["ars_extensive"] = self._ars_extensive[:P].copy()
+        data["heading"] = self._heading[:P].copy()
+        data["giveup_ct"] = self._giveup_ct[:P].copy()
+
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
         data["resource_capacity"] = self.resources._capacity.copy()
@@ -5133,6 +5144,29 @@ class SphereEngine:
             data["contest_holder_win_n"]) if "contest_holder_win_n" in data else 0
         engine._fearh_flat_n = int(data["fearh_flat_n"]) if "fearh_flat_n" in data else 0
         engine._fearh_dec_n = int(data["fearh_dec_n"]) if "fearh_dec_n" in data else 0
+
+        # --- 7.7 恢复 14.9 ARS 六数组（R216 §四 裁定 A；旧快照缺键 ⇒ 回退构造期初值）---
+        # 缺键语义 = "该快照保存时无 ARS 状态" ⇒ 回退初值（出生即赶路 / heading 未知 / 期待零），
+        # 与 `__init__` 一致；长度按**恢复后的存活数** P 建（不是构造期 initial_count）⇒ 不静默错位。
+        _P = len(engine._id)
+        engine._out_taken = (
+            data["out_taken"].copy() if "out_taken" in data
+            else np.zeros(_P, dtype=np.float64))
+        engine._feed_fast = (
+            data["feed_fast"].copy() if "feed_fast" in data
+            else np.zeros(_P, dtype=np.float64))
+        engine._feed_slow = (
+            data["feed_slow"].copy() if "feed_slow" in data
+            else np.zeros(_P, dtype=np.float64))
+        engine._ars_extensive = (
+            data["ars_extensive"].copy() if "ars_extensive" in data
+            else np.ones(_P, dtype=bool))
+        engine._heading = (
+            data["heading"].copy() if "heading" in data
+            else np.full(_P, -1, dtype=np.int64))
+        engine._giveup_ct = (
+            data["giveup_ct"].copy() if "giveup_ct" in data
+            else np.zeros(_P, dtype=np.int64))
 
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()

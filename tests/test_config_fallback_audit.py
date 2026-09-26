@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from experiments.scan_nonascii_print import source_is_protected as _r98_protected
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "config_fallback_audit.py"
 
@@ -142,8 +144,12 @@ def test_s6_cli_real_repo_rc0_and_json(tmp_path):
 
 
 def test_s7_gbk_guard_present_in_tool():
-    """R98：工具 print 含非 GBK 字符（字段歧义等），入口必须有 UTF-8 兜底。"""
-    assert 'reconfigure(encoding="utf-8"' in TOOL.read_text(encoding="utf-8")
+    """R98：工具 print 含非 GBK 字符（字段歧义等），入口必须有 UTF-8 兜底。
+
+    判据**派生**自 R98 守卫本体（`scan_nonascii_print.source_is_protected`，AST 检调用点）
+    —— 不在本文件复制"含标记串"式的弱判据（R216 §三）。
+    """
+    assert _r98_protected(TOOL.read_text(encoding="utf-8"))
 
 
 def test_s8_r213_gate_type_fallbacks_pin_config_defaults():

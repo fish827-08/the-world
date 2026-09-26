@@ -11,8 +11,15 @@
 ----
 判据 = **GBK 不可编码**（不是"非 ASCII"）：中文在 GBK 里没问题，不必报。
 另外区分两类：
-  - **受保护**：文件入口已 `sys.stdout.reconfigure(encoding="utf-8", …)`（如 a4）⇒ 运行期安全；
+  - **受保护**：文件里**真的调用**了 `<流>.reconfigure(encoding=…)`（如 a4）⇒ 运行期安全；
   - **未保护**：会真的炸。
+
+🔴 保护判据是 **AST 检调用点**，不是"源码含标记串"（R216 §三 裁定，2026-09-27）：
+原判据 = 子串 `reconfigure(encoding="utf-8"` —— 只要文件**提到**这个串就算受保护，
+于是本守卫**因定义了那个标记常量而自判受保护**、抓不到自己（自指盲区）。
+子串判据还有个更坏的形态：把标记串写进报错文案/注释即可"洗白"。
+⇒ 现在统一走 `is_protected()`（AST）—— 见 `tests/test_r98_nonascii_print.py` 的回归测试。
+
 用法
 ----
     python experiments/scan_nonascii_print.py            # 全受控目录
@@ -28,7 +35,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIRS = ("simulation", "observatory", "experiments", "world", "core", "tests",
                 "persistence")
-PROTECT_MARK = 'reconfigure(encoding="utf-8"'
+
+
+def is_protected(tree: ast.AST) -> bool:
+    """保护判据（**唯一实现**）：AST 里存在 `<流>.reconfigure(..., encoding=…)` 调用。
+
+    只认**真的调用点**：`ast.Call` + `func` 是属性名为 `reconfigure` 的 `ast.Attribute`
+    + 带 `encoding` 关键字。含标记串的注释/字符串/常量定义一律不算（R216 §三②）。
+    """
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "reconfigure"
+                and any(kw.arg == "encoding" for kw in node.keywords)):
+            return True
+    return False
+
+
+def source_is_protected(src: str) -> bool:
+    """源码级入口（解析失败 ⇒ 未保护；解析错误本身由 `scan_file` 报）。"""
+    try:
+        return is_protected(ast.parse(src))
+    except SyntaxError:
+        return False
 
 
 def _print_strings(tree: ast.AST):
@@ -49,7 +78,7 @@ def scan_file(p: Path) -> list[tuple[int, str, str]]:
         tree = ast.parse(src)
     except (SyntaxError, UnicodeDecodeError) as exc:
         return [(0, "?", f"解析失败：{exc}")]
-    protected = PROTECT_MARK in src
+    protected = is_protected(tree)
     out: list[tuple[int, str, str]] = []
     seen: set[tuple[int, str]] = set()
     for lineno, s in _print_strings(tree):
@@ -67,6 +96,9 @@ def scan_file(p: Path) -> list[tuple[int, str, str]]:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):      # R216 §三①：守卫本体也要真兜底（自指盲区修复）
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--dirs", nargs="*", default=list(DEFAULT_DIRS))
     args = ap.parse_args()
@@ -84,7 +116,7 @@ def main() -> int:
             if not bad:
                 continue
             rel = p.relative_to(ROOT).as_posix()
-            prot = PROTECT_MARK in p.read_text(encoding="utf-8")
+            prot = source_is_protected(p.read_text(encoding="utf-8"))
             if prot:
                 n_prot += 1
             else:

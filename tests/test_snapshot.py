@@ -25,6 +25,33 @@ def _make_config(seed=42, fruit_enabled=False):
     return cfg
 
 
+def _make_ars_config(seed=42):
+    """14.9 ARS 开档（斑块臂；`use_sim_core=False` —— ARS ∧ sim_core 构造期硬错，H3 A1）。"""
+    cfg = _make_config(seed=seed)
+    cfg.simulation.use_sim_core = False
+    c = cfg.resources
+    c.bg_production_zero = True
+    c.patch_count = 30
+    c.patch_radius = 2
+    c.patch_regrowth_mult = 1.195
+    o = cfg.organisms
+    o.max_energy = 600.0
+    o.initial_energy = 300.0
+    o.starve_frac = 0.30
+    o.exhaust_frac = 0.17
+    o.eat_efficiency = 7.5
+    o.assim_herb = 0.4
+    o.assim_carn = 0.8
+    o.stomach_cap_mass = 25.0
+    o.eat_threshold_frac = 0.6
+    o.photo_max = 0.0
+    cfg.ars.enabled = True
+    cfg.ars.gain = 1.0
+    cfg.ars.fast_tau = 5.0
+    cfg.ars.slow_tau = 50.0
+    return cfg
+
+
 class TestSnapshotBasic:
     """基本保存/恢复功能。"""
 
@@ -186,6 +213,80 @@ class TestSnapshotReproducibility:
             np.testing.assert_array_equal(e_continuous._energy[:P], e_loaded._energy[:P])
             np.testing.assert_array_equal(e_continuous._fruit_grid, e_loaded._fruit_grid)
             np.testing.assert_array_equal(e_continuous._fruit_charge[:P], e_loaded._fruit_charge[:P])
+        finally:
+            os.unlink(path)
+
+    ARS_STATE = ("_out_taken", "_feed_fast", "_feed_slow",
+                 "_ars_extensive", "_heading", "_giveup_ct")
+
+    def test_ars_state_roundtrip_and_resume_bitwise(self):
+        """R216 §四 裁定 A：14.9 ARS 六数组随快照**存 + 恢复** ⇒ 续跑逐位一致。
+
+        修前：六数组不入快照键 ⇒ 恢复后停在构造期初值（长度 initial_count、状态丢失）
+        ⇒ 续跑轨迹不逐位，且首次死亡压缩即 IndexError（R215-b）。
+        长度普查见 `TestSnapshotIdLedgerLengths.test_all_slot_arrays_have_alive_length_after_load`。
+        """
+        cfg = _make_ars_config()
+        e_cont = SphereEngine(cfg)
+        e_snap = SphereEngine(cfg)
+        for _ in range(60):
+            e_cont.step()
+            e_snap.step()
+        P = len(e_cont._id)
+        assert e_cont._feed_fast[:P].sum() > 0.0, "前提：ARS 期待状态须非平凡（否则测试退化）"
+
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            path = f.name
+        try:
+            e_snap.save_snapshot(path)
+            e_load = SphereEngine.load_snapshot(path, config=cfg)
+            assert len(e_load._id) == P
+            for name in self.ARS_STATE:
+                a, b = getattr(e_cont, name)[:P], getattr(e_load, name)
+                assert b.dtype == a.dtype, f"{name} dtype {b.dtype} != {a.dtype}"
+                np.testing.assert_array_equal(a, b, err_msg=name)
+
+            for _ in range(60):
+                e_cont.step()
+                e_load.step()
+            P2 = len(e_cont._id)
+            assert P2 == len(e_load._id)
+            for name in self.ARS_STATE:
+                np.testing.assert_array_equal(
+                    getattr(e_cont, name)[:P2], getattr(e_load, name), err_msg=name)
+            np.testing.assert_array_equal(e_cont._energy[:P2], e_load._energy[:P2])
+            np.testing.assert_array_equal(e_cont._flat[:P2], e_load._flat[:P2])
+        finally:
+            os.unlink(path)
+
+    def test_ars_missing_keys_fall_back_to_init_lengths(self):
+        """旧快照（无 ARS 六键）仍可载入：回退初值 + 长度按**恢复后存活数**建（S1 兼容承诺）。"""
+        cfg = _make_ars_config()
+        e = SphereEngine(cfg)
+        for _ in range(30):
+            e.step()
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            path = f.name
+        try:
+            e.save_snapshot(path)
+            d = dict(np.load(path, allow_pickle=True))
+            for k in ("out_taken", "feed_fast", "feed_slow",
+                      "ars_extensive", "heading", "giveup_ct"):
+                d.pop(k)
+            np.savez_compressed(path, **d)
+
+            e2 = SphereEngine.load_snapshot(path, config=cfg)
+            P = len(e2._id)
+            assert len(e2._out_taken) == P and e2._out_taken.dtype == np.float64
+            assert len(e2._feed_fast) == P and e2._feed_fast.dtype == np.float64
+            assert len(e2._feed_slow) == P and e2._feed_slow.dtype == np.float64
+            assert len(e2._ars_extensive) == P and e2._ars_extensive.dtype == bool
+            assert len(e2._heading) == P and e2._heading.dtype == np.int64
+            assert len(e2._giveup_ct) == P and e2._giveup_ct.dtype == np.int64
+            np.testing.assert_array_equal(e2._heading, np.full(P, -1))
+            np.testing.assert_array_equal(e2._ars_extensive, np.ones(P, dtype=bool))
+            np.testing.assert_array_equal(e2._giveup_ct, np.zeros(P, dtype=np.int64))
+            e2.step()   # 载入即可续跑（旧快照的最低契约）
         finally:
             os.unlink(path)
 
@@ -366,13 +467,13 @@ class TestSnapshotIdLedgerLengths:
         e2._rs_children[e2._next_id - 1] += 1
         assert e2._rs_children[e2._next_id - 1] == 1
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "R215-b（修 §七-1 时新发现，待裁）：14.9 ARS 六数组（_out_taken/_feed_fast/"
-        "_feed_slow/_ars_extensive/_heading/_giveup_ct）**未进快照键** ⇒ 恢复后长度停在构造期 "
-        "initial_count，首次死亡压缩即 IndexError（且即便等长也丢 ARS 状态 ⇒ 续跑轨迹不逐位）。"
-        "修法待裁（保存恢复 vs 载入重置）；修好后请删本 xfail。"))
     def test_all_slot_arrays_have_alive_length_after_load(self):
-        """全量普查：恢复后**所有**按个体数组长度必须 == 存活数（本批新发现的 ARS 族会红）。"""
+        """全量普查：恢复后**所有**按个体数组长度必须 == 存活数。
+
+        R215-b 发现 ARS 族（`_out_taken/_feed_fast/_feed_slow/_ars_extensive/_heading/
+        `_giveup_ct`）未进快照键 ⇒ 恢复后长度停在构造期 initial_count（本测试当时红）。
+        R216 §四 裁定 A（存 + 恢复）修完 ⇒ 转真测试（xfail 摘除，见提交说明）。
+        """
         cfg = _make_config()
         cfg.organisms.maturity_fraction = 1e-6
         e1 = self._rounded(cfg, 150)
