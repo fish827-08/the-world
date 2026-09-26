@@ -24,6 +24,7 @@
 ----
     .venv\\Scripts\\python.exe experiments/steady_k_probe.py --patches 30,60,120 --ticks 6000
     .venv\\Scripts\\python.exe experiments/steady_k_probe.py --patches 30 --subpos on --ticks 4000
+    .venv\\Scripts\\python.exe experiments/steady_k_probe.py --patches 480 --max-count 30000 --k 2.5 --subpos on
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ def _bar(cur: int, tot: int, extra: str = "", width: int = 24) -> str:
 
 def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
              subpos: bool, speed_max: float, gain: float, subdiv: int,
-             k: float = 1.0) -> tuple[SimConfig, dict]:
+             k: float = 1.0, max_count: int = 0) -> tuple[SimConfig, dict]:
     c = SimConfig(seed=seed)
     c.world.rows, c.world.cols = rows, cols
     c.resources.distribution = "patchy"
@@ -73,6 +74,8 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
     c.resources.patch_count = patches
     if pop > 0:
         c.population.initial_count = pop
+    if max_count > 0:
+        c.population.max_count = int(max_count)   # 撞顶则实测=配置读数（T4 口径 30000）
     if subpos:
         c.simulation.use_sim_core = False        # subpos 与 Rust 路径互斥（H3 硬报错）
         c.subpos.enabled = True
@@ -86,9 +89,10 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
 
 def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             sample: int, subpos: bool, speed_max: float, gain: float, subdiv: int,
-            max_minutes: float, stop_stable: int = 4, k: float = 1.0) -> tuple[list[dict], dict]:
+            max_minutes: float, stop_stable: int = 4, k: float = 1.0,
+            max_count: int = 0) -> tuple[list[dict], dict]:
     cfg, notes = make_cfg(seed, rows, cols, pop, patches, subpos, speed_max, gain,
-                          subdiv, k)
+                          subdiv, k, max_count)
     t0 = time.time()
     eng = SphereEngine(cfg)
     apply_post_build(eng, notes)                 # 构造后项（信号寿命 ÷k）
@@ -179,6 +183,9 @@ def main() -> None:
     ap.add_argument("--max-minutes", type=float, default=25.0)
     ap.add_argument("--k", type=float, default=1.0,
                     help="时间压缩倍率（R205 定档 k=2.5 ⇒ 昼夜 960）；k=1 逐位不变")
+    ap.add_argument("--max-count", type=int, default=0,
+                    help="population.max_count 覆盖（0=用配置默认 5000）；T4 口径 30000——"
+                         "撞顶则实测变成配置读数")
     ap.add_argument("--stop-stable", type=int, default=4,
                     help="连续 N 个采样点相对变化 < 3 个百分点即判平台并早停（0=关）")
     ap.add_argument("--out", default="results/steady_k_probe.csv")
@@ -189,7 +196,7 @@ def main() -> None:
 
     print(f"== 稳态 K 探针：{a.rows}x{a.cols}（{a.rows * a.cols:,} 格）"
           f"，斑块 {patch_list}，初始 {a.pop}，{a.ticks} tick，"
-          f"subpos={a.subpos}，k={a.k:g}，seed {seeds} ==")
+          f"subpos={a.subpos}，k={a.k:g}，max_count={a.max_count or '默认'}，seed {seeds} ==")
     print(f"   旧标定外推公式：K ≈ {K_PER_CELL:.2f} × 产能格\n")
 
     all_rows: list[dict] = []
@@ -199,7 +206,7 @@ def main() -> None:
             print(f"--- 斑块 {p} / seed {sd} ---", flush=True)
             rows_out, s = run_one(sd, a.rows, a.cols, a.pop, p, a.ticks, a.sample,
                                   a.subpos == "on", a.speed_max, a.gain, a.subdiv,
-                                  a.max_minutes, a.stop_stable, a.k)
+                                  a.max_minutes, a.stop_stable, a.k, a.max_count)
             all_rows.extend(rows_out)
             summaries.append(s)
             print(f"    ⇒ 产能格 {s['productive_cells']}｜外推 K {s['K_extrapolated']}"
@@ -233,7 +240,7 @@ def main() -> None:
             "switches": {"ticks_target": int(a.ticks), "rows": a.rows, "cols": a.cols,
                          "patches": last["patches"], "k": last["k"], "seeds": seeds,
                          "subpos": a.subpos, "speed_max": a.speed_max, "gain": a.gain,
-                         "subdiv": a.subdiv},
+                         "subdiv": a.subdiv, "max_count": a.max_count or None},
             "result": {"final_N": int(last["pop_final"]), "final_tick": int(last["ticks_done"]),
                        "platform_reached": bool(last["platform_reached"]),
                        "K_measured": last["K_measured"],
