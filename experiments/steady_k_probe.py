@@ -67,12 +67,15 @@ def _bar(cur: int, tot: int, extra: str = "", width: int = 24) -> str:
 
 def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
              subpos: bool, speed_max: float, gain: float, subdiv: int,
-             k: float = 1.0, max_count: int = 0) -> tuple[SimConfig, dict]:
+             k: float = 1.0, max_count: int = 0,
+             rgm: float = 1.195) -> tuple[SimConfig, dict]:
     c = SimConfig(seed=seed)
     c.world.rows, c.world.cols = rows, cols
     c.resources.distribution = "patchy"
     c.resources.bg_production_zero = True
-    c.resources.patch_regrowth_mult = 1.195
+    # S1 诊断（R217 §三②）：斑块再生倍率是**本探针的唯一扫描变量**
+    #   {1.195 = T4 现状, 0.8, 0.6, 0.4} ⇒ 看 K 与饱和度怎么响应
+    c.resources.patch_regrowth_mult = float(rgm)
     c.resources.patch_count = patches
     if pop > 0:
         c.population.initial_count = pop
@@ -92,9 +95,9 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
 def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             sample: int, subpos: bool, speed_max: float, gain: float, subdiv: int,
             max_minutes: float, stop_stable: int = 4, k: float = 1.0,
-            max_count: int = 0) -> tuple[list[dict], dict]:
+            max_count: int = 0, rgm: float = 1.195) -> tuple[list[dict], dict]:
     cfg, notes = make_cfg(seed, rows, cols, pop, patches, subpos, speed_max, gain,
-                          subdiv, k, max_count)
+                          subdiv, k, max_count, rgm)
     t0 = time.time()
     eng = SphereEngine(cfg)
     apply_post_build(eng, notes)                 # 构造后项（信号寿命 ÷k）
@@ -117,8 +120,17 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             t_slice = time.perf_counter()
             N = int(len(eng._flat))
             stock = float(eng.resources._grid[prod].sum())
+            # 🔴 R217 §三①：引擎**已有**死因账本（`death_cause_totals()`，与 history_limit 无关），
+            #   但本探针此前**没读它** ⇒ 平台期"K 被什么顶上"无从判断。
+            #   这里记**累计**值 ⇒ 分析侧用相邻采样差得到"窗口内死因构成"（平台期口径）。
+            _dc = eng.death_cause_totals()
+            _dv = {getattr(k, "name", str(k)): int(v) for k, v in _dc.items()}
             rows_out.append({
-                "seed": seed, "patches": patches, "k": k, "tick": t, "pop": N,
+                "seed": seed, "patches": patches, "k": k, "rgm": rgm,
+                "tick": t, "pop": N,
+                "d_starv": _dv.get("STARVATION", 0),
+                "d_old": _dv.get("OLD_AGE", 0),
+                "d_pred": _dv.get("PREDATION", 0),
                 "saturation": (stock / cap_sum if cap_sum > 0 else float("nan")),
                 "ms_per_tick": dt_ms,
                 "mean_energy": float(eng._energy[:N].mean()) if N else float("nan"),
@@ -146,11 +158,35 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
     ms_tail = [r["ms_per_tick"] for r in rows_out[len(rows_out) * 4 // 5:]] or [0.0]
     sat_tail = [r["saturation"] for r in rows_out[len(rows_out) * 4 // 5:]]
     # 平台判据（T4 口径）：**末 3 个采样点**两两相对变化 ≤ 3%
+    # 🔴 R217 §三①：**平台期**死因构成 = 末 20% 采样窗口内的增量（累计量之差）
+    _tw = rows_out[len(rows_out) * 4 // 5:]
+    if len(_tw) < 2:                       # 采样点太少（短跑冒烟）⇒ 退化为全程差
+        _tw = rows_out[:]
+    if len(_tw) >= 2:
+        _d0, _d1 = _tw[0], _tw[-1]
+        _win = {k: int(_d1[k]) - int(_d0[k]) for k in ("d_starv", "d_old", "d_pred")}
+    else:
+        _win = {"d_starv": 0, "d_old": 0, "d_pred": 0}
+    _win_n = sum(_win.values())
+    death_tail = {
+        "n": _win_n,
+        "starvation": _win["d_starv"],
+        "old_age": _win["d_old"],
+        "predation": _win["d_pred"],
+        "share_starvation": round(_win["d_starv"] / _win_n, 4) if _win_n else None,
+        "share_old_age": round(_win["d_old"] / _win_n, 4) if _win_n else None,
+        "share_predation": round(_win["d_pred"] / _win_n, 4) if _win_n else None,
+    }
+    _cum_last = rows_out[-1] if rows_out else {"d_starv": 0, "d_old": 0, "d_pred": 0}
     tail3 = [int(r["pop"]) for r in rows_out[-3:]]
     platform_ok = (len(tail3) == 3 and all(
         abs(tail3[i + 1] - tail3[i]) <= 0.03 * max(tail3[i], 1) for i in range(2)))
     summary = {
-        "patches": patches, "seed": seed, "cells": rows * cols, "k": k,
+        "patches": patches, "seed": seed, "cells": rows * cols, "k": k, "rgm": rgm,
+        "death_cause_tail": death_tail,
+        "deaths_cum_starvation": int(_cum_last["d_starv"]),
+        "deaths_cum_old_age": int(_cum_last["d_old"]),
+        "deaths_cum_predation": int(_cum_last["d_pred"]),
         "productive_cells": n_prod,
         "K_extrapolated": round(K_PER_CELL * n_prod, 1),
         "K_measured": int(np.median(pop_tail)),
@@ -193,11 +229,15 @@ def main() -> None:
                          "撞顶则实测变成配置读数")
     ap.add_argument("--stop-stable", type=int, default=4,
                     help="连续 N 个采样点相对变化 < 3 个百分点即判平台并早停（0=关）")
+    ap.add_argument("--patch-regrowth-mult", dest="rgm", default="1.195",
+                    help="S1 诊断：斑块再生倍率扫描（逗号分隔）。"
+                         "默认 1.195 = T4 现状；建议 1.195,0.8,0.6,0.4（R217 §三②）")
     ap.add_argument("--out", default="results/steady_k_probe.csv")
     a = ap.parse_args()
 
     patch_list = [int(x) for x in a.patches.split(",") if x.strip()]
     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
+    rgm_list = [float(x) for x in str(a.rgm).split(",") if x.strip()]
     gain = a.speed_max if a.gain is None else float(a.gain)     # 定档：gain = v_max
     r_ladder = a.speed_max * a.subdiv
 
@@ -212,12 +252,13 @@ def main() -> None:
 
     all_rows: list[dict] = []
     summaries: list[dict] = []
-    for p in patch_list:
+    for rgm in rgm_list:
+      for p in patch_list:
         for sd in seeds:
-            print(f"--- 斑块 {p} / seed {sd} ---", flush=True)
+            print(f"--- rgm {rgm:g} / 斑块 {p} / seed {sd} ---", flush=True)
             rows_out, s = run_one(sd, a.rows, a.cols, a.pop, p, a.ticks, a.sample,
                                   a.subpos == "on", a.speed_max, gain, a.subdiv,
-                                  a.max_minutes, a.stop_stable, a.k, a.max_count)
+                                  a.max_minutes, a.stop_stable, a.k, a.max_count, rgm)
             all_rows.extend(rows_out)
             summaries.append(s)
             print(f"    ⇒ 产能格 {s['productive_cells']}｜外推 K {s['K_extrapolated']}"
@@ -226,15 +267,20 @@ def main() -> None:
                   f"｜{s['wall_s']}s｜{s['stop']}\n", flush=True)
 
     print("=" * 100)
-    print(f"{'斑块数':>7}{'产能格':>9}{'外推K':>9}{'实测K':>9}{'比值':>8}"
-          f"{'峰值':>8}{'饱和度':>9}{'ms/tick':>9}{'墙钟s':>8}{'代数':>6}{'平台':>5}  终止")
+    print(f"{'rgm':>6}{'斑块数':>7}{'产能格':>9}{'外推K':>9}{'实测K':>9}{'比值':>8}"
+          f"{'峰值':>8}{'饱和度':>9}{'ms/tick':>9}{'墙钟s':>8}{'代数':>6}{'平台':>5}"
+          f"{'饿/老/捕':>14}  终止")
     print("-" * 100)
     for s in summaries:
         ratio = (s["K_measured"] / s["K_extrapolated"]) if s["K_extrapolated"] else float("nan")
-        print(f"{s['patches']:>7}{s['productive_cells']:>9}{s['K_extrapolated']:>9.0f}"
+        _dt = s["death_cause_tail"]
+        _sh = (f"{_dt['share_starvation']:.2f}/{_dt['share_old_age']:.2f}/"
+               f"{_dt['share_predation']:.2f}" if _dt["n"] else "n/a")
+        print(f"{s['rgm']:>6g}{s['patches']:>7}{s['productive_cells']:>9}{s['K_extrapolated']:>9.0f}"
               f"{s['K_measured']:>9}{ratio:>8.2f}{s['pop_max']:>8}"
               f"{s['saturation_tail']:>9}{s['ms_per_tick_tail']:>9.2f}{s['wall_s']:>8.0f}"
-              f"{s['max_gen']:>6.0f}{'是' if s['platform_reached'] else '否':>4}  {s['stop']}")
+              f"{s['max_gen']:>6.0f}{'是' if s['platform_reached'] else '否':>4}"
+              f"{_sh:>14}  {s['stop']}")
 
     out = Path(a.out)
     if a.out and all_rows:
@@ -250,6 +296,7 @@ def main() -> None:
         doc = {
             "switches": {"ticks_target": int(a.ticks), "rows": a.rows, "cols": a.cols,
                          "patches": last["patches"], "k": last["k"], "seeds": seeds,
+                         "patch_regrowth_mult": rgm_list,
                          "subpos": a.subpos, "speed_max": a.speed_max, "gain": a.gain,
                          "subdiv": a.subdiv, "max_count": a.max_count or None},
             "result": {"final_N": int(last["pop_final"]), "final_tick": int(last["ticks_done"]),
@@ -258,6 +305,7 @@ def main() -> None:
                        "K_extrapolated": last["K_extrapolated"],
                        "tail3_pops": last["tail3_pops"], "max_gen": last["max_gen"],
                        "saturation_tail": last["saturation_tail"],
+                       "death_cause_tail": last["death_cause_tail"],
                        "ms_per_tick_tail": last["ms_per_tick_tail"], "stop": last["stop"]},
             "runs": summaries,
         }
