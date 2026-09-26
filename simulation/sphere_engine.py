@@ -436,6 +436,8 @@ class SphereEngine:
          "_ars_sw_ie_n",       # 驻留→赶路 切换次数
          "_ars_sw_ei_n",       # 赶路→驻留 切换次数
          "_ars_rerand_n",      # 失望重选方向次数
+         # ---- P2② 移动决策整块向量化（本线 = [本地开发·性能线] 轻舟）------------
+         "_batch_move_on",     # 快路径开关（默认 True；**对拍/调试可置 False** 走参考循环）
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -899,6 +901,12 @@ class SphereEngine:
         self._ars_sw_ie_n = 0
         self._ars_sw_ei_n = 0
         self._ars_rerand_n = 0
+
+        # ── P2② 移动决策整块向量化（本线 = [本地开发·性能线] 轻舟）──────────
+        # 快路径开关：默认开（vanilla 配置走 `_move_decide_batch`）。
+        # 🔴 **对拍/调试用**：置 False ⇒ 强制走原逐个体参考循环（逐位等价的可比基线）。
+        # 非状态量 ⇒ 不进快照（load 后恒为 True）。
+        self._batch_move_on = True
 
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
@@ -2406,6 +2414,85 @@ class SphereEngine:
                 _row = self._interpret[_jv]
                 self._interpret[_jv] = _row + 0.1 * (_means[_j_seg[_hit]] - _row)
 
+    # ---- P2②：移动决策整块向量化（vanilla 配置专用快路径） ----------------
+
+    def _move_decide_batch(
+        self,
+        mi: NDArray[np.int64],
+        food_ratio: NDArray[np.float64],
+        sig_present: NDArray[np.float64],
+        densities: NDArray[np.float64],
+        rand_choice: NDArray[np.int64],
+        rep_w: float,
+    ) -> NDArray[np.int64]:
+        """向量化移动决策（逐位等价；仅由调用点 `_batch_ok` 门启用）。
+
+        门槛（调用点）保证 span2/asym/noise/softmax/mem_grad/L1/血条恐惧/迁徙/
+        ARS/cap/L2 全关 ⇒ 参考循环退化为「纯打分 + argmax/平局」⇒ 可整块算。
+        逐位等价依据：
+        - 打分各项与逐个体式**同操作数、同运算顺序**（列广播不改变单元素运算）；
+        - 记忆项/解读项按**行条件**取舍：`np.where` 取原值 ⇒ 不做 `+0.0`
+          （否则 `-0.0` 会被加成 `0.0` = 位差）；
+        - `argmax(axis=1)` 与逐行 `np.argmax` 同为「首个最大值」；
+        - 平局判据 `max-min < 1e-9` 与平局取值 `rand_choice % len(nb)` 同式。
+        候选集按**行**分组（与 `world.neighbors()` 的派发同源）：普通行 = `_nb_table`
+        行（8 邻，直接查表）；上/下行 = `_pole_nb` 整行（cols 邻）。
+        RNG 契约：本函数**不消费任何随机数**（vanilla 路径无 `rng.*` 调用）。
+        """
+        genes = self._genes
+        cells = self._flat[mi]
+        cell_rows = cells // self.world.cols
+        is_top = cell_rows == self.world._pole_top
+        is_bot = cell_rows == self.world._pole_bottom
+        targets = np.empty(mi.size, dtype=np.int64)
+        normal = ~(is_top | is_bot)
+        groups: list[tuple[NDArray[np.int64], NDArray[np.int64]]] = []
+        if normal.any():
+            groups.append((np.flatnonzero(normal), self._nb_table[cells[normal]]))
+        for _mask, _prow in ((is_top, 0), (is_bot, 1)):
+            if _mask.any():
+                _g = np.flatnonzero(_mask)
+                groups.append((
+                    _g,
+                    np.broadcast_to(self._pole_nb[_prow],
+                                    (_g.size, self.world.cols)),
+                ))
+        for g, nb in groups:
+            gi = mi[g]
+            perc = genes[gi, Gene.PERCEPTION]
+            soc = (genes[gi, Gene.SOCIABILITY] - 0.5) * 2.0
+            sig_weight = self._trust[gi] * (0.5 + rep_w * self._trust[gi])
+            score = (perc[:, None] * (food_ratio[nb] * 0.5
+                                      + sig_present[nb] * sig_weight[:, None])
+                     + soc[:, None] * densities[nb])
+            wm = self._work_memory[gi]
+            has_mem = (wm >= 0).any(axis=1)
+            if has_mem.any():
+                mem_in_nb = (nb[:, :, None] == wm[:, None, :]).any(axis=2)
+                score = np.where(
+                    has_mem[:, None],
+                    score + (0.3 * perc)[:, None] * mem_in_nb.astype(np.float64),
+                    score,
+                )
+            nb_sigs = self.signals._marks[nb]
+            has_sig = (nb_sigs > 0).any(axis=1)
+            if has_sig.any():
+                interp = np.where(
+                    nb_sigs > 0, self._interpret[gi[:, None], nb_sigs], 0.0)
+                score = np.where(
+                    has_sig[:, None],
+                    score + (0.4 * perc)[:, None] * interp,
+                    score,
+                )
+            k = nb.shape[1]
+            pick = np.where(
+                (score.max(axis=1) - score.min(axis=1)) < 1e-9,
+                rand_choice[g] % k,
+                np.argmax(score, axis=1),
+            )
+            targets[g] = nb[np.arange(g.size), pick]
+        return targets
+
     # ---- 单 tick 种群推进（核心热循环） -----------------------------------
 
     def _step_population(self) -> tuple[int, int, Counter]:
@@ -3085,7 +3172,23 @@ class SphereEngine:
                 # （⇒ 不再是单变量实验）。`none` 下走**原式**，逐位等价。
                 mem_grad_on = (ifcfg3.memory_gradient == "orientation")
                 mem_grad_gain = float(ifcfg3.memory_gradient_gain)
-                for i, idx in enumerate(mi):
+                # 🔴 P2②（[本地开发·性能线]）：vanilla 快路径门 —— 个体级可选机制**全关**
+                #    时参考循环退化为「纯打分 + argmax/平局」⇒ 允许整块向量化（逐位等价，
+                #    见 `_move_decide_batch`）。任一机制开启 ⇒ 一律走参考循环（不做半接线，
+                #    A1 教训）。`_batch_move_on` 是**对拍/调试开关**（默认 True）。
+                _batch_ok = (
+                    self._batch_move_on
+                    and not (_span2_on or d2_asym or d2_noise or d2_softmax
+                             or mem_grad_on or _l1_on or _fearh_on or _cap_on
+                             or _l2_on or self._mig_on or self._ars_on)
+                    and self.world.rows >= 3
+                    and self.world.cols >= 2
+                )
+                if _batch_ok:
+                    targets = self._move_decide_batch(
+                        mi, food_ratio, sig_present, densities, rand_choice, rep_w)
+                # 快路径命中 ⇒ 参考循环迭代集为空（**不重排**下方 280 行参考实现）。
+                for i, idx in enumerate(() if _batch_ok else mi):
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
                     # ⚠️ 禁用 nb[:4]：8 邻列序以 [上左,上,上右,左] 打头，取"前4个"
                     # 实际只保留"北+西" → 个体永不能向南/东移动，种群被单向驱赶至极区、
