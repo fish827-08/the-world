@@ -88,6 +88,8 @@ def main() -> int:
     ap.add_argument("--speed-max", type=float, default=0.125)
     ap.add_argument("--subdiv", type=int, default=80)
     ap.add_argument("--rgm", type=float, default=1.195)
+    ap.add_argument("--n-min", type=int, default=0,
+                    help=">0 时额外报「N≥该值」的配对段（R219 §二-3 要求比值绑 N）")
     args = ap.parse_args()
 
     print(f"== {args.rows}×{args.cols} T4 档 sparse on/off 逐位对拍 ==")
@@ -145,6 +147,10 @@ def main() -> int:
     q = max(n // 4, 1)
     print(f"   [计时] 首1/4 {seg(per[:q])}")
     print(f"   [计时] 末1/4 {seg(per[-q:])}")
+    if args.n_min > 0:                            # R219 §二-3：比值必须与 N 绑定
+        hi = [r for r in per if r[0] >= args.n_min]
+        print(f"   [计时] N≥{args.n_min} 段（{len(hi)} tick）{seg(hi)}" if hi else
+              f"   [计时] N≥{args.n_min} 段：无样本")
     print(f"   [末态] N={len(ea._id)}  tick={ea._tick}")
     return 0
 
