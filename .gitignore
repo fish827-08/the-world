@@ -89,6 +89,8 @@ _reclone_tmp/
 !_rerun_logs/snap/
 !_rerun_logs/snap/*.npz
 !_rerun_logs/snap/*.pkl
+# R221 §四：run meta（续跑用 run 身份 + k）与快照**同行**，跨机分片要一起带走
+!_rerun_logs/snap/*.json
 
 # === R111：写入锁（同机机制，锁文件不入库；说明见 _share/.locks/README.md）===
 _share/.locks/*.lock
