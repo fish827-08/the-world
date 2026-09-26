@@ -45,9 +45,16 @@ _RATE_FIELDS: list[tuple[str, str]] = [
     ("corpse_wound", "wound_heal_rate"),
     ("corpse_wound", "wound_heal_energy_cost"),
     ("pleasure", "alpha"),                # RPE 的每 tick 学习率
+    ("pleasure", "baseline_rate"),        # 🔴 青梧 A2 修正：EWMA 慢漂移速率（引擎 :4602
+                                          #   baseline×(1-r)+valence×r，指数滑移）⇒ ×k，
+                                          #   **不是** 概率 1-(1-p)^k（天平/云归分类表归 PROB 待裁定）
     ("info_structure", "learning_rate"),
     ("info_structure", "alignment_rate"),
 ]
+# ⚠️ `organisms.move_cost`：**每格成本 / PER_EVENT**（引擎 subpos 路径 :3290 按实际步数
+#    比例计费 `move_cost × (st/subdiv)`；整数格路径每移动 1 格扣一次）⇒ 每天移动能耗 =
+#    move_cost × 每天格数，**与 k 无关**。本轮保留在 RATE（×k）仅为 A4 判据口径连续
+#    （云归同判：KNOWN_DIVERGENCE 待裁定）；若将来按物理语义修正 ⇒ 移出本表。
 
 # tick 时长（÷ k；int 字段取整且至少 1）
 _DURATION_FIELDS: list[tuple[str, str]] = [
@@ -75,12 +82,15 @@ _DURATION_FIELDS: list[tuple[str, str]] = [
 #   🔴 这一类是上一版清单**漏掉**的，正是它导致 k=5 时种群 +82% 的系统性漂移。
 _PROB_FIELDS: list[tuple[str, str]] = [
     ("predation", "attack_prob_coef"),
-    ("pleasure", "baseline_rate"),
     ("fruit", "germination_prob"),
     ("fruit", "excretion_prob"),
     ("fruit", "seed_intake_prob"),
-    ("info_structure", "codebook_mutation_rate"),
 ]
+# 🔴 青梧 A2 修正：`info_structure.codebook_mutation_rate` 是**每繁殖事件概率**
+#    （引擎 :3795 每次繁殖逐码位抛硬币）⇒ 时间压缩不改变每事件概率 ⇒ **不变**，
+#    已移出本表。若按 PROB 用 1-(1-p)^k：k=5 时码本突变率 0.02 → 0.096（≈5 倍），
+#    会显著加速文化码本漂移——这是真漏标错误。
+# 🔴 同理 `genome.mutation_rate`（:3709/:3750）也是每繁殖事件概率 ⇒ 不变。
 
 # 每 tick 衰减（^ k）
 _DECAY_FIELDS: list[tuple[str, str]] = [
