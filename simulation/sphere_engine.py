@@ -5106,6 +5106,26 @@ class SphereEngine:
             (engine._diag_food_band_true_sig, engine._mem_inherit_n,
              engine._mem_inherit_far_n, engine._alpha_bad_code_n,
              engine._mem_bit_on, engine._mem_bit_n) = (int(x) for x in _rc)
+        # --- 9. 恢复 RNG 状态 ---
+        rng_state = pickle.loads(data["rng_state"].item())
+        engine.rng.bit_generator.state = rng_state
+
+        # --- 10. 恢复元数据 ---
+        engine._tick = int(data["tick"])
+        engine._next_id = int(data["next_id"])
+        engine._max_generation = int(data["max_generation"])
+        engine._extinct = bool(data["extinct"])
+        engine._finished = bool(data["finished"])
+
+        # --- 10.5 恢复 _id 键控终身账本（R215 §七-1：**必须晚于 §10 的 `_next_id` 赋值**）---
+        # 原顺序（账本在 §10 之前）会让"补齐长度"按**构造期**的 `_next_id`（= initial_count，
+        # `__init__` 建的初始种群）计算 ⇒ 旧快照（无探针键）`need = initial_count − initial_count
+        # = 0` ⇒ 12 个账本长度**停在 initial_count**，而 `_next_id` 已是快照值；续跑首次出生
+        # `self._rs_children[self._id[ri]] += 1` 即越界（IndexError），且 `_rs_observed[alive_ids]`
+        # 同样越界 ⇒ **默认档快照续跑**（14.10 长跑复活流程）不可用。
+        # 修法 = R215 §七-1 的"补齐改到赋值之后"（另一种等价修法是元数据整块前移）。
+        # 🔴 数值语义未变：账本内容仍**只**来自快照（缺键 ⇒ 全零 = 未观测/未发射）；
+        #    变的只是"补齐到哪个长度" ⇒ 无探针档的续跑轨迹逐位不变（见守卫测试）。
         if "rs_children" in data:
             engine._rs_children = data["rs_children"].copy()
             engine._rs_observed = data["rs_observed"].copy()
@@ -5137,19 +5157,8 @@ class SphereEngine:
             engine._gate_on = bool(engine.config.oracle.gate_mode == "delta_positive")
             engine._gate_delta = str(engine.config.oracle.gate_delta)
         else:
-            # 旧快照（无探针数组）：_id 键控账本扩到 _next_id（全零 = 未观测/未发射）
+            # 旧快照（无探针数组）：_id 键控账本扩到 `_next_id`（全零 = 未观测/未发射）
             need = int(engine._next_id) - len(engine._rs_children)
             engine._grow_id_arrays(need)
-
-        # --- 9. 恢复 RNG 状态 ---
-        rng_state = pickle.loads(data["rng_state"].item())
-        engine.rng.bit_generator.state = rng_state
-
-        # --- 10. 恢复元数据 ---
-        engine._tick = int(data["tick"])
-        engine._next_id = int(data["next_id"])
-        engine._max_generation = int(data["max_generation"])
-        engine._extinct = bool(data["extinct"])
-        engine._finished = bool(data["finished"])
 
         return engine

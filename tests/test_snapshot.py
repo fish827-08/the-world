@@ -291,3 +291,105 @@ class TestSnapshotValidation:
             assert size > 1024, f"快照过小: {size} bytes"
         finally:
             os.unlink(path)
+
+
+class TestSnapshotIdLedgerLengths:
+    """R215 §七-1 守卫：恢复后 _id 键控终身账本长度必须 == `_next_id`。
+
+    被守护缺陷（修复前）：`load_snapshot` 把"账本补齐"放在 `_next_id` 赋值**之前** ⇒
+    补齐长度按**构造期**的 `_next_id`（= initial_count，`__init__` 建的初始种群）算：
+
+    * 旧快照 / 默认档（无探针键，`measure_resp` 与 `oracle` 均关）⇒
+      `need = initial_count − initial_count = 0` ⇒ 12 个账本长度**停在 initial_count**，
+      而 `_next_id` 已是快照值 ⇒ 续跑首次由"第二世代"个体繁衍时
+      `self._rs_children[self._id[ri]] += 1` 越界（IndexError）；
+      开启 measure/oracle 时 `self._rs_observed[alive_ids]` 同样越界。
+    * 缺 delta 键的新快照 ⇒ 兜底数组按 stale 长度建，与其余账本不等长。
+
+    ⇒ 直接打的是**默认档的快照续跑**（14.10 长跑复活流程）。
+    修法 = R215 §七-1 的"补齐改到赋值之后"（等价：元数据整块前移）。
+    """
+
+    # 全部 _id 键控账本（`_grow_id_arrays` 的 12 个 + 3 个 delta 兜底）
+    LEDGERS = (
+        "_rs_children", "_rs_observed", "_rs_g15", "_rs_age", "_rs_energy",
+        "_rs_cc0", "_rs_cohort", "_emit_count", "_oracle_gain",
+        "_delta_full_by_id", "_delta_content_by_id", "_delta_tick_by_id",
+    )
+
+    @staticmethod
+    def _rounded(cfg, ticks):
+        e = SphereEngine(cfg)
+        for _ in range(ticks):
+            e.step()
+        return e
+
+    def _save_load(self, e, cfg=None):
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            path = f.name
+        try:
+            e.save_snapshot(path)
+            return SphereEngine.load_snapshot(path, config=cfg)
+        finally:
+            os.unlink(path)
+
+    def test_no_probe_keys_grows_ledgers_to_snapshot_next_id(self):
+        """无探针键（默认档）：补齐长度用**快照** next_id，不是构造期 initial_count。"""
+        cfg = _make_config()
+        e1 = self._rounded(cfg, 5)
+        assert e1._next_id == cfg.population.initial_count
+        # 等价于"已出生 20 个"的合法状态：真实出生路径同序（先 _grow_id_arrays 再 concat id）
+        e1._grow_id_arrays(20)
+        e1._next_id += 20
+
+        e2 = self._save_load(e1, cfg)
+        assert e2._next_id == e1._next_id == cfg.population.initial_count + 20
+        for name in self.LEDGERS:
+            assert len(getattr(e2, name)) == e2._next_id, (
+                f"{name} 长度 {len(getattr(e2, name))} != _next_id {e2._next_id}"
+                "（R215 §七-1：补齐须在 _next_id 赋值之后）")
+
+    def test_real_births_ledgers_match_next_id_after_load(self):
+        """真路径：多世代跑 → 存 → 载 ⇒ 账本长度 == 快照 `_next_id`（守卫本体）。"""
+        cfg = _make_config()
+        cfg.organisms.maturity_fraction = 1e-6   # 一出生即成熟 ⇒ 快速到多世代
+        e1 = self._rounded(cfg, 150)
+        assert e1._next_id > len(e1._id), "前提：须已发生出生（否则本测试退化）"
+
+        e2 = self._save_load(e1, cfg)
+        assert e2._next_id == e1._next_id
+        for name in self.LEDGERS:
+            assert len(getattr(e2, name)) == e2._next_id, (
+                f"{name} 长度 {len(getattr(e2, name))} != _next_id {e2._next_id}"
+                "（R215 §七-1：补齐须在 _next_id 赋值之后）")
+        # 出生路径的索引形态（`self._rs_children[self._id[ri]] += 1`）在恢复后不得越界
+        e2._rs_children[e2._next_id - 1] += 1
+        assert e2._rs_children[e2._next_id - 1] == 1
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "R215-b（修 §七-1 时新发现，待裁）：14.9 ARS 六数组（_out_taken/_feed_fast/"
+        "_feed_slow/_ars_extensive/_heading/_giveup_ct）**未进快照键** ⇒ 恢复后长度停在构造期 "
+        "initial_count，首次死亡压缩即 IndexError（且即便等长也丢 ARS 状态 ⇒ 续跑轨迹不逐位）。"
+        "修法待裁（保存恢复 vs 载入重置）；修好后请删本 xfail。"))
+    def test_all_slot_arrays_have_alive_length_after_load(self):
+        """全量普查：恢复后**所有**按个体数组长度必须 == 存活数（本批新发现的 ARS 族会红）。"""
+        cfg = _make_config()
+        cfg.organisms.maturity_fraction = 1e-6
+        e1 = self._rounded(cfg, 150)
+        P = len(e1._id)
+        assert e1._next_id > P
+
+        e2 = self._save_load(e1, cfg)
+        assert len(e2._id) == P
+        skip = set(self.LEDGERS)          # _id 键控：长度 = _next_id（另一套契约）
+        bad = []
+        for name in sorted(set(SphereEngine.__slots__)):
+            if name in skip or name.startswith("__"):
+                continue
+            v1 = getattr(e1, name, None)
+            if not isinstance(v1, np.ndarray) or v1.ndim < 1 or v1.shape[0] != P:
+                continue                  # 非按个体数组（格域 (n_cells,) 等）不查
+            v2 = getattr(e2, name, None)
+            if not isinstance(v2, np.ndarray) or v2.shape[0] != P:
+                bad.append((name, None if not isinstance(v2, np.ndarray) else v2.shape[0]))
+        assert not bad, f"恢复后按个体数组长度 != 存活数 {P}：{bad}"
