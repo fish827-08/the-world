@@ -22,6 +22,14 @@ cd sim_core
 
 ⚠️ maturin 需要 `rustc` 在 PATH ⇒ Git Bash 下先 `PATH="/c/Users/圣羽/.cargo/bin:$PATH"`。
 
+⚠️ **venv 路径含中文（本机即是：`C:\Users\圣羽\...`）** ⇒ `maturin develop --release` 会在 pip 输出解码处
+以 **GBK 失败**中止 ⇒ 必须前置 `PYTHONIOENCODING=utf-8`：
+
+```
+cd sim_core
+PYTHONIOENCODING=utf-8 ..\.venv\Scripts\python.exe -m maturin develop --release
+```
+
 ## 3. 🔴 只做「编译/类型自检」的绕过配方（**最有用**）
 
 `pyo3-build-config` 的 build script 会 **spawn 一个 Python 子进程**去探测解释器；
