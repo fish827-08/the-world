@@ -10,14 +10,16 @@
 本探针回答三件事
 ----------------
 1. **稳态个体数 K**：在每个斑块密度下跑到种群平台期，报平台期中位数
-2. **食物的利用率**：斑块存量/容量（≈1 ⇒ 吃不完，说明瓶颈是"可达性"不是"产量"）
+2. **资源饱和度**：斑块存量/容量（≈1 ⇒ 食物堆着没人吃 ⇒ 瓶颈是"可达性"不是"产量"）
 3. **性能耦合**：不同 N 下的 ms/tick，用来估"食物变多 ⇒ 生物变多 ⇒ 慢多少"
 
 口径（B4）
 ----------
 * **K** = 最后 20% tick 的种群中位数（先断言尾部斜率已平）
 * **产能格** = `capacity > 0` 的格数（`bg_production_zero=True` ⇒ 只有斑块有产能）
-* **利用率** = `Σ存量 / Σ容量`（全部产能格）
+* **资源饱和度** = `Σ存量 / Σ容量`（全部产能格）
+* 🔴 **1 − 此值 ≠ 被吃掉的比例**（后者见 `food_util_frac`，R190/E-035，实测 ~2%）
+  —— 别把"食物堆着"读成"食物被充分利用"（R211 命名裁定）
 * **外推 K** = 3.67 × 产能格（旧标定，用于对照）
 
 用法
@@ -117,14 +119,14 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             stock = float(eng.resources._grid[prod].sum())
             rows_out.append({
                 "seed": seed, "patches": patches, "k": k, "tick": t, "pop": N,
-                "util": (stock / cap_sum if cap_sum > 0 else float("nan")),
+                "saturation": (stock / cap_sum if cap_sum > 0 else float("nan")),
                 "ms_per_tick": dt_ms,
                 "mean_energy": float(eng._energy[:N].mean()) if N else float("nan"),
                 "mean_gen": float(eng._generation[:N].max()) if N else float("nan"),
             })
             # ETA 只用**实测样本**推（R189：禁瞬时速率外推；此处用刚测完这一段的 ms/tick）
             eta_min = (ticks - t) * dt_ms / 1e3 / 60.0
-            print("  " + _bar(t, ticks, f"t={t:<6} N={N:<7} 利用率={stock / max(cap_sum, 1e-9):.3f}"
+            print("  " + _bar(t, ticks, f"t={t:<6} N={N:<7} 饱和度={stock / max(cap_sum, 1e-9):.3f}"
                                       f" {dt_ms:6.2f} ms/tick  ETA {eta_min:5.1f} min"), flush=True)
             # 早停：连续 stop_stable 个采样点相对变化 < 3% ⇒ 已到平台
             if stop_stable > 0 and len(rows_out) >= stop_stable + 1:
@@ -142,7 +144,7 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
 
     pop_tail = [r["pop"] for r in rows_out[len(rows_out) * 4 // 5:]] or [0]
     ms_tail = [r["ms_per_tick"] for r in rows_out[len(rows_out) * 4 // 5:]] or [0.0]
-    util_tail = [r["util"] for r in rows_out[len(rows_out) * 4 // 5:]]
+    sat_tail = [r["saturation"] for r in rows_out[len(rows_out) * 4 // 5:]]
     # 平台判据（T4 口径）：**末 3 个采样点**两两相对变化 ≤ 3%
     tail3 = [int(r["pop"]) for r in rows_out[-3:]]
     platform_ok = (len(tail3) == 3 and all(
@@ -156,7 +158,7 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
         "pop_final": pop_tail[-1],
         "tail3_pops": tail3,
         "platform_reached": bool(platform_ok),
-        "util_tail": round(float(np.median(util_tail)), 4) if util_tail else None,
+        "saturation_tail": round(float(np.median(sat_tail)), 4) if sat_tail else None,
         "ms_per_tick_tail": round(float(np.median(ms_tail)), 2),
         "max_gen": max((r["mean_gen"] for r in rows_out if r["mean_gen"] == r["mean_gen"]),
                        default=0),
@@ -211,18 +213,18 @@ def main() -> None:
             summaries.append(s)
             print(f"    ⇒ 产能格 {s['productive_cells']}｜外推 K {s['K_extrapolated']}"
                   f"｜**实测 K {s['K_measured']}**（峰值 {s['pop_max']}）"
-                  f"｜利用率 {s['util_tail']}｜{s['ms_per_tick_tail']} ms/tick"
+                  f"｜饱和度 {s['saturation_tail']}｜{s['ms_per_tick_tail']} ms/tick"
                   f"｜{s['wall_s']}s｜{s['stop']}\n", flush=True)
 
     print("=" * 100)
     print(f"{'斑块数':>7}{'产能格':>9}{'外推K':>9}{'实测K':>9}{'比值':>8}"
-          f"{'峰值':>8}{'利用率':>9}{'ms/tick':>9}{'墙钟s':>8}{'代数':>6}{'平台':>5}  终止")
+          f"{'峰值':>8}{'饱和度':>9}{'ms/tick':>9}{'墙钟s':>8}{'代数':>6}{'平台':>5}  终止")
     print("-" * 100)
     for s in summaries:
         ratio = (s["K_measured"] / s["K_extrapolated"]) if s["K_extrapolated"] else float("nan")
         print(f"{s['patches']:>7}{s['productive_cells']:>9}{s['K_extrapolated']:>9.0f}"
               f"{s['K_measured']:>9}{ratio:>8.2f}{s['pop_max']:>8}"
-              f"{s['util_tail']:>9}{s['ms_per_tick_tail']:>9.2f}{s['wall_s']:>8.0f}"
+              f"{s['saturation_tail']:>9}{s['ms_per_tick_tail']:>9.2f}{s['wall_s']:>8.0f}"
               f"{s['max_gen']:>6.0f}{'是' if s['platform_reached'] else '否':>4}  {s['stop']}")
 
     out = Path(a.out)
@@ -246,7 +248,7 @@ def main() -> None:
                        "K_measured": last["K_measured"],
                        "K_extrapolated": last["K_extrapolated"],
                        "tail3_pops": last["tail3_pops"], "max_gen": last["max_gen"],
-                       "util_tail": last["util_tail"],
+                       "saturation_tail": last["saturation_tail"],
                        "ms_per_tick_tail": last["ms_per_tick_tail"], "stop": last["stop"]},
             "runs": summaries,
         }
@@ -257,7 +259,8 @@ def main() -> None:
 
     print("\n读法：")
     print("  · **实测 K / 外推 K < 1** ⇒ 评审说得对，线性外推高估了（世界放大后食物找不到）")
-    print("  · **利用率接近 1** ⇒ 瓶颈是「可达性」不是「产量」⇒ 加食物不涨种群")
+    print("  · **资源饱和度接近 1** ⇒ 瓶颈是「可达性」不是「产量」⇒ 加食物不涨种群"
+          "（注意：饱和度 ≠ 被吃掉的比例）")
     print("  · ms/tick 随 N 增长（次线性）⇒ 这一列是「生物变多会不会影响性能」的答案")
 
 
