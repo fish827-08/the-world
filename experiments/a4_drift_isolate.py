@@ -43,10 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from simulation.config import SimConfig                      # noqa: E402
 from simulation.sphere_engine import SphereEngine            # noqa: E402
 from experiments.scaling_rescale import (                    # noqa: E402
-    apply_post_build, gain_for, rescale_config, subdiv_for,
+    apply_post_build, apply_speed_std, rescale_config,
 )
-
-A_AGE = 0.60  # 年龄因子均值（experiments/tick_scaling_audit.py 实测）
 
 
 def run(D: int, days: int, disable: tuple[str, ...] = (),
@@ -68,9 +66,7 @@ def run(D: int, days: int, disable: tuple[str, ...] = (),
         v_max = speed
     c.simulation.use_sim_core = False
     c.subpos.enabled = True
-    c.subpos.speed_max = v_max
-    c.subpos.speed_gain = gain_for(v_max, A_AGE)
-    c.subpos.subdiv = subdiv_for(v_max, 40)
+    apply_speed_std(c.subpos, v_max)                 # gain=v_max、subdiv=40（R204/R205）
     c.subpos.min_energy_frac = 0.0
     if "pleasure" in disable:
         c.pleasure.enabled = False

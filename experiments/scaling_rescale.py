@@ -21,14 +21,24 @@
 ⚠️ `signals.duration` 原为**引擎内硬编码**（`SignalField(..., duration=50)`）——已由 P0.0 A1
    搬进 `SimConfig.signals.duration_ticks`，本模块的 `apply_post_build` 仍保留兼容设置。
 
+定档（14.10；R204 §二 + R205 fish 2026-09-26 裁定）
+------------------------------------------------
+* **`k = 2.5`**（一昼夜 = 2400/2.5 = **960 tick**）⇒ `rescale_config(cfg)` **不传 k 即用 `DEFAULT_K`**。
+* **速度定档**：`gain = v_max`（`mob_eff = g18×af ≤ 1` ⇒ `speed ≤ v_max = cap` ⇒ clip 永不触发、
+  **顶格% ≡ 0 是构造保证**）+ `subdiv = 40` ⇒ 用 `apply_speed_std(subpos, v_max)` 一次写齐。
+  🔴 注意两条定档在此**通过 `R = v_max × subdiv` 耦合**：`subdiv` 固定 40 时，`R` 随 `v_max` 变
+  ——`R < 5` ⇒ 档数不足（量化悬崖，设计稿 §12.1）⇒ `apply_speed_std` **返回 R** 供调用方报警。
+* 验收辅助：`cap_kp_report(k)` —— 报「每 tick 概率」**6 字段**的 `k·p`（T2 验收②；`k·p > 0.5` 标饱和）。
+
 用法
 ----
-    from experiments.scaling_rescale import rescale_config
+    from experiments.scaling_rescale import apply_speed_std, rescale_config
     c = SimConfig()
-    notes = rescale_config(c, k=5)          # 原地改；返回需要构造后手动处理的项
+    notes = rescale_config(c)               # 不传 k ⇒ 定档 k=2.5；原地改；返回构造后需手动处理的项
+    if subpos_on:
+        r = apply_speed_std(c.subpos, v_max)   # gain = v_max、subdiv = 40；r = v_max×40
     eng = SphereEngine(c)
-    for name, val in notes.items():
-        setattr( 目标, name, val )           # 见 apply_post_build
+    apply_post_build(eng, notes)
 """
 from __future__ import annotations
 
@@ -145,26 +155,110 @@ _DECAY_FIELDS: list[tuple[str, str]] = [
 ]
 
 
-def rescale_config(cfg: Any, k: float) -> dict[str, Any]:
+# ══════════════════════════════════════════════════════════════════════════
+# 14.10 定档常量（R204 §二 + R205，fish 2026-09-26）
+# ══════════════════════════════════════════════════════════════════════════
+DEFAULT_K: float = 2.5                          # 一昼夜 = 2400/2.5 = 960 tick（fish 定档）
+DEFAULT_D: int = int(round(2400 / DEFAULT_K))   # 960（昼夜 tick 数）
+SUBDIV_STD: int = 40                            # 速度档位细分（R204 §二；与 `gain = v_max` 配套）
+
+# 🔴 「每 tick 概率」六字段 —— T2 验收② 要求报它们在我们 k 下的 `k·p`。
+#    清单源 = 设计稿 §13.3 / `tools/tick_denomination_audit.py`（两处须一致）；
+#    换算规则不在此表重复，由 `_prob_rules()` 从上面 `_RATE_PROB_FIELDS`/`_PROB_FIELDS` 派生（单一真源）。
+CAP_FIELDS: list[tuple[str, str]] = [
+    ("predation", "attack_prob_coef"),
+    ("pleasure", "baseline_rate"),
+    ("info_structure", "codebook_mutation_rate"),
+    ("fruit", "germination_prob"),
+    ("fruit", "excretion_prob"),
+    ("fruit", "seed_intake_prob"),
+]
+
+
+def _prob_rules() -> dict[str, str]:
+    """字段名 → 换算规则（`CAP`/`PROB`；未列出的按「每事件 ⇒ 不变」处理）。"""
+    rules = {f"{g}.{n}": "CAP" for g, n in _RATE_PROB_FIELDS}
+    rules.update({f"{g}.{n}": "PROB" for g, n in _PROB_FIELDS})
+    return rules
+
+
+def cap_kp_report(cfg: Any = None, k: float | None = None) -> list[dict[str, Any]]:
+    """T2 验收②：报「每 tick 概率」六字段在 k 下的 `k·p`（纯算术，不构造世界）。
+
+    判定口径：`CAP` 类要求 **`k·p ≤ 0.5`**（否则 p'→1 ⇒ 出手退化成准确定性过程、方差被压掉 ⇒ 报饱和）；
+    `PROB` 类用精确式 `1−(1−p)^k`，`k·p` 只作诊断量（无 0.5 硬线）；
+    其余按「每繁殖事件」⇒ 不变（时间压缩不改每事件概率），`k·p` 同样只作诊断。
+    """
+    if cfg is None:
+        from simulation.config import SimConfig
+        cfg = SimConfig()
+    if k is None:
+        k = DEFAULT_K
+    rules = _prob_rules()
+    rows: list[dict[str, Any]] = []
+    for grp, name in CAP_FIELDS:
+        p = float(getattr(getattr(cfg, grp), name))
+        rule = rules.get(f"{grp}.{name}", "PER_EVENT(不变)")
+        if rule == "CAP":
+            p_new = min(1.0, k * p)
+        elif rule == "PROB":
+            p_new = 1.0 - (1.0 - p) ** k
+        else:
+            p_new = p
+        kp = k * p
+        rows.append({"field": f"{grp}.{name}", "rule": rule, "p": p, "k": float(k),
+                     "kp": round(kp, 6), "p_new": round(p_new, 6),
+                     "over_half": bool(kp > 0.5),
+                     "sat": bool(rule == "CAP" and kp > 0.5)})
+    return rows
+
+
+def apply_speed_std(subpos: Any, v_max: float) -> float:
+    """把「速度定档」（R204 §二 / R205）一次写进 `subpos` 配置；返回 `R = v_max × subdiv`。
+
+    · `speed_max = v_max`（锚点口径：`v_max = cols / (8·D)`，见 `ancher_consistent_speed`）
+    · `speed_gain = v_max` ⇒ `speed = clip(mob_eff × gain, 0, cap) = mob_eff × v_max ≤ v_max`
+      ⇒ **clip 永不触发 ⇒ 顶格% ≡ 0 是构造保证**（与 g18 如何演化无关）
+    · `subdiv = SUBDIV_STD (40)` ⇒ `R` 随 `v_max` 变：**`R < 5` 时档数不足**（设计稿 §12.1）
+      ⇒ 返回值供调用方打印/报警（本函数不静默）。
+    """
+    subpos.speed_max = float(v_max)
+    subpos.speed_gain = float(v_max)
+    subpos.subdiv = int(SUBDIV_STD)
+    return float(v_max) * int(SUBDIV_STD)
+
+
+def ladder_warn(r: float) -> str | None:
+    """`R < 5` ⇒ 返回告警串（否则 `None`）。口径：设计稿 §12.1「保 ≥5 档」。"""
+    if r >= 5:
+        return None
+    return (f"⚠️ R = v_max×subdiv = {r:g} < 5 ⇒ 速度档数不足（量化悬崖，设计稿 §12.1）："
+            f"需增大 v_max（世界/昼夜）或改 subdiv（现定档 40，改动须回板）")
+
+
+def rescale_config(cfg: Any, k: float | None = None) -> dict[str, Any]:
     """把 `cfg` 原地重标定为「时间压缩 k 倍」。返回需要构造后手动设置的项。
 
     参数
     ----
     cfg : SimConfig
         会被原地修改。
-    k : float
-        时间压缩倍率（`k = 2400 / 新 D`）。`k = 1` ⇒ 不改。
+    k : float | None
+        时间压缩倍率（`k = 2400 / 新 D`）。**`None`（默认）⇒ 用定档 `DEFAULT_K = 2.5`**（R205）；
+        `k = 1` ⇒ 不改（= 配置默认值）。
 
     返回
     ----
-    dict : `{"signals_duration": <int>}` —— 信号寿命目前不在 config 上，
-           引擎构造后请 `eng.signals.duration = 那个值`。
+    dict : `{"signals_duration": <int>, "saturation_warnings": [...], "k": <float>}` ——
+           信号寿命现值（引擎构造后请 `apply_post_build(eng, notes)`）。
     """
+    if k is None:
+        k = DEFAULT_K
     if k <= 0:
         raise ValueError(f"k 必须 > 0，收到 {k!r}")
     if abs(k - 1.0) < 1e-12:
         return {"signals_duration": int(cfg.signals.duration_ticks),
-                "saturation_warnings": []}      # k=1 ⇒ 不改（= 配置默认值）
+                "saturation_warnings": [], "k": 1.0}      # k=1 ⇒ 不改（= 配置默认值）
 
     for grp, name in _RATE_FIELDS:
         sub = getattr(cfg, grp)
@@ -218,7 +312,7 @@ def rescale_config(cfg: Any, k: float) -> dict[str, Any]:
             print("   ·", line, file=sys.stderr)
 
     return {"signals_duration": int(cfg.signals.duration_ticks),
-            "saturation_warnings": _sat}
+            "saturation_warnings": _sat, "k": float(k)}
 
 
 def apply_post_build(eng: Any, notes: dict[str, Any]) -> None:
@@ -232,11 +326,8 @@ def ancher_consistent_speed(cols: int, D: int, lifespan_mult: float = 1.0) -> fl
     return cols / (8.0 * D * lifespan_mult)
 
 
-def gain_for(speed_max: float, age_factor_mean: float) -> float:
-    """评审 §3.1 的 gain 标定：`gain = v_max / ā`（消除顶格）。"""
-    return speed_max / max(age_factor_mean, 1e-9)
-
-
-def subdiv_for(speed_max: float, r_target: float = 20.0) -> int:
-    """评审 §3.2：档位数 R = v_max × subdiv，推荐 R ≥ 20（理想 40）。"""
-    return max(1, int(round(r_target / max(speed_max, 1e-9))))
+# 🔴 已删除（2026-09-26，[云端开发·云启] T3）：
+#   · `gain_for(speed_max, ā)`  —— R204 §二 **否决**（ā 会漂、跨 seed 差 2.18×）
+#   · `subdiv_for(speed_max, r)` —— R205 定 `subdiv = 40` 固定，不再按 v_max 反解
+#   替代件：`apply_speed_std(subpos, v_max)`（`gain = v_max` + `subdiv = 40`，返回 R）。
+#   ⚠️ 合并提示：`work-p0.0-scale`（C 阶段）仍引用旧名 ⇒ 合并时按本行统一。

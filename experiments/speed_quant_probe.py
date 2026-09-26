@@ -35,6 +35,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
+# （T3 追加打印「实际/理论」行含 `⇒` ⇒ 必须补上本兜底，否则 test_r98 变红）
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 from simulation.config import SimConfig                      # noqa: E402
 from simulation.genes import Gene                            # noqa: E402
 from simulation.sphere_engine import SphereEngine            # noqa: E402
@@ -118,6 +126,9 @@ def main() -> None:
         (0.25, 0.25, 20, "再提 subdiv 到 20（量子 0.05）"),
         (0.5, 0.5, 20, "速度 0.5 / subdiv 20（世界×0.5 的对照）"),
         (1.0, 1.0, 20, "速度 1.0 / subdiv 20"),
+        # 🔴 R204 §二 / R205 定档行（[云端开发·云启] T3 追加；gain = v_max、subdiv = 40 固定）
+        (0.25, 0.25, 40, "★定档 gain=v_max、subdiv=40（v_max=0.25 ⇒ R=10）"),
+        (0.125, 0.125, 40, "★定档@480×960/k=2.5（锚点 v_max=0.125 ⇒ R=5）"),
     ]
 
     print(f"== 速度量化探针：{a.ticks} tick × {len(seeds)} seed ==")
@@ -142,9 +153,20 @@ def main() -> None:
         tbl = speed_table(smax, gain, subdiv,
                           np.linspace(_GENE_MIN, _GENE_MAX, 2001))   # 全量程解析
         zero_frac = float(hist[0]) if len(hist) else float("nan")
+        idx = np.arange(len(hist))
+        mean_steps = float(np.sum(hist * idx))            # 平均档位（每 tick 实际步数）
+        speed_actual = mean_steps / subdiv                # 实际平均速度（赤道口径，格/tick）
+        ratio = (speed_actual / smax) if smax > 0 else float("nan")
+        reach_max_step = int(round(smax * subdiv))
+        occ = np.flatnonzero(hist > 0.005)
+        max_used = int(occ.max()) if occ.size else 0
         print(f"{note:<44}{reach:>7}{used:>7}{1.0/subdiv:>7.3f}"
               f"{tbl['speed_mean']:>9.3f}{tbl['at_cap_frac']:>9.3f}"
               f"{g18m:>9.3f}{zero_frac:>9.3f}")
+        # 🔴 fish 裁定 2 的衍生必办项：报「实际速度 / 理论最快」比值（进食停顿 ⇒ 系统性偏低，预期内）
+        print(f"    实际/理论：mean steps={mean_steps:.2f} ⇒ 实际速度 {speed_actual:.4f}"
+              f" / v_max {smax:g} = **{ratio:.3f}**｜实测最高档 {max_used}"
+              f"（可达上限 {reach_max_step}）")
         print(f"    档位占比：" + "  ".join(
             f"{i}:{v:.3f}" for i, v in enumerate(hist) if v > 0.001))
         if rows[0]["g18_min"] is not None:
