@@ -3835,7 +3835,13 @@ class SphereEngine:
                     mut_mask, gene_noise, exp_noise, interp_noise,
                     child_genes, child_energy, child_stomach,
                     child_exp, child_interp, child_trust, child_baseline,
-                    gcfg.gene_min, gcfg.gene_max, pcfg.max_reward, 60.0,
+                    gcfg.gene_min, gcfg.gene_max, pcfg.max_reward,
+                    # 🔴 T2 发现并修（[云端开发·云启] 2026-09-26）：此处原为**硬编码 60.0**
+                    #    ⇒ A1 只接了 Python 参考路径（:3796 读配置），**Rust 路径仍用 60**
+                    #    ⇒ `k≠1`（`repro_cooldown_gene_scale = 60/k`）时双路径在**第一次生育**就分岔
+                    #    （实测：k=2.5 双路径对拍 `born 0 != 1`）。默认档 60.0 == 配置默认 ⇒
+                    #    旧行为**逐位等价**（C7 不动）。
+                    self.config.organisms.repro_cooldown_gene_scale,
                 )
             else:
                 # ---- Python 参考路径 ----

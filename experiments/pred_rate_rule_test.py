@@ -56,10 +56,9 @@ except Exception:
 from simulation.config import SimConfig                              # noqa: E402
 from simulation.sphere_engine import SphereEngine                    # noqa: E402
 from experiments.scaling_rescale import (                            # noqa: E402
-    apply_post_build, gain_for, rescale_config, subdiv_for,
+    apply_post_build, apply_speed_std, rescale_config,
 )
 
-A_AGE = 0.60          # 年龄因子均值（experiments/tick_scaling_audit.py 实测）
 D0 = 2400             # 基准每昼夜 tick 数
 
 
@@ -94,9 +93,7 @@ def run_series(D: int, days: int, pop: int, seed: int, travel_per_day: float,
     v_max = travel_per_day / D
     c.simulation.use_sim_core = False
     c.subpos.enabled = True
-    c.subpos.speed_max = v_max
-    c.subpos.speed_gain = gain_for(v_max, A_AGE)
-    c.subpos.subdiv = subdiv_for(v_max, 40)
+    apply_speed_std(c.subpos, v_max)                 # gain=v_max、subdiv=80（R213 §四）
     c.subpos.min_energy_frac = 0.0
 
     eng = SphereEngine(c)

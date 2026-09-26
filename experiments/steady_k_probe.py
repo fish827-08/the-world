@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from simulation.config import SimConfig                      # noqa: E402
 from simulation.sphere_engine import SphereEngine            # noqa: E402
 from experiments.scaling_rescale import (                    # noqa: E402
-    apply_post_build, rescale_config,
+    SUBDIV_STD, apply_post_build, rescale_config,
 )
 
 # --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败；F-R15 族）---
@@ -180,8 +180,11 @@ def main() -> None:
     ap.add_argument("--seeds", default="42")
     ap.add_argument("--subpos", choices=("off", "on"), default="off")
     ap.add_argument("--speed-max", type=float, default=0.25)
-    ap.add_argument("--gain", type=float, default=0.25)
-    ap.add_argument("--subdiv", type=int, default=20)
+    ap.add_argument("--gain", type=float, default=None,
+                    help="速度增益；**默认 None ⇒ = speed_max**（R204 §二 / R205 定档 `gain = v_max`，"
+                         "构造保证顶格%% ≡ 0）")
+    ap.add_argument("--subdiv", type=int, default=SUBDIV_STD,
+                    help=f"速度档位细分（定档 {SUBDIV_STD}，R213 §四；改动须回板）")
     ap.add_argument("--max-minutes", type=float, default=25.0)
     ap.add_argument("--k", type=float, default=1.0,
                     help="时间压缩倍率（R205 定档 k=2.5 ⇒ 昼夜 960）；k=1 逐位不变")
@@ -195,10 +198,16 @@ def main() -> None:
 
     patch_list = [int(x) for x in a.patches.split(",") if x.strip()]
     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
+    gain = a.speed_max if a.gain is None else float(a.gain)     # 定档：gain = v_max
+    r_ladder = a.speed_max * a.subdiv
 
     print(f"== 稳态 K 探针：{a.rows}x{a.cols}（{a.rows * a.cols:,} 格）"
           f"，斑块 {patch_list}，初始 {a.pop}，{a.ticks} tick，"
           f"subpos={a.subpos}，k={a.k:g}，max_count={a.max_count or '默认'}，seed {seeds} ==")
+    print(f"   速度：v_max={a.speed_max} gain={gain} subdiv={a.subdiv}"
+          f"（R = v_max×subdiv = {r_ladder:g}）")
+    if a.subpos == "on" and r_ladder < 5:
+        print(f"   ⚠️ R = {r_ladder:g} < 5 ⇒ 档数不足（量化悬崖，设计稿 §12.1）", file=sys.stderr)
     print(f"   旧标定外推公式：K ≈ {K_PER_CELL:.2f} × 产能格\n")
 
     all_rows: list[dict] = []
@@ -207,7 +216,7 @@ def main() -> None:
         for sd in seeds:
             print(f"--- 斑块 {p} / seed {sd} ---", flush=True)
             rows_out, s = run_one(sd, a.rows, a.cols, a.pop, p, a.ticks, a.sample,
-                                  a.subpos == "on", a.speed_max, a.gain, a.subdiv,
+                                  a.subpos == "on", a.speed_max, gain, a.subdiv,
                                   a.max_minutes, a.stop_stable, a.k, a.max_count)
             all_rows.extend(rows_out)
             summaries.append(s)

@@ -41,7 +41,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.scaling_rescale import (                    # noqa: E402
-    apply_post_build, gain_for, rescale_config, subdiv_for,
+    apply_post_build, apply_speed_std, rescale_config,
 )
 from simulation.config import SimConfig                      # noqa: E402
 from simulation.genes import Gene                            # noqa: E402
@@ -55,8 +55,6 @@ except Exception:
     pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
 
 D_BASE = 2400.0        # 基准昼夜 tick 数（k=1）
-A_AGE = 0.60           # 年龄因子均值（tick_scaling_audit 实测）
-R_TARGET = 40.0        # 档位数目标
 EC_META = 3            # 归因通道下标（`simulation/sphere_engine.py:187`）
 TOL_REL = 0.01         # 判据：每项相对差 < 1%（任务书 §三 A3）
 
@@ -81,9 +79,7 @@ def _mk(k: float, *, pop: int = 0, patches: int = 0,
         c.simulation.use_sim_core = False
         v_max = travel_per_day / D if travel_per_day > 0 else cols / (8.0 * D)
         c.subpos.enabled = True
-        c.subpos.speed_max = v_max
-        c.subpos.speed_gain = gain_for(v_max, A_AGE)
-        c.subpos.subdiv = subdiv_for(v_max, R_TARGET)
+        apply_speed_std(c.subpos, v_max)                 # gain=v_max、subdiv=80（R213 §四）
         c.subpos.min_energy_frac = 0.0
     eng = SphereEngine(c)
     apply_post_build(eng, notes)
