@@ -1,0 +1,15 @@
+# SNAP-SHARD 证据清单 —— sha256sum 格式（生成于 2026-09-26 18:27:05）
+84bd593082b30ccaef5347322bfc86409d191b3a26b10f38063f0e732b9b9eea         6,683  _rerun_logs/snap_shard_smoke/acc_resume_vs_continuous.txt
+d76558b43719da765bc1a4a8294b9a984521372ed7ae3d010a62722140befd40         1,485  _rerun_logs/snap_shard_smoke/acc_shard.txt
+4bd5459990623747be60c4af742a56e9f0840ffceaa1d60a06403fae9d9a2467         2,682  _rerun_logs/snap_shard_smoke/commit_msg_snap_shard.txt
+8fbdf7c8d1587f5005fb252e0f6be35c497ed94d43e4666534fe622d703be219            98  _rerun_logs/snap_shard_smoke/del8_M1_resume_start_green.txt
+d1e03270a97837880467c5053eb084af383e3242251c363053daed83a5c43b24         1,758  _rerun_logs/snap_shard_smoke/del8_M1_resume_start_red.txt
+cb5c856ae9ccf79fc9ee9af7981f6bcf58703d0fbf8c25e2ff55c73e9f455be7         1,500  _rerun_logs/snap_shard_smoke/del8_M2_merge_rule_green.txt
+6943761e5babfecd9444b6c39874b748a2561770091ebc238a46babefd7f24bb         1,500  _rerun_logs/snap_shard_smoke/del8_M2_merge_rule_red.txt
+05bcb39ea3146a5638295f3ac24714a3bccdf9e0862586e99d13175b770f30da            98  _rerun_logs/snap_shard_smoke/del8_M2_sample_guard_green.txt
+3f72c22b844fb76815bb4aa91fb061a83a8e86ab9969508ff4eb69c277951f5b         1,576  _rerun_logs/snap_shard_smoke/del8_M2_sample_guard_red.txt
+fe8935a2087aa615bcc3894f5359aa64153f0193d5fc925c05b64b772ac6986b            98  _rerun_logs/snap_shard_smoke/del8_M3_shard_mod_green.txt
+449f13c4199cea611164ef2c27e15fff345603e3353020882e6c469e4c905512         1,808  _rerun_logs/snap_shard_smoke/del8_M3_shard_mod_red.txt
+573eabb962f7f828494d90bfcec90a5c7ef6b92136f272a80a6a8d3dd4d03017         1,163  _rerun_logs/snap_shard_smoke/pytest_full.txt
+aea5b131f2fb96545b6e881912ef7a4ee56f8c4b071535e6d8dd8e7f27064cae         1,695  _rerun_logs/snap_shard_smoke/self_audit_digest.txt
+e3fcd24147e9defe930b697347581dbd23b71c30d5c00e1982a84fd34c8231ba         8,999  tests/test_221_snap_shard.py
