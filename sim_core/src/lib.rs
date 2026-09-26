@@ -106,7 +106,19 @@ fn validate_gene_wiring(
         // 名字比对：Python 侧传 "MOVE_PROB"，Rust 侧是 "G_MOVE_PROB"，去掉 G_ 前缀
         let r_name_stripped = r_name.strip_prefix("G_").unwrap_or(r_name);
         if r_name_stripped != p_name.as_str() || r_val != p_val {
-            drift.push((p_name.clone(), r_val, p_val));
+            // 🔴 必须区分「名字不一致」与「取值不一致」：
+            //    实测事故（2026-09-26 云归）—— `sim_core` 编译产物早于 cb00da9
+            //    （该提交把 20/21 号位从 G_HEDONISM/G_PROCESSING 改名为
+            //    G_PERSISTENCE/G_GIVE_UP，**取值不变**）⇒ 陈旧 .so 报出
+            //    ("PERSISTENCE", 20, 20) 这种"值相同却判漂移"的条目，
+            //    光看元组**无法归因**，白花一轮排查。
+            //    ⇒ 名字不一致时把 Rust 侧名字写进标签，一眼可辨（= 该重编 .so）。
+            let kind = if r_name_stripped != p_name.as_str() {
+                format!("NAME_MISMATCH(rust={})=>REBUILD_SIM_CORE", r_name_stripped)
+            } else {
+                "VALUE_MISMATCH".to_string()
+            };
+            drift.push((format!("{}|{}", p_name, kind), r_val, p_val));
         }
     }
     drift
