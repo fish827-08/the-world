@@ -1,0 +1,99 @@
+{
+  "per_seed": {},
+  "criteria": {
+    "criterion_1_K_drop": {
+      "line": "K 下降 ≤ 30%",
+      "per_seed": [
+        {
+          "seed": "42",
+          "K_on": 2786.0,
+          "K_off": 5648.0,
+          "drop_vs_off": 0.5067280453257791,
+          "pass_le_30pct": false
+        },
+        {
+          "seed": "43",
+          "K_on": 2850.0,
+          "K_off": 5651.0,
+          "drop_vs_off": 0.4956644841620952,
+          "pass_le_30pct": false
+        },
+        {
+          "seed": "44",
+          "K_on": 2994.0,
+          "K_off": 5159.0,
+          "drop_vs_off": 0.4196549718937779,
+          "pass_le_30pct": false
+        }
+      ],
+      "verdict_all_pass": false,
+      "mean_drop_vs_off": 0.47401583379388407
+    },
+    "criterion_2_patch_var": {
+      "line": "on 臂斑块方差 显著 > off 臂",
+      "per_seed": [
+        {
+          "seed": "42",
+          "off_var_tail": 0.14849232446990568,
+          "on_var_tail": 0.13515168576095643,
+          "on_gt_off": false,
+          "ratio": 0.91
+        },
+        {
+          "seed": "43",
+          "off_var_tail": 0.13742853926414897,
+          "on_var_tail": 0.1339901984757188,
+          "on_gt_off": false,
+          "ratio": 0.975
+        },
+        {
+          "seed": "44",
+          "off_var_tail": 0.13929638593852395,
+          "on_var_tail": 0.1405451808829125,
+          "on_gt_off": true,
+          "ratio": 1.009
+        }
+      ],
+      "n_seed": 3,
+      "n_seed_on_gt_off": 1,
+      "verdict_majority_pass": false,
+      "verdict_all_pass": false,
+      "mean_off_var": 0.14173908322419287,
+      "mean_on_var": 0.13656235503986258
+    },
+    "criterion_3_starvation": {
+      "line": "饿死占比上升（S1 基线 0.22–0.3）",
+      "per_seed": [
+        {
+          "seed": "42",
+          "off_starv_frac": 0.316808090638427,
+          "on_starv_frac": 0.37224269544617006,
+          "rise": true,
+          "in_s1_band_off": false,
+          "in_s1_band_on": false
+        },
+        {
+          "seed": "43",
+          "off_starv_frac": 0.2937829299127228,
+          "on_starv_frac": 0.3345588390123519,
+          "rise": true,
+          "in_s1_band_off": true,
+          "in_s1_band_on": false
+        },
+        {
+          "seed": "44",
+          "off_starv_frac": 0.3285980206962259,
+          "on_starv_frac": 0.38109109446260003,
+          "rise": true,
+          "in_s1_band_off": false,
+          "in_s1_band_on": false
+        }
+      ],
+      "verdict_all_rise": true
+    }
+  },
+  "sanity_cap_lost": {
+    "max_cap_lost_frac": 0.0,
+    "note": "修复后生产格零损失 ⇒ 应 ≈ 0；非 0 说明 rd 又在丢格"
+  }
+}
