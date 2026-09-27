@@ -14,7 +14,10 @@ import json
 import statistics as st
 
 # R225 §三 预注册线
-K_BASELINE_S1 = 915.0          # S1 1.195 档 K 基线（判据① 参照）
+# 判据① 参照：**同批 off 臂**（配对，最干净）。S1 绝对基线随 patches/ticks 而变
+#   （锚定 K=673 @ patches=120/20k t；对齐检查 K=763 @ patches=480/6k t），
+#   ⇒ 不用硬编码常数，改由本批 off 臂实测给出；此处仅留作 cross-check 参考。
+K_BASELINE_S1_REF = None       # 见 s2_align_check / s2_anchor 记录（非固定值）
 CRITERION1_DROP_LINE = 0.30    # K 下降 ≤ 30% 为「代价可接受」
 STARV_BASE_LO, STARV_BASE_HI = 0.22, 0.30   # S1 饿死占比基线带（判据③ 参照）
 
@@ -64,9 +67,8 @@ def main():
         k_on = _f(on[-1], "pop")
         k_off = _f(off[-1], "pop")
         drop_vs_off = (k_off - k_on) / k_off if k_off else None
-        drop_vs_s1 = (K_BASELINE_S1 - k_on) / K_BASELINE_S1 if k_on is not None else None
         c1.append({"seed": sd, "K_on": k_on, "K_off": k_off,
-                   "drop_vs_off": drop_vs_off, "drop_vs_s1_baseline": drop_vs_s1,
+                   "drop_vs_off": drop_vs_off,
                    "pass_le_30pct": (drop_vs_off is not None and drop_vs_off <= CRITERION1_DROP_LINE)})
     res["criteria"]["criterion_1_K_drop"] = {
         "line": f"K 下降 ≤ {int(CRITERION1_DROP_LINE*100)}%",
