@@ -809,9 +809,15 @@ class FruitConfig:
     fruit_ratio: float = 0.8           # 释放到果实场的能量比例（其余损耗）
     eat_rate: float = 0.05             # 动物每 tick 吃果实比例（× 果实能量）
     digest_ratio: float = 0.7          # 吃果实的能量消化率
-    seed_intake_prob: float = 0.3      # 吃果实时摄入种子的概率
-    excretion_prob: float = 0.1         # 携带种子每 tick 排泄概率
-    germination_prob: float = 0.5       # 排泄后种子萌发概率
+    # ⚠️🔴 死配置（DORMANT，T5 标注 2026-09-26）：以下三个概率字段**全仓零引用**——
+    #    种子传播子机制（摄入→携带→排泄→萌发）未实现（L10a 只实现了果实场/蓄力/进食，
+    #    种子循环链路未接线）。**保留占位**：① 为将来接线留接口；② 刻意保留在
+    #    `scaling_rescale._PROB_FIELDS` 中，使清点工具的交叉校验保有该行（移出反而更难
+    #    发现死配置）。**禁静默**：任何改动/删除须回板说明；启用机制前必须完成
+    #    A2c 登记 + 引擎接线 + 守恒换算测试。
+    seed_intake_prob: float = 0.3      # 吃果实时摄入种子的概率 [DORMANT 死配置，未接线]
+    excretion_prob: float = 0.1         # 携带种子每 tick 排泄概率 [DORMANT 死配置，未接线]
+    germination_prob: float = 0.5       # 排泄后种子萌发概率 [DORMANT 死配置，未接线]
     seed_energy: float = 5.0            # 萌发新植物的初始能量
     max_seed_carried: int = 5           # 单个体最大携带种子数
 
