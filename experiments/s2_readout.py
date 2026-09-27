@@ -52,6 +52,156 @@ def _tail(rows, key, frac=0.1):
     return st.mean(vals) if vals else None
 
 
+def _readout_layers(rows, seeds):
+    """R241 四层判读（L0 轮休 / L1 探索 / L2 分化 / L3 人均摄入）。
+
+    预注册规则（R241 §一）：
+      L0：on 臂必须出现耗竭/休耕事件（`l0_any_dead`/`l0_any_rest` > 0）。
+          **若恒 0 ⇒ rd 没在轮休 ⇒ 判"rd 未轮休"，不判效应**（先调参）。
+      L1：on 臂首访中位数**更早** / 覆盖斑块比例**更高**（≥2/3 seed）。
+      L2：on 臂访问掩码内方差/基尼 **>** off（≥2/3 seed）。
+      L3：**无方向预设**，成本/收益双读（on<off ⇒ 探索有成本；on≥off ⇒ 探索没挨饿）。
+      主门 = 门A（L0 + L2）× 门B（L1）联合成立。
+    """
+    by = {}
+    for r in rows:
+        by.setdefault((r["seed"], r["arm"]), []).append(r)
+
+    # ---------- L0：rd 轮休是否发生（只看 on 臂） ----------
+    l0 = []
+    for sd in seeds:
+        on = by.get((sd, "on"), [])
+        if not on:
+            continue
+        last = on[-1]
+        l0.append({
+            "seed": sd,
+            "peak_dead": _f(last, "l0_peak_dead"),
+            "peak_rest": _f(last, "l0_peak_rest"),
+            "peak_demoted": _f(last, "l0_peak_demoted"),
+            "any_dead_ticks": _f(last, "l0_any_dead"),
+            "any_rest_ticks": _f(last, "l0_any_rest"),
+            "any_demoted_ticks": _f(last, "l0_any_demoted"),
+        })
+    l0_active = all((x["any_dead_ticks"] or 0) > 0 or (x["any_rest_ticks"] or 0) > 0
+                    for x in l0) if l0 else None
+    res_l0 = {
+        "line": "on 臂必须出现耗竭/休耕事件（>0）；恒 0 ⇒ 判『rd 未轮休』",
+        "per_seed": l0,
+        "verdict_rd_cycling": l0_active,
+    }
+
+    # ---------- L1：探索度（首访中位数更早 / 覆盖率更高） ----------
+    l1 = []
+    for sd in seeds:
+        on = by.get((sd, "on"), [])
+        off = by.get((sd, "off"), [])
+        if not on or not off:
+            continue
+        # 用末点累计覆盖率；首访中位数取末点
+        of = _f(off[-1], "l1_visited_patch_frac")
+        nf = _f(on[-1], "l1_visited_patch_frac")
+        om = _f(off[-1], "l1_first_visit_median")
+        nm = _f(on[-1], "l1_first_visit_median")
+        l1.append({
+            "seed": sd,
+            "off_visited_frac": of, "on_visited_frac": nf,
+            "cover_on_gt_off": (nf > of) if (of is not None and nf is not None) else None,
+            "off_first_visit_median": om, "on_first_visit_median": nm,
+            "first_visit_on_earlier": (nm < om) if (om is not None and nm is not None) else None,
+        })
+    cov_pos = sum(1 for x in l1 if x["cover_on_gt_off"])
+    ear_pos = sum(1 for x in l1 if x["first_visit_on_earlier"])
+    res_l1 = {
+        "line": "on 臂覆盖率更高 / 首访更早（≥2/3 seed）",
+        "per_seed": l1,
+        "n_seed": len(l1),
+        "n_cover_on_gt_off": cov_pos,
+        "n_first_visit_earlier": ear_pos,
+        "verdict_majority_pass": (max(cov_pos, ear_pos) * 2 > len(l1)) if l1 else None,
+    }
+
+    # ---------- L2：分化度（访问掩码内方差/基尼 on > off） ----------
+    l2 = []
+    for sd in seeds:
+        on = by.get((sd, "on"), [])
+        off = by.get((sd, "off"), [])
+        if not on or not off:
+            continue
+        og = _tail(off, "l2_visited_gini")
+        ng = _tail(on, "l2_visited_gini")
+        ov = _tail(off, "l2_visited_var")
+        nv = _tail(on, "l2_visited_var")
+        l2.append({
+            "seed": sd,
+            "off_visited_gini": og, "on_visited_gini": ng,
+            "gini_on_gt_off": (ng > og) if (og is not None and ng is not None) else None,
+            "gini_ratio": (ng / og) if (og and ng is not None) else None,
+            "off_visited_var": ov, "on_visited_var": nv,
+            "var_on_gt_off": (nv > ov) if (ov is not None and nv is not None) else None,
+            "var_ratio": (nv / ov) if (ov and nv is not None) else None,
+        })
+    gini_pos = sum(1 for x in l2 if x["gini_on_gt_off"])
+    var_pos = sum(1 for x in l2 if x["var_on_gt_off"])
+    res_l2 = {
+        "line": "on 臂访问掩码内方差/基尼 > off（≥2/3 seed）",
+        "per_seed": l2,
+        "n_seed": len(l2),
+        "n_gini_on_gt_off": gini_pos,
+        "n_var_on_gt_off": var_pos,
+        "verdict_majority_pass": (max(gini_pos, var_pos) * 2 > len(l2)) if l2 else None,
+    }
+
+    # ---------- L3：人均摄入（无方向预设，双读） ----------
+    l3 = []
+    for sd in seeds:
+        on = by.get((sd, "on"), [])
+        off = by.get((sd, "off"), [])
+        if not on or not off:
+            continue
+        oi = _f(off[-1], "l3_intake_per_capita")
+        ni = _f(on[-1], "l3_intake_per_capita")
+        onet = _f(off[-1], "l3_net_per_capita")
+        nnet = _f(on[-1], "l3_net_per_capita")
+        l3.append({
+            "seed": sd,
+            "off_intake_per_capita": oi, "on_intake_per_capita": ni,
+            "intake_ratio_on_off": (ni / oi) if (oi and ni is not None) else None,
+            "off_net_per_capita": onet, "on_net_per_capita": nnet,
+            "intake_on_lt_off": (ni < oi) if (oi is not None and ni is not None) else None,
+        })
+    lo = sum(1 for x in l3 if x["intake_on_lt_off"])
+    res_l3 = {
+        "line": "无方向预设：on<off ⇒ 探索有成本；on≥off ⇒ 探索没挨饿",
+        "per_seed": l3,
+        "n_seed": len(l3),
+        "n_intake_on_lt_off": lo,
+        "mean_intake_ratio_on_off": (
+            st.mean([x["intake_ratio_on_off"] for x in l3
+                     if x["intake_ratio_on_off"] is not None])
+            if any(x["intake_ratio_on_off"] is not None for x in l3) else None),
+    }
+
+    # ---------- 主门：门A（L0 × L2）× 门B（L1） ----------
+    res_main = {
+        "gate_A_rd_cycling": l0_active,
+        "gate_A_L2_differentiation": res_l2["verdict_majority_pass"],
+        "gate_B_L1_exploration": res_l1["verdict_majority_pass"],
+        "verdict_main_gate_pass": None,
+    }
+    if l0_active is False:
+        res_main["verdict_main_gate_pass"] = False
+        res_main["note"] = "L0 恒 0 ⇒ rd 未轮休，按 R241 §一 不判效应（先调参）"
+    else:
+        res_main["verdict_main_gate_pass"] = bool(
+            l0_active and res_l2["verdict_majority_pass"] and res_l1["verdict_majority_pass"])
+        res_main["note"] = "门A(L0 轮休 ∧ L2 分化) × 门B(L1 探索) 联合成立才通过"
+
+    return {"L0_rd_cycling": res_l0, "L1_exploration": res_l1,
+            "L2_differentiation": res_l2, "L3_intake": res_l3,
+            "main_gate": res_main}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="results/s2_depletion.csv")
@@ -147,6 +297,15 @@ def main():
         "note": "修复后生产格零损失 ⇒ 应 ≈ 0；非 0 说明 rd 又在丢格",
     }
 
+    # ================= R241 四层判读（L0–L3） =================
+    # 预注册（R241 §一，板面 2026-09-28 02:1x）：
+    #   主门 = 门A（L0 耗竭 + L2 分化）× 门B（L1 探索）联合成立；L3 是效应量读数
+    #   判读按 R229 §二「多数 seed」口径
+    #   若 L0 恒 0 ⇒ 判"rd 未轮休"，**不判效应**（先调参）
+    has_l = any("l1_visited_patch_n" in r for r in rows) if rows else False
+    if has_l:
+        res["layers_r241"] = _readout_layers(rows, seeds)
+
     out = a.out or a.csv.replace(".csv", ".readout.json")
     with open(out, "w") as f:
         json.dump(res, f, indent=2, ensure_ascii=False)
@@ -160,6 +319,22 @@ def main():
         verdict = next((vv for kk, vv in v.items() if kk.startswith("verdict")), None)
         print("   ⇒ verdict:", verdict)
     print("\n-- cap_lost 健全性 --", res["sanity_cap_lost"])
+
+    if "layers_r241" in res:
+        L = res["layers_r241"]
+        print("\n=== R241 四层判读（L0–L3）===")
+        for key in ("L0_rd_cycling", "L1_exploration", "L2_differentiation",
+                    "L3_intake"):
+            v = L[key]
+            print(f"\n-- {key} --  线：{v['line']}")
+            for x in v["per_seed"]:
+                print("   ", x)
+            verdict = next((vv for kk, vv in v.items() if kk.startswith("verdict")), "（无方向预设）")
+            print("   ⇒ verdict:", verdict)
+        print("\n-- main_gate --")
+        for k, v in L["main_gate"].items():
+            print(f"    {k}: {v}")
+
     print(f"\n写出：{out}")
 
 
