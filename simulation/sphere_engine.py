@@ -444,6 +444,10 @@ class SphereEngine:
          "_batch_move_on",     # 快路径开关（默认 True；**对拍/调试可置 False** 走参考循环）
          # ---- R230 T-C：F-D2 修复（B′）--------------------------------------
          "_d2_rng",            # D2 感知噪声/Steels 配对的**每引擎独立** legacy RandomState
+         # ---- R240 T8：气味场（本线 = [云端开发·云启]）----------------------------
+         # 🔴 __slots__ 硬约束：新属性必须登记（加在块尾，减少同文件并发冲突面）。
+         "smell",              # SmellField 实例；**全关 = None**（不进任何新代码路径 ⇒ 逐位不变）
+         "_smell_on",          # 开关快照（构造期取一次；False ⇒ 整段不执行）
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -589,6 +593,13 @@ class SphereEngine:
         self.signals = SignalField(
             self.world, duration=config.signals.duration_ticks
         )
+        # ---- R240 T8：气味场（多通道标量场；设计稿《气味场与分功能感知》§二/§8.2）----
+        #   🔴 **默认全关**（`channels == ()`）⇒ `smell is None` ⇒ tick 里只多一次 None 判断，
+        #     不进任何新代码路径 ⇒ 旧行为**逐位不变**（C7 回滚点）。
+        #   ⚠️ 模块自带稀疏/降采样路径（方案 (a)，设计稿 §8.4）⇒ 与 `sparse_fields` 正交。
+        from world.smell_field import SmellField   # 局部导入：全关档零 import 开销（同 rd 先例）
+        self._smell_on = bool(tuple(config.smell.channels or ()))
+        self.smell = SmellField(self.world, config.smell) if self._smell_on else None
 
         # 预计算统一邻居表（L6 Rust 下沉用）：**P0.1（T1）紧凑化** —— 直接复用 world 的
         # 紧凑缓存（`(n_cells, 8)` int64 ≈ 29.5 MB @480×960），不再自建
@@ -2244,6 +2255,53 @@ class SphereEngine:
         """累计死亡数（与 history_limit 无关，全局计数）。"""
         return self._run_died
 
+    # ---- R240 T8：气味场（稀疏源 / 读数）--------------------------------------
+
+    def _smell_sources(self) -> dict:
+        """气味场**稀疏源**（只返回「有源」的格）—— 由引擎算：只有它握有资源/个体/基因。
+
+        v1 口径（设计稿 §二 表 / `SmellConfig` docstring）：
+          · `food`：`grid > 0` 的格；注入量 = `grid / max(capacity)`（∈[0,1] 归一）
+          · `prey`：全部存活个体（每个体 1.0）
+          · `risk`：`g16(AGGRESSION) ≥ risk_g16_threshold` 的个体（捕食者留味）
+          · `kin` ：全部存活个体（与 `prey` 同源；读端用途不同）
+
+        🔴 **稀疏**是本机制的红线之一（设计稿 §8.2-③）：返回的 `cells` 只含源格
+        （食物格 2.8% / 个体 0.65%），`SmellField.update()` 只对这些格做写。
+        """
+        ch = self.smell.channels
+        out: dict[str, tuple] = {}
+        if "food" in ch:
+            g = self.resources._grid
+            cells = np.flatnonzero(g > 0.0)
+            if cells.size:
+                cap_max = float(self.resources._capacity.max())
+                denom = cap_max if cap_max > 0.0 else 1.0
+                out["food"] = (cells.astype(np.int64),
+                               (g[cells] / denom).astype(np.float64))
+        P = len(self._id)
+        if P and ("prey" in ch or "risk" in ch or "kin" in ch):
+            flat = self._flat[:P].astype(np.int64)
+            if "prey" in ch:
+                out["prey"] = (flat, np.ones(P, dtype=np.float64))
+            if "kin" in ch:
+                out["kin"] = (flat, np.ones(P, dtype=np.float64))
+            if "risk" in ch:
+                m = (self._genes[:P, int(Gene.AGGRESSION)]
+                     >= float(self.smell.cfg.risk_g16_threshold))
+                if bool(m.any()):
+                    out["risk"] = (flat[m], np.ones(int(m.sum()), dtype=np.float64))
+        return out
+
+    def smell_probe(self) -> dict | None:
+        """气味场读数（B4 口径：**全关返回 `None`** = 「未适用」，不是 0）。
+
+        键见 `world/smell_field.py::SmellField.probe()`（含性能分解 `ms_per_update`）。
+        """
+        if self.smell is None:
+            return None
+        return self.smell.probe()
+
     def death_cause_totals(self) -> Counter:
         """累计死因分布（与 history_limit 无关，全局计数）。"""
         return self._run_deaths.copy()
@@ -2334,6 +2392,12 @@ class SphereEngine:
             self._step_corpse_decay()
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
+        # ---- R240 T8：气味场（**每 k tick 才更新**；设计稿 §8.2-② 是红线）----
+        #   🔴 这是本机制**唯一**的全场路径（`SmellField.update()`）：全关 ⇒ `smell is None`；
+        #     开档 ⇒ 每 `update_every` tick 一次（不是每 tick）⇒ 成本 ÷k。
+        #   源由引擎算（**稀疏**：只给有源的格）⇒ 注入项与扩散解耦（§8.2-③）。
+        if self.smell is not None and self._tick % self.smell.update_every == 0:
+            self.smell.update(self._smell_sources(), self._tick)
         born, died, deaths = self._step_population()
         # 13.4 波 2A（T2）：每 tick 末轮作（死格重入候选池 + 反荒漠化闸 + 到期休耕恢复）
         # + 按当前掩码**重算** `_capacity`（`_capacity` 是基准 ⇒ 动态折扣走 `capacity_multiplier`）。
@@ -5033,6 +5097,12 @@ class SphereEngine:
         data["resource_patch_regrowth_mult"] = np.array(self.resources._patch_regrowth_mult)
         data["signal_marks"] = self.signals._marks.copy()
         data["signal_age"] = self.signals._age.copy()
+        # ---- R240 T8：气味场（**新的全场量** ⇒ 必须进档；全关 ⇒ 无键）----
+        #   派生量（粗网格）与计时器都是函数/读数 ⇒ **不进档**（同 `sparse_fields` 纪律）。
+        if self.smell is not None:
+            _st = self.smell.state()          # 两级状态（近场全分辨率 + 远场粗网格）
+            data["smell_S"] = _st["S"]
+            data["smell_Sc"] = _st["Sc"]
 
         # --- 5. 运行统计 ---
         data["run_born"] = np.array(self._run_born)
@@ -5312,6 +5382,12 @@ class SphereEngine:
         engine.resources._patch_regrowth_mult = float(data["resource_patch_regrowth_mult"])
         engine.signals._marks = data["signal_marks"].copy()   # sparse:reset（下方 rebuild_sparse）
         engine.signals._age = data["signal_age"].copy()   # sparse:reset（下方 rebuild_sparse）
+        # ---- R240 T8：气味场恢复（旧快照**缺键** ⇒ 空场起算 = 文档口径；形状不符 ⇒ fail-loud）----
+        #   全关档（`smell is None`）调用快照**不可能**带 `smell_S`（配置指纹会先拦跨档），
+        #   故这里在**同档**内只可能是"有键"；缺键只出现在"旧档升级到新代码"的场景。
+        if engine.smell is not None and "smell_S" in data:
+            engine.smell.restore({"S": data["smell_S"],
+                                  "Sc": data["smell_Sc"] if "smell_Sc" in data else None})
         # R217 §五 #1 稀疏化 B：脏格集/活跃集是**派生量**（不进快照）⇒ 整体替换
         #   `_grid` / `_marks` / `_age` 之后必须按不变量重建，否则陈旧集合会漏结算（破等价）。
         #   （未启用时这两个方法是 no-op。）

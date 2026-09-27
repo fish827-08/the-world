@@ -69,6 +69,9 @@ _RATE_FIELDS: list[tuple[str, str]] = [
     #   它的正确改法是 PROB 公式（`1−(1−r)^k`），该公式对 EWMA 是**精确解**而非近似。
     ("info_structure", "learning_rate"),
     ("info_structure", "alignment_rate"),
+    # 🔴 R240 T8 气味场（[云端开发·云启]）：`diffuse` 是**每次更新**的扩散权重
+    #   ⇒ 时间压缩后"每日更新次数" ÷k（见 `update_every`，DURATION 表）⇒ 系数须 ×k 才保每日扩散不变。
+    ("smell", "diffuse"),
 ]
 # ⚠️ `organisms.move_cost`：**每格成本 / PER_EVENT**（引擎 subpos 路径 :3290 按实际步数
 #    比例计费 `move_cost × (st/subdiv)`；整数格路径每移动 1 格扣一次）⇒ 每天移动能耗 =
@@ -93,6 +96,8 @@ _DURATION_FIELDS: list[tuple[str, str]] = [
     # 🔴 P0.0 A1（2026-09-26）：信号场寿命原为引擎里硬编码的 `duration=50`，
     #    现搬进 `SimConfig.signals`。量纲 = tick 时长 ⇒ **÷ k**。
     ("signals", "duration_ticks"),
+    # 🔴 R240 T8 气味场：更新间隔（k tick）是 tick 时长 ⇒ ÷k（与 `diffuse` ×k 配对守恒）
+    ("smell", "update_every"),
 ]
 # ⚠️ `pleasure.expectation_size` **不是时长**：它是 `_expectation` 的**数组宽度**
 #    （`(n, expectation_size)`）⇒ 擅自 ÷k 会直接 IndexError。属于"计数类，不变"。
@@ -153,6 +158,8 @@ _RATE_PROB_FIELDS: list[tuple[str, str]] = [
 _DECAY_FIELDS: list[tuple[str, str]] = [
     ("pleasure", "valence_decay"),
     ("pleasure", "arousal_decay"),
+    # 🔴 R240 T8 气味场：`decay` 定义为**每 tick** 衰减 ⇒ 时间压缩 ^k
+    ("smell", "decay"),
 ]
 
 
@@ -301,7 +308,8 @@ def rescale_config(cfg: Any, k: float | None = None) -> dict[str, Any]:
              "info_structure": {"learning_maturity_ticks": 10},
              "corpse_wound": {"corpse_decay_ticks": 10},
              "light": {"rotation_period": 8},
-             "signals": {"duration_ticks": 1}}
+             "signals": {"duration_ticks": 1},
+             "smell": {"update_every": 1}}
     for grp, names in _mins.items():
         sub = getattr(cfg, grp)
         for name, lo in names.items():
