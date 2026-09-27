@@ -373,7 +373,11 @@ def cmd_post(args) -> int:
                 print("      暂存区无实际变更（可能是行尾归一化）——跳过提交")
             else:
                 who = (args.role or f"[{args.slot}]").strip()
-                run_git(root, ["commit", "-m", f"share: {who} {args.task}"])
+                # 🔴 R236 修复：**必须带 pathspec**（`-- <board>`）。
+                # 不带 pathspec 的 `git commit` 会提交"索引里的一切" —— 而多会话**共用同一工作树/索引**
+                # （教训㉒：git 工作区是单例资源），别线此刻 staged 的改动会被本线**一并提交**，
+                # 等于替别人提交未完成的活（2026-09-27 实测事故：轻舟 T-F 的 4 个文件被 R236 上板一起提交）。
+                run_git(root, ["commit", "-m", f"share: {who} {args.task}", "--", args.board])
             stat = run_git(root, ["show", "--stat", "--format=", "HEAD"]).stdout
             files = [ln for ln in stat.splitlines() if "|" in ln]
             if len(files) != 1:
