@@ -1,0 +1,19 @@
+# SMELL-V1 证据清单 —— sha256sum 格式（生成于 2026-09-27 16:19:37）
+400a37880badad287805155e91db276d413459805da0447d0a4bebe215143d2b         2,820  _rerun_logs/smell_v1_smoke/commit_msg_smell_v1.txt
+580688cb1ffbcd40e0b9e1d5745009dd0f57eaaf2613d95a11ccacc5abdee76c            99  _rerun_logs/smell_v1_smoke/del8_M1_write_tag_green.txt
+07706ac82d7e5c3565d2307691faa0dd302066e291df67cce7d9947b55cf0b9f         1,685  _rerun_logs/smell_v1_smoke/del8_M1_write_tag_red.txt
+ada926907995aa8212b093e909e350352f12857b36a6480f999cd09dd2acf71f            99  _rerun_logs/smell_v1_smoke/del8_M2_cadence_gate_green.txt
+abfe02287d3e0bee3a9dd6dc9cbbcacb83a48e8fdc0ecf833c90fa82346ac904         1,769  _rerun_logs/smell_v1_smoke/del8_M2_cadence_gate_red.txt
+102b5f09729e7de7fca934a8a0c5b0fa261f883f82308146d6aab5a8d721840f            99  _rerun_logs/smell_v1_smoke/del8_M3_from_dict_green.txt
+1957e6cdc3a8260f5a7bafcb381cb7c6b5407121a364accb40a37ad5437f042b         1,773  _rerun_logs/smell_v1_smoke/del8_M3_from_dict_red.txt
+32039b8e0d1451d456870223a5518e798eaafabe3dfa55357a4f0ff9f59c17ec            99  _rerun_logs/smell_v1_smoke/del8_M4_s_eff_gcd_green.txt
+ed4571d4d33c9ab790220f7d02e3aee6c37b3c4f7bf6f3f11ddea9900309dd64         1,631  _rerun_logs/smell_v1_smoke/del8_M4_s_eff_gcd_red.txt
+5e656d375889efcd7c92734eb182a4bda2f0befd2319da2a982a3837aa58f8ec         3,221  _rerun_logs/smell_v1_smoke/pytest_full_final.txt
+aeabba0d482af186149d3e5b22fefc08b4acae1258533dfe77edb8c1819250fc         1,695  _rerun_logs/smell_v1_smoke/self_audit_digest.txt
+166a3290310ce294d37b844a155e1457778daadf1741497d063286b9cda4b55e         2,830  _rerun_logs/smell_v1_smoke/smell_perf_full.txt
+e8d74b4a4f0c06284d5acfe4e01f32f382dded06d5372475805fa2fa0939398e        10,168  experiments/smell_perf_probe.py
+dd97719d1f28ca8038bac8e36bfbe0ce6973d214271a8326bfb9a5df0c044370         2,605  results/smell_v1/provenance.json
+72975b7ab840b2f5211979aa6f3ce93b25279a66c3431ab9b5b239445734e25a         1,007  results/smell_v1/smell_perf.csv
+1bdb4bc4b110f510321fcb192adfa5993cd9c15ba2ba57d138d1524852067077        13,342  tests/test_smell_v1.py
+ecc87785647834259292c31c64b61a1db8dbcc272e69bc147a924d8320cc687b         8,912  tests/test_smell_write_guard.py
+69565d10260cbd33793bcc0240d389c98602d3b061f1417b8bbb0d13e8de88c0        17,965  world/smell_field.py
