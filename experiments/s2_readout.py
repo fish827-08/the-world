@@ -12,6 +12,15 @@ import argparse
 import csv
 import json
 import statistics as st
+import sys
+
+# R98 纪律：本脚本 print 含 GBK 不可编码字符（⇒），中文 Windows GBK 控制台会抛
+#   UnicodeEncodeError ⇒ rc=1 假失败（外围污染批次状态）。入口做 UTF-8 兜底。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # R225 §三 预注册线
 # 判据① 参照：**同批 off 臂**（配对，最干净）。S1 绝对基线随 patches/ticks 而变
