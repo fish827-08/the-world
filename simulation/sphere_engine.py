@@ -441,6 +441,8 @@ class SphereEngine:
          "_ars_rerand_n",      # 失望重选方向次数
          # ---- P2② 移动决策整块向量化（本线 = [本地开发·性能线] 轻舟）------------
          "_batch_move_on",     # 快路径开关（默认 True；**对拍/调试可置 False** 走参考循环）
+         # ---- R230 T-C：F-D2 修复（B′）--------------------------------------
+         "_d2_rng",            # D2 感知噪声/Steels 配对的**每引擎独立** legacy RandomState
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -491,8 +493,19 @@ class SphereEngine:
         # D-19：用 CountingRNG 包一层——**随机流逐位不变**，只统计抽取次数（rng_draws），
         # 供 provenance 机械校验"两条路径/两次重跑是否消费了同一条随机流"（V-1 O-6）。
         self.rng = CountingRNG(np.random.default_rng(config.seed))
-        # D2 可复现性：感知噪声/Steels 配对使用全局 np.random（非主 rng），
-        # 必须随 config.seed 播种，否则同 seed 两次运行结果不同（中高危可复现性漏洞）。
+        # F-D2 修复（R230 T-C，**B′ 方案**）：感知噪声/Steels 配对原读**进程级全局**
+        # `np.random`（同进程多引擎共享一条流 ⇒ 互相污染，R226 以"假性分化"侧记）⇒
+        # 改为**每引擎独立**的 legacy `RandomState`：种子与旧全局播种**完全相同**（同算法）
+        # ⇒ 单引擎轨迹逐位不变（17 处钉死 digest 全绿），多引擎互不干扰。
+        # 为什么不按字面"改绑 `self.rng`"（方案 A）：`self.rng` 是 default_rng(PCG64)
+        # 的另一条流 ⇒ 已判 D2 基线（C7 的 (574887, 11266.746993) 一族）当场失效
+        # （实测 3/3 抽样文件挂）⇒ 违反本任务自设判据①。A/B′ 实测见板上 T-C 报告。
+        # 另：B′ 下 `rng_draws` 口径与修复前**完全一致**（噪声/洗牌本就不计入；
+        # CountingRNG 的显式包装才计数）⇒ provenance 校验语义不变。
+        self._d2_rng = np.random.RandomState(int(config.seed) & 0xFFFFFFFF)
+        # 旧全局播种保留（写入点、非消费点）：runner 侧车/旧脚本假设"构造引擎后全局流被播种"；
+        # 引擎自身已无任何全局 `np.random` 读取点。B′ 后侧车对引擎随机性变为 no-op（无害），
+        # 续跑一致性改由快照内的 d2_rng_state 保证（见 save/load_snapshot）。
         np.random.seed(int(config.seed) & 0xFFFFFFFF)
         # 模块三：use_sim_core=True 时把种群数值管线下沉到 Rust（sim_core）
         self._use_sim_core = config.simulation.use_sim_core
@@ -2153,7 +2166,10 @@ class SphereEngine:
 
         用于 provenance：同 seed 同配置的两条路径/两次重跑，`rng_draws` 必须相同，
         否则就是消费了不同的随机流（可复现性/对拍出问题的机械信号）。
-        ⚠️ 只统计【主 rng】；D2 的感知噪声走全局 `np.random`（已知缺陷 F-D2），不计入。
+        ⚠️ 只统计【主 rng】的显式包装方法（random/integers/normal/uniform/standard_normal）。
+        F-D2 修复（R230 T-C，B′）后 D2 感知噪声/Steels 配对走**每引擎独立**的 legacy
+        `_d2_rng`（与修复前的全局口径相同：不计入 draws）⇒ 计数语义与旧版逐位一致，
+        引擎不再有全局 `np.random` 消费点。
         """
         return int(self.rng.draws)
 
@@ -3236,12 +3252,13 @@ class SphereEngine:
                         continue
                     perc = genes[idx, Gene.PERCEPTION]
                     soc = (genes[idx, Gene.SOCIABILITY] - 0.5) * 2.0
-                    # D2-3 感知噪声：食物/信号感知加高斯噪声（独立rng，不消费主rng）
+                    # D2-3 感知噪声：食物/信号感知加高斯噪声（F-D2 修复 B′：走每引擎独立的
+                    # `_d2_rng`，种子/算法同旧全局播种 ⇒ 单引擎逐位不变、多引擎不再互相污染）
                     fr = food_ratio[nb].copy()
                     sp = sig_present[nb].copy()
                     if d2_noise:
-                        fr += np.random.normal(0, ifcfg3.perception_noise, size=len(nb))
-                        sp += np.random.normal(0, ifcfg3.perception_noise, size=len(nb))
+                        fr += self._d2_rng.normal(0, ifcfg3.perception_noise, size=len(nb))
+                        sp += self._d2_rng.normal(0, ifcfg3.perception_noise, size=len(nb))
                         fr = np.clip(fr, 0.0, 1.0)
                         sp = np.clip(sp, 0.0, 1.0)
                     # B1｜R2 声誉权重（1 行）：信号项在原有 trust 权重之上再按 trust 放大
@@ -3684,7 +3701,8 @@ class SphereEngine:
                     cell_idx = np.flatnonzero(self._flat[:P] == cell)
                     if len(cell_idx) < 2:
                         continue
-                    np.random.shuffle(cell_idx)
+                    # F-D2 修复 B′：改绑每引擎独立的 `_d2_rng`（不计入 draws，同修复前口径）
+                    self._d2_rng.shuffle(cell_idx)
                     for pair in range(0, len(cell_idx) - 1, 2):
                         i, j = int(cell_idx[pair]), int(cell_idx[pair + 1])
                         if self.rng.random() < ifcfg_sa_r.alignment_rate:
@@ -3810,8 +3828,8 @@ class SphereEngine:
                     cell_idx = np.flatnonzero(self._flat[:P] == cell)
                     if len(cell_idx) < 2:
                         continue
-                    # 随机配对（消费主rng保对拍）
-                    np.random.shuffle(cell_idx)
+                    # 随机配对（F-D2 修复 B′：独立 `_d2_rng`，同修复前"不计入 draws"口径）
+                    self._d2_rng.shuffle(cell_idx)
                     for pair in range(0, len(cell_idx) - 1, 2):
                         i, j = int(cell_idx[pair]), int(cell_idx[pair + 1])
                         if self.rng.random() < ifcfg_sa.alignment_rate:
@@ -5007,6 +5025,12 @@ class SphereEngine:
         data["rng_state"] = np.array(
             pickle.dumps(self.rng.bit_generator.state), dtype=object
         )
+        # R230 T-C（F-D2 修复 B′）：D2 感知噪声/Steels 配对的独立流也须入快照，
+        # 否则"续跑 ≠ 连续跑"（旧版靠 runner 侧车 pickle 全局 np.random 状态；
+        # B′ 后引擎不读全局 ⇒ 侧车失效，续跑一致性只能由本键保证）。
+        data["d2_rng_state"] = np.array(
+            pickle.dumps(self._d2_rng.get_state()), dtype=object
+        )
 
         # --- 7. 元数据 ---
         data["snapshot_version"] = np.array(self.SNAPSHOT_VERSION)
@@ -5270,6 +5294,10 @@ class SphereEngine:
         # --- 9. 恢复 RNG 状态 ---
         rng_state = pickle.loads(data["rng_state"].item())
         engine.rng.bit_generator.state = rng_state
+        # R230 T-C（F-D2 修复 B′）：恢复 D2 独立流；旧快照无此键 ⇒ 保持构造期新播种状态
+        # （语义 = 与修复前"缺侧车"的续跑一致；不静默错位）。
+        if "d2_rng_state" in data:
+            engine._d2_rng.set_state(pickle.loads(data["d2_rng_state"].item()))
 
         # --- 10. 恢复元数据 ---
         engine._tick = int(data["tick"])
