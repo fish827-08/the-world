@@ -34,6 +34,8 @@
 * `--resume-from <snap|dir>` —— 从快照续跑（可给**单个快照**或**目录**⇒ 逐个续）；
   世界/配置/标签**一律以快照为准**；`--out` 里该 run 的旧行**自动去重**（tick > 快照点丢弃）
 * `--shard K/N` 或 `--shard p:sd[,rgm:p:sd…]` —— 只跑 `(斑块, seed)` 子集 ⇒ **分片到多机**用
+* `--rd {on,off}` —— 开 `resource_dynamics`（S2 同款臂：bgzero + rgm 1.195 + patches 480）。
+  ⚠️ 续跑（`--resume-from`）时**以快照配置为准**，本开关仅对"新跑"生效（不一致会告警）
 * 产物（`--snapshot-dir`，默认 `_rerun_logs/snap/`，已在 `.gitignore` 白名单）：
   `<tag>.snapshot.npz`（引擎态）+ `<tag>.rngstate.pkl`（F-D2 全局 np.random）+ `<tag>.meta.json`（run 身份与 k）
 * 🔴 **逐位一致的边界**：**同机同树**续跑 ≡ "不中断连续跑"（含 RNG 序列与死因账本）；
@@ -80,9 +82,13 @@ def _bar(cur: int, tot: int, extra: str = "", width: int = 24) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 # 快照 / 续跑 / 分片（R221 §四）
 # ══════════════════════════════════════════════════════════════════════════
-def run_tag(rows: int, cols: int, patches: int, seed: int, k: float, rgm: float) -> str:
-    """run 的唯一标识（快照文件名 / 分片声明用；确定性 + 可读）。"""
-    return f"w{rows}x{cols}_p{patches}_s{seed}_k{k:g}_rgm{rgm:g}"
+def run_tag(rows: int, cols: int, patches: int, seed: int, k: float, rgm: float,
+            rd: bool = False) -> str:
+    """run 的唯一标识（快照文件名 / 分片声明用；确定性 + 可读）。
+
+    `rd=True` ⇒ 追加 `_rd` 后缀（rd 改变轨迹 ⇒ 开关两臂的快照/行**不许同名互顶**）。
+    """
+    return f"w{rows}x{cols}_p{patches}_s{seed}_k{k:g}_rgm{rgm:g}" + ("_rd" if rd else "")
 
 
 def _ckpt_paths(snapshot_dir: "str | Path", tag: str) -> tuple[Path, Path, Path]:
@@ -196,7 +202,7 @@ def select_runs(grid: list[tuple[float, int, int]],
     return out
 
 
-_INT_COLS = ("seed", "patches", "tick", "pop", "d_starv", "d_old", "d_pred")
+_INT_COLS = ("seed", "patches", "tick", "pop", "d_starv", "d_old", "d_pred", "rd")
 _FLOAT_COLS = ("k", "rgm", "saturation", "ms_per_tick", "mean_energy", "mean_gen")
 
 
@@ -217,24 +223,26 @@ def read_rows(path: "str | Path | None") -> list[dict]:
     return rows
 
 
-def _row_key(r: dict) -> tuple[float, int, int]:
-    return (round(float(r["rgm"]), 9), int(r["patches"]), int(r["seed"]))
+def _row_key(r: dict) -> tuple[float, int, int, int]:
+    # rd 进键（T-F）：开关两臂轨迹不同 ⇒ 行不许互相合并；**旧 CSV 无该列 ⇒ 0**（向后兼容）
+    return (round(float(r["rgm"]), 9), int(r["patches"]), int(r["seed"]),
+            int(r.get("rd", 0) or 0))
 
 
 def merge_rows(old: list[dict], new: list[dict],
-               resumed: dict[tuple[float, int, int], int]) -> list[dict]:
+               resumed: dict[tuple[float, int, int, int], int]) -> list[dict]:
     """续跑合并：非 resumed run 的旧行**全留**；resumed run 只留 `tick ≤ start_tick`；并入新行。
 
     · `new` 里**本就包含** `prior_rows`（来自旧文件，供 summary 用全史）⇒ 同键以 **new 为准**（覆盖）
     · 但 **`new` 内部**出现同键 ⇒ **fail-loud**（教训同族：云端 20+ 轮续批曾出现
       main_s42 的 16 个**重复行**；重复键必须炸出来，不许静默去重）
     """
-    out: dict[tuple[float, int, int, int], dict] = {}
+    out: dict[tuple[float, int, int, int, int], dict] = {}
     for r in old:
         st = resumed.get(_row_key(r))
         if st is None or int(r["tick"]) <= st:
             out[_row_key(r) + (int(r["tick"]),)] = r
-    seen_new: set[tuple[float, int, int, int]] = set()
+    seen_new: set[tuple[float, int, int, int, int]] = set()
     for r in new:
         kk = _row_key(r) + (int(r["tick"]),)
         if kk in seen_new:
@@ -274,15 +282,17 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
 def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             sample: int, subpos: bool, speed_max: float, gain: float, subdiv: int,
             max_minutes: float, stop_stable: int = 4, k: float = 1.0,
-            max_count: int = 0, rgm: float = 1.195,
+            max_count: int = 0, rgm: float = 1.195, rd: "bool | None" = None,
             save_every: int = 0, snapshot_dir: "str | Path | None" = None,
             resume_from: "str | Path | None" = None,
             prior_rows: "list[dict] | None" = None) -> tuple[list[dict], dict]:
     """跑一个 run（或**从其快照续跑**）。
 
-    `resume_from` 非空 ⇒ **世界/配置/标签一律以快照为准**（`seed/patches/k/rgm` 就地改写）；
+    `resume_from` 非空 ⇒ **世界/配置/标签一律以快照为准**（`seed/patches/k/rgm/rd` 就地改写）；
     `ticks` 仍是**绝对目标 tick**；`prior_rows` = 该 run 在快照点之前的旧 CSV 行（用于合并）。
     `save_every > 0` 时每 N tick 写一组检查点（`save_ckpt`），中断最多丢 N 个 tick。
+    `rd`（T-F，2026-09-27）：`True/False` = 开/关 `resource_dynamics`（S2 同款臂：bgzero +
+    rgm 1.195 + patches 480）；`None` = 未指定（**续跑**时以快照为准，不一致只告警不炸）。
     """
     t0 = time.time()
     if resume_from is not None:
@@ -299,17 +309,30 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             raise ValueError(
                 f"续跑采样节拍不一致：快照 meta 记 sample={int(meta['sample'])}，"
                 f"命令行 --sample={int(sample)} ⇒ 传同一个 --sample 再来（禁静默错位）")
+        # T-F：rd / subpos 一律以**快照配置**为准（引擎态自带）；CLI 开关仅对"新跑"生效
+        rd_on = bool(getattr(eng.config.resource_dynamics, "enabled", False))
+        subpos = bool(getattr(eng.config.subpos, "enabled", False))
+        speed_max = float(getattr(eng.config.subpos, "speed_max", speed_max))
+        gain = float(getattr(eng.config.subpos, "speed_gain", gain))
+        subdiv = int(getattr(eng.config.subpos, "subdiv", subdiv))
+        if rd is not None and bool(rd) != rd_on:
+            print(f"  ⚠️ --rd {'on' if rd else 'off'} 与快照配置（rd {'开' if rd_on else '关'}）"
+                  f"不一致 ⇒ **以快照为准**（本开关对续跑不生效）", file=sys.stderr)
         rows_out: list[dict] = list(prior_rows or [])
         print(f"  ↻ 续跑：{tag} @ tick {start_tick} → {ticks}"
-              f"（世界/斑块/k/rgm **以快照为准**；本段墙钟预算 {max_minutes:g} min）", flush=True)
+              f"（世界/斑块/k/rgm/rd **以快照为准**；本段墙钟预算 {max_minutes:g} min）", flush=True)
     else:
         cfg, notes = make_cfg(seed, rows, cols, pop, patches, subpos, speed_max, gain,
                               subdiv, k, max_count, rgm)
+        rd_on = bool(rd)
+        if rd_on:
+            # T-F：rd 与 subpos 同档（S2 主臂）——`bgzero` 死斑块保身份（R226 修复①）
+            cfg.resource_dynamics.enabled = True
         eng = SphereEngine(cfg)
         apply_post_build(eng, notes)             # 构造后项（信号寿命 ÷k）
         start_tick = 0
         rows_out = []
-        tag = run_tag(rows, cols, patches, seed, k, rgm)
+        tag = run_tag(rows, cols, patches, seed, k, rgm, rd_on)
     if save_every and snapshot_dir is None:
         raise ValueError("--save-every 需要 --snapshot-dir（快照写哪儿）")
     prod = eng.resources._capacity > 0
@@ -318,6 +341,7 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
     meta_doc = {"tag": tag, "rows": rows, "cols": cols, "patches": patches, "seed": seed,
                 "k": k, "rgm": rgm, "subpos": bool(subpos), "speed_max": speed_max,
                 "gain": gain, "subdiv": subdiv, "max_count": max_count or None,
+                "rd": bool(rd_on),
                 "sample": int(sample),
                 "ticks_target": int(ticks), "save_every": int(save_every),
                 "config_fingerprint": eng.config.fingerprint(),
@@ -343,7 +367,7 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
             _dc = eng.death_cause_totals()
             _dv = {getattr(k, "name", str(k)): int(v) for k, v in _dc.items()}
             rows_out.append({
-                "seed": seed, "patches": patches, "k": k, "rgm": rgm,
+                "seed": seed, "patches": patches, "k": k, "rgm": rgm, "rd": int(rd_on),
                 "tick": t, "pop": N,
                 "d_starv": _dv.get("STARVATION", 0),
                 "d_old": _dv.get("OLD_AGE", 0),
@@ -403,6 +427,7 @@ def run_one(seed: int, rows: int, cols: int, pop: int, patches: int, ticks: int,
         abs(tail3[i + 1] - tail3[i]) <= 0.03 * max(tail3[i], 1) for i in range(2)))
     summary = {
         "patches": patches, "seed": seed, "cells": rows * cols, "k": k, "rgm": rgm,
+        "rd": bool(rd_on),
         "death_cause_tail": death_tail,
         "deaths_cum_starvation": int(_cum_last["d_starv"]),
         "deaths_cum_old_age": int(_cum_last["d_old"]),
@@ -471,6 +496,9 @@ def main() -> None:
                          "**世界/斑块/k/rgm 以快照为准**，`--ticks` 仍是绝对目标")
     ap.add_argument("--shard", default=None,
                     help="分片：`K/N`（共 N 份取第 K 份）或显式 `p:sd[,rgm:p:sd…]` ⇒ 分片到多机")
+    ap.add_argument("--rd", choices=("on", "off"), default=None,
+                    help="resource_dynamics（S2 同款臂：bgzero + rgm 1.195 + patches 480）；"
+                         "**默认 None ⇒ 不碰配置**（续跑时一律以快照配置为准，不一致仅告警）")
     a = ap.parse_args()
 
     patch_list = [int(x) for x in a.patches.split(",") if x.strip()]
@@ -481,7 +509,8 @@ def main() -> None:
 
     print(f"== 稳态 K 探针：{a.rows}x{a.cols}（{a.rows * a.cols:,} 格）"
           f"，斑块 {patch_list}，初始 {a.pop}，{a.ticks} tick，"
-          f"subpos={a.subpos}，k={a.k:g}，max_count={a.max_count or '默认'}，seed {seeds} ==")
+          f"subpos={a.subpos}，k={a.k:g}，max_count={a.max_count or '默认'}，"
+          f"rd={a.rd or '默认(关)'}，seed {seeds} ==")
     print(f"   速度：v_max={a.speed_max} gain={gain} subdiv={a.subdiv}"
           f"（R = v_max×subdiv = {r_ladder:g}）")
     if a.subpos == "on" and r_ladder < 5:
@@ -514,17 +543,21 @@ def main() -> None:
                 print(f"   ⚠️ 快照 `{snap.name}` 身份（{_wr}x{_wc}/p={p}/s={sd}/k={kk:g}/rgm={rr:g}）"
                       f"与命令行（{a.rows}x{a.cols}/p={patch_list}/s={seeds}/k={a.k:g}/rgm={rgm_list}）"
                       f"不一致 ⇒ **以快照为准**", file=sys.stderr)
+            _rd0 = 1 if bool(getattr(_e0.config.resource_dynamics, "enabled", False)) else 0
             prior = [r for r in old_rows
-                     if _row_key(r) == (round(rr, 9), p, sd) and int(r["tick"]) <= start_tick]
-            print(f"--- 续跑 rgm {rr:g} / 斑块 {p} / seed {sd} ---", flush=True)
+                     if _row_key(r) == (round(rr, 9), p, sd, _rd0)
+                     and int(r["tick"]) <= start_tick]
+            print(f"--- 续跑 rgm {rr:g} / 斑块 {p} / seed {sd}"
+                  f"{'（rd 开）' if _rd0 else ''} ---", flush=True)
             rows_out, s = run_one(sd, a.rows, a.cols, a.pop, p, a.ticks, a.sample,
                                   a.subpos == "on", a.speed_max, gain, a.subdiv,
                                   a.max_minutes, a.stop_stable, kk, a.max_count, rr,
+                                  rd=(a.rd == "on" if a.rd else None),
                                   save_every=a.save_every, snapshot_dir=a.snapshot_dir,
                                   resume_from=snap, prior_rows=prior)
             all_rows.extend(rows_out)
             summaries.append(s)
-            resumed_keys[(round(rr, 9), p, sd)] = start_tick
+            resumed_keys[(round(rr, 9), p, sd, _rd0)] = start_tick
             _print_run_summary(s)
     else:
         grid = select_runs(grid_all, a.shard)
@@ -540,6 +573,7 @@ def main() -> None:
             rows_out, s = run_one(sd, a.rows, a.cols, a.pop, p, a.ticks, a.sample,
                                   a.subpos == "on", a.speed_max, gain, a.subdiv,
                                   a.max_minutes, a.stop_stable, a.k, a.max_count, rgm,
+                                  rd=(a.rd == "on" if a.rd else None),
                                   save_every=a.save_every, snapshot_dir=a.snapshot_dir)
             all_rows.extend(rows_out)
             summaries.append(s)
@@ -581,6 +615,7 @@ def main() -> None:
                          "patch_regrowth_mult": rgm_list,
                          "subpos": a.subpos, "speed_max": a.speed_max, "gain": a.gain,
                          "subdiv": a.subdiv, "max_count": a.max_count or None,
+                         "rd": bool(last.get("rd")),      # T-F：rd 开关（以快照/本跑真值为准）
                          # R221 §四：快照/续跑/分片（自证——回板要能看出这批是不是分片的）
                          "save_every": a.save_every, "shard": a.shard,
                          "resume_from": str(a.resume_from) if a.resume_from else None},

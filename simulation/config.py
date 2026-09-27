@@ -1114,6 +1114,13 @@ _ARS_FIELDS: frozenset = frozenset(f.name for f in fields(ArsConfig))
 #: P0.0 A1 信号场配置白名单（同规格；A1 之前的存档无 `signals` 键 ⇒ 回退默认）。
 _SIGNALS_FIELDS: frozenset = frozenset(f.name for f in fields(SignalsConfig))
 
+#: 13.4 波 1 亚格连续坐标白名单（同规格）。
+#   🔴 R233 T-F 修复（2026-09-27）：`from_dict` 此前**整段漏传 `subpos`** ⇒ 走
+#   `load_snapshot(config=None)` 的快照续跑会把 subpos **静默退回默认**（`enabled=False`，
+#   `subdiv=4`/`speed_max=2.0`/`gain=4.0`）——运动模型被换掉 ⇒ "续跑 ≠ 连续跑"。
+#   此前未被发现：云端的 save/resume 验证跑在 subpos **关**（默认）档；T-F 才用 rd+subpos 档暴露。
+_SUBPOS_FIELDS: frozenset = frozenset(f.name for f in fields(SubposConfig))
+
 
 @dataclass
 class SimConfig:
@@ -1269,6 +1276,15 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("signals") or {}).items()
                     if k in _SIGNALS_FIELDS
+                }
+            ),
+            # 13.4 波 1：亚格连续坐标；旧存档缺失 ⇒ 回退默认（enabled=False = 旧行为）。
+            #   🔴 R233 T-F：此前**漏传**（快照续跑静默丢 subpos）——补上并进往返测试防守。
+            subpos=SubposConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("subpos") or {}).items()
+                    if k in _SUBPOS_FIELDS
                 }
             ),
         )

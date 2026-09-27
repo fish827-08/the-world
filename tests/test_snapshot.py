@@ -52,6 +52,17 @@ def _make_ars_config(seed=42):
     return cfg
 
 
+def _make_subpos_config(seed=42):
+    """13.4 波 1 亚格连续坐标开档（`use_sim_core=False`：subpos ∧ Rust 路径构造期硬错，H3）。"""
+    cfg = _make_config(seed=seed)
+    cfg.simulation.use_sim_core = False
+    cfg.subpos.enabled = True
+    cfg.subpos.speed_max = 0.125
+    cfg.subpos.speed_gain = 0.125
+    cfg.subpos.subdiv = 80
+    return cfg
+
+
 class TestSnapshotBasic:
     """基本保存/恢复功能。"""
 
@@ -256,6 +267,51 @@ class TestSnapshotReproducibility:
                     getattr(e_cont, name)[:P2], getattr(e_load, name), err_msg=name)
             np.testing.assert_array_equal(e_cont._energy[:P2], e_load._energy[:P2])
             np.testing.assert_array_equal(e_cont._flat[:P2], e_load._flat[:P2])
+        finally:
+            os.unlink(path)
+
+    def test_subpos_config_roundtrip_and_resume_bitwise(self):
+        """R233 T-F：subpos 开档的「存档 → 续跑」必须逐位 == 连续跑。
+
+        被守护的缺陷：`SimConfig.from_dict` 曾**整段漏传 `subpos`** ⇒ `load_snapshot(path)`
+        （config=None ⇒ 走 from_dict 还原配置）把 subpos 静默退回默认（enabled=False，
+        subdiv=4 / speed_max=2.0 / gain=4.0）⇒ 续跑**换掉运动模型**（非逐位且不报错）。
+        ⚠️ 既有测试为何没抓住：其他往返测试要么显式 `config=cfg` 传入（跳过 from_dict），
+        要么用 subpos 默认（关）档；本测试刻意走 **config=None + subpos 开档**。
+        """
+        cfg = _make_subpos_config()
+        assert SimConfig.from_dict(cfg.to_dict()) == cfg, "from_dict 必须忠实回放 subpos 段"
+        e_cont = SphereEngine(cfg)
+        e_snap = SphereEngine(cfg)
+        for _ in range(60):
+            e_cont.step()
+            e_snap.step()
+        P = len(e_cont._id)
+        assert P > 0 and e_cont._sub_r.min() != e_cont._sub_r.max(), \
+            "前提：亚格坐标须非平凡（否则测试退化）"
+
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            path = f.name
+        try:
+            e_snap.save_snapshot(path)
+            e_load = SphereEngine.load_snapshot(path)      # config=None ⇒ from_dict 路径
+            assert e_load.config.subpos.enabled is True
+            assert e_load.config.subpos.subdiv == 80
+            assert float(e_load.config.subpos.speed_gain) == 0.125
+            assert e_load.config.fingerprint() == e_cont.config.fingerprint()
+            np.testing.assert_array_equal(e_cont._sub_r[:P], e_load._sub_r[:P])
+            np.testing.assert_array_equal(e_cont._sub_c[:P], e_load._sub_c[:P])
+
+            for _ in range(60):
+                e_cont.step()
+                e_load.step()
+            P2 = len(e_cont._id)
+            assert P2 == len(e_load._id)
+            np.testing.assert_array_equal(e_cont._flat[:P2], e_load._flat[:P2])
+            np.testing.assert_array_equal(e_cont._energy[:P2], e_load._energy[:P2])
+            np.testing.assert_array_equal(e_cont._sub_r[:P2], e_load._sub_r[:P2])
+            np.testing.assert_array_equal(e_cont._sub_c[:P2], e_load._sub_c[:P2])
+            np.testing.assert_array_equal(e_cont._id, e_load._id)
         finally:
             os.unlink(path)
 
