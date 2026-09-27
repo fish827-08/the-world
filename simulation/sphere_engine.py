@@ -2262,14 +2262,16 @@ class SphereEngine:
         # 信号场时间推进（标记衰减、过期清零）
         self.signals.tick()
         born, died, deaths = self._step_population()
-        # 13.4 波 2A（T2）：每 tick 末轮作（死格重入候选池 + 斑块加成同行搬移 + 反荒漠化闸）
+        # 13.4 波 2A（T2）：每 tick 末轮作（死格重入候选池 + 反荒漠化闸 + 到期休耕恢复）
         # + 按当前掩码**重算** `_capacity`（`_capacity` 是基准 ⇒ 动态折扣走 `capacity_multiplier`）。
-        # 🔴 `rand_u` 消费只在开档发生（关档 rotate 直接返回 ⇒ 零 RNG 影响）。
+        # 🔴 R226 修复①②：搬移已上移到 `note_tick`（死亡当 tick 原子完成）⇒ `rotate`
+        #    不再消费引擎 RNG（rd 改用自有 `_rng`）；回写前做 **diff 校验**（fail-loud 兜底）。
         if _rd_on:
-            n_patch = int(self.resources._patch_mask.sum()) if (
-                self.resources._patch_mask is not None) else 0
-            self._rd.rotate(self._tick, self.rng.random(max(1, n_patch)))
-            self.resources._capacity[:] = self._rd.capacity_from_base()
+            self._rd.rotate(self._tick)
+            _cap_new = self._rd.capacity_from_base()
+            # R226 裁定②：回写前校验「生产格数」与「Σcapacity」不变量（破裂即报警）
+            self._rd.validate_writeback(_cap_new, self._rd._mask)
+            self.resources._capacity[:] = _cap_new
             # 🔴 轮作会搬移斑块掩码 ⇒ 必须回写 `ResourceField._patch_mask`，
             #    否则 `_regrowth_amount` 的斑块倍率 / 尸体 patch_boost 仍用旧掩码
             #    （双掩码漂移 = I2 同族：两处规则不一致 ⇒ 归因不干净）。
