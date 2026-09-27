@@ -121,6 +121,13 @@ class ResourceDynamics:
         self.dead_cell_max_frac = float(g("dead_cell_max_frac", 0.5))
         self.kill_patch_only = bool(g("kill_patch_only", True))
         self.rotate_same_row_only = bool(g("rotate_same_row_only", True))
+        # 🔴 R226 修复②：rd **自有独立 RNG 流**（不再消费引擎 `self.rng`）。
+        #   动机：`rotate` 原用 `self.rng.random(n_patch)` ⇒ 与种群动力学共享 RNG 流，
+        #   启用 rd 即改变种群随机序列（可对拍性差、归因不干净）。独立流后：
+        #     · 引擎 RNG 序列与 rd 开关**完全解耦**（关/开档同序）
+        #     · rd 随机性来源单一、可独立复现（seed 由 cfg 或默认恒定）
+        _rd_seed = int(g("rng_seed", 20260927))
+        self._rng = np.random.default_rng(_rd_seed)
         # 🔴 `dead_regen_ticks = 0` ⇒ "永不重生" = 文献里的**不可逆荒漠化** ⇒ 硬拒绝
         assert self.dead_regen_ticks > 0, (
             "dead_regen_ticks=0 会让斑块永不再生（不可逆荒漠化）—— 这不是本设计要的东西；"
@@ -146,6 +153,20 @@ class ResourceDynamics:
             self._mask = np.array(patch_mask, dtype=bool, copy=True)
         assert self._mask.shape == (self.n_cells,), "patch_mask 形状不符"
 
+        # 🔴 R226 修复③（核心）：`bg_production_zero=True`（背景格容量=0、永久荒漠）时
+        #   **禁止轮作搬移** —— 搬移的前提是"背景格可承载"，而该设定下背景格零产能。
+        #   搬移会把唯一粮仓的位置**迁移**，导致个体站位错配（实测 ON 臂仅 50–72%
+        #   个体站在有食物的格上 vs OFF 臂 81–97%）⇒ 吃不到 ⇒ 饿死 ⇒ 灭绝。
+        #   语义：斑块"死而就地重生"（原地不动），不搬家。判据 = 背景容量倍率为 0。
+        self.bg_production_zero = (float(bg_capacity_mult) == 0.0)
+        # 轮作搬移开关（False ⇒ 加成不搬、死格原地保留斑块身份）
+        self.rotate_moves_patch = bool(g("rotate_moves_patch", True))
+        # 🔴 R226 修复③：停产乘子（0.0 = 旧行为"停产"）。`bg_production_zero=True`
+        #   ⇒ 缺省改 0.5（"减产不停产"，避免唯一粮仓被永久砍掉 ⇒ 灭绝）。
+        _def_mult = 0.5 if self.bg_production_zero else 0.0
+        self.dead_regen_mult = float(g("dead_regen_mult", _def_mult))
+        self.rest_regen_mult = float(g("rest_regen_mult", _def_mult))
+
         # 逐格计时器 / 状态
         self._rest_until = np.full(self.n_cells, -1, dtype=np.int64)
         self._dead = np.zeros(self.n_cells, dtype=bool)
@@ -163,7 +184,8 @@ class ResourceDynamics:
         self.forced_reborn_n = 0   # 累计"反荒漠化闸"强制重生事件
         self.promote_n = 0         # 累计"斑块加成搬迁"事件
 
-        # 构造期基线（`conservation_check` 用）
+        # 构造期基线（`conservation_check` / `validate_writeback` 用）
+        self._n_mask_0 = int(self._mask.sum()) if self._mask is not None else 0
         self._cap_total_0 = float(self.capacity_from_base().sum())
 
     # ---- 构造（便捷入口） ---------------------------------------------------
@@ -197,13 +219,26 @@ class ResourceDynamics:
     def growth_multiplier(self) -> np.ndarray:
         """本 tick 每格的**再生乘子**（0 = 不生长，1 = 照常）。
 
-        休耕中 或 已死 ⇒ 0。`enabled=False` ⇒ 全 1（调用方可无条件相乘）。
+        🔴 R226 修复③（核心，本次灭绝根因）：原实现"休耕 或 已死 ⇒ 乘子 0"。
+        在 `bg_production_zero=True`（背景格容量=0、**斑块格是唯一粮仓**）的世界里，
+        "停产"等价于**永久砍产能**——实测仅 2.6% 斑块格停产就让 K 从 ~700 崩到 ~80
+        （正常世界背景格贡献 67.7% 容量、兜得住，S1 世界没有任何兜底）。修法：
+
+          · **已死格**：仍按 `dead_regen_mult` 生产（默认 0.0 = 旧行为；在
+            `bg_production_zero=True` 下自动改 0.5 —— "死而富集"：受损但不停产）。
+          · **休耕格**：按 `rest_regen_mult`（默认 0.0 = 旧行为）生产；休耕语义
+            由"停产"改为"减产"（轮牧的休养期不是绝收期）。
+          · `enabled=False` ⇒ 全 1（调用方可无条件相乘，C7 逐位等价不变）。
         """
         if not self.enabled:
             return np.ones(self.n_cells, dtype=np.float64)
-        ok = ~self._dead
-        ok &= self._rest_until < 0        # 未在休耕
-        return ok.astype(np.float64)
+        mult = np.ones(self.n_cells, dtype=np.float64)
+        if self._dead.any():
+            mult[self._dead] = self.dead_regen_mult
+        resting = self._rest_until >= 0
+        if resting.any():
+            mult[resting] = np.minimum(mult[resting], self.rest_regen_mult)
+        return mult
 
     def capacity_multiplier(self) -> np.ndarray:
         """每格的**容量倍率**（斑块倍率 / 背景倍率）。轮作搬移会改变它。"""
@@ -281,9 +316,27 @@ class ResourceDynamics:
             self._rest_until[newly] = -1
             self._damage[newly] = 0.0          # 死亡清零（重生后从 0 累计）
             self.patch_kill_n += n_new
-            # 斑块格死亡 ⇒ **立刻**把斑块加成搬走（同行交换；见 docstring (C)）
-            self._demoted = newly & self._mask
-            self._mask[self._demoted] = False
+            # 🔴 R226 修复①（核心）：斑块格死亡 ⇒ **立刻、本 tick 内**把斑块加成搬到
+            #   同行背景格（原子搬移）。旧实现把它推到**下一 tick** 的 `rotate()` 里做
+            #   ⇒ 在 `bg_production_zero=True`（背景格容量=0、永久荒漠）的世界里，
+            #   死格降级与加成落位**跨 tick 分离** ⇒ 延迟窗口内"生产格数"净减少
+            #   （实测 tick500 mask 12805→12720、每 tick 取食 −16% ⇒ 物种灭绝）。
+            #   现在降级与落位同一 tick 完成 ⇒ **每 tick 内生产格守恒**。
+            _demoted = newly & self._mask
+            if _demoted.any():
+                if self.rotate_moves_patch and not self.bg_production_zero:
+                    # 正常世界（背景格有产能）：降级 + 同 tick 原子搬移加成到新格
+                    self._mask[_demoted] = False
+                    for i in np.flatnonzero(_demoted):
+                        if not self._promote_same_row(int(i)):
+                            # 无候选格 ⇒ 撤回降级（保格优先）
+                            self._mask[i] = True
+                # 🔴 bg_production_zero=True（斑块=唯一粮仓）⇒ **不搬移**：
+                #   死斑块格**保留斑块身份**（死而富集），原地"重生"时不丢粮仓位置。
+                #   理由见 `__init__` 的 `bg_production_zero` 注释：搬移会让粮仓
+                #   位置迁移、个体站位错配 ⇒ 灭绝。轮作只体现在"再生闸"（死亡期停长）。
+                # 搬移已即时完成/无需搬移 ⇒ 清零 `_demoted`
+                self._demoted[:] = False
 
         # --- 休耕：损伤超阈且未休耕未死 ⇒ 进入休耕（固定时长，**不刷新**）---
         enter_rest = (
@@ -296,26 +349,19 @@ class ResourceDynamics:
 
     # ---- ③ 轮作：重生 + 搬加成 + 反荒漠化闸 ---------------------------------
 
-    def rotate(self, tick: int, rand_u: np.ndarray) -> None:
-        """死格重入候选池 + 把斑块加成搬到随机背景格 + 反荒漠化闸。
+    def rotate(self, tick: int) -> None:
+        """死格到期重入候选池 + 到期休耕恢复 + 反荒漠化闸。
 
-        参数
-        ----
-        tick : int
-            当前时间步。
-        rand_u : NDArray[float64]
-            **调用方提供**的均匀随机数（[0,1)），长度 ≥ 本 tick 需要的抽取次数。
-            ⚠️ 模块**不持有 RNG** ⇒ 随机性来源单一、可对拍。
+        🔴 R226 修复①：**斑块加成搬移已移到 `note_tick` 内**（死亡当 tick 原子完成）
+        ⇒ 本函数不再做搬移、不再消费 RNG（`rand_u` 参数已移除）。
         """
         if not self.enabled:
             return
-        rand_u = np.asarray(rand_u, dtype=np.float64).ravel()
-        used = 0
 
-        # --- ① 先补上"上一步死亡留下的搬迁"（若还没搬）---
+        # --- ① 防御性补搬（正常情况下 `note_tick` 已即时搬完 ⇒ 此处恒空）---
         if self._demoted.any():
             for i in np.flatnonzero(self._demoted):
-                used = self._promote_same_row(int(i), rand_u, used)
+                self._promote_same_row(int(i))
             self._demoted[:] = False
 
         # --- ② 到期休耕恢复（2026-09-23 实验：B–E 臂灭绝根因 + 波2 修 v2）---
@@ -349,20 +395,71 @@ class ResourceDynamics:
             self._rest_until[force] = -1
             self.forced_reborn_n += int(force.size)
 
-    def _promote_same_row(self, dead_cell: int, rand_u: np.ndarray, used: int) -> int:
-        """把斑块加成搬到一个**与 `dead_cell` 同行**的随机背景格（逐位守恒）。"""
+    # ---- ④ 修复②：回写前 diff 校验（R226 裁定②）----------------------------
+
+    def validate_writeback(self, cap_after: np.ndarray, mask_after: np.ndarray) -> dict:
+        """回写前校验：搬移只该**换位置**，不该改「生产格数」或「总容量」。
+
+        🔴 R226 修复②（裁定②"回写前 diff 校验"）：本函数作**兜底防线**（非唯一防线）。
+        返回读数；发现不变量破裂即 **fail-loud**（raise），不给"静默荒漠化"留缝。
+
+        不变量：
+          · `mask.sum()`（生产格数）**恒等于初始值** —— 搬移只搬加成、不增不减格数
+            （本次灭绝 bug 的漏检点：tick500 生产格 12805→12720）。
+          · `Σcapacity` 与初始值**相对差 < 1e-9**（`bg_production_zero=False` 时守恒；
+            `=True` 时"斑块部分守恒"——生产格数不变 ⇒ 斑块总容量不变）。
+        """
+        if not self.enabled:
+            return {"checked": False}
+        n_mask = int(np.asarray(mask_after).sum())
+        cap_sum = float(np.asarray(cap_after).sum())
+        n_mask0 = self._n_mask_0
+        cap_sum0 = self._cap_total_0
+        mask_ok = (n_mask == n_mask0)
+        cap_rel = abs(cap_sum - cap_sum0) / max(abs(cap_sum0), 1e-12)
+        cap_ok = (cap_rel < 1e-9)
+        out = {
+            "checked": True,
+            "mask_n": n_mask, "mask_n0": n_mask0, "mask_ok": mask_ok,
+            "cap_sum": cap_sum, "cap_sum_0": cap_sum0,
+            "cap_rel_diff": cap_rel, "cap_ok": cap_ok,
+        }
+        if not mask_ok:
+            raise RuntimeError(
+                f"🔴 rd 不变量破裂：生产格数 {n_mask0} → {n_mask}（搬移只该换位置、不该丢格）。"
+                "这正是 bg_production_zero=True 下导致灭绝的漏洞 —— 请检查搬移原子性。"
+            )
+        if not cap_ok:
+            raise RuntimeError(
+                f"🔴 rd 不变量破裂：Σcapacity 相对漂移 {cap_rel:.3e} > 1e-9 "
+                f"（{cap_sum0} → {cap_sum}）—— 搬移破坏了容量守恒。"
+            )
+        return out
+
+    def _promote_same_row(self, dead_cell: int) -> bool:
+        """把斑块加成搬到一个**与 `dead_cell` 同行**的随机背景格（逐位守恒）。
+
+        🔴 R226 修复①②：改用**自有 RNG**（`self._rng`）⇒ 不再消费引擎随机流；
+        调用时机由 `rotate()` 改到 `note_tick()` 死亡判定内（同 tick 原子搬移）。
+
+        Returns
+        -------
+        bool : 是否成功搬移。**False ⇒ 未找到候选格**（调用方必须回退：
+               `bg_production_zero=True` 下"降级却不落位"= 永久丢一个生产格 ⇒ 灭绝）。
+        """
         row = self._row
         if self.rotate_same_row_only:
             cand = np.flatnonzero((~self._mask) & (row == row[dead_cell]) & (~self._dead))
         else:
             cand = np.flatnonzero((~self._mask) & (~self._dead))
         if cand.size == 0:
-            return used
-        u = float(rand_u[used % rand_u.size]) if rand_u.size else 0.0
-        j = int(cand[min(int(u * cand.size), cand.size - 1)])
+            # 🔴 无候选格 ⇒ 返回 False，由调用方**撤回降级**（保格优先）。
+            #   ⚠️ 绝不跨行搬：跨行交换会破坏 Σcapacity 守恒（docstring (C) 实测 +1.886e+03）。
+            return False
+        j = int(cand[self._rng.integers(0, cand.size)])
         self._mask[j] = True
         self.promote_n += 1
-        return used + 1
+        return True
 
     # ---- 读数与自检 ---------------------------------------------------------
 

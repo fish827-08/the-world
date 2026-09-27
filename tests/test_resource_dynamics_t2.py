@@ -143,12 +143,12 @@ def test_rest_expires_and_recovers():
     intake[0] = rd.rest_threshold * cap0 + 1e-9
     rd.note_tick(intake, growth, t0)
     d0 = float(rd._damage[0])
-    assert rd.growth_multiplier()[0] == 0.0, "休耕中应 0"
+    assert rd.growth_multiplier()[0] == rd.rest_regen_mult, "休耕中应减产"
     # 到期前 rotate ⇒ 仍休耕（不提前恢复）
-    rd.rotate(t0 + rt - 1, np.array([0.5]))
-    assert rd.growth_multiplier()[0] == 0.0, "到期前不应恢复"
+    rd.rotate(t0 + rt - 1)
+    assert rd.growth_multiplier()[0] == rd.rest_regen_mult, "到期前不应恢复"
     # 到期后 rotate ⇒ 恢复生长 + damage 按 recovery 衰减
-    rd.rotate(t0 + rt, np.array([0.5]))
+    rd.rotate(t0 + rt)
     assert rd.growth_multiplier()[0] == 1.0, "到期后应恢复生长（rest_until 重置）"
     assert float(rd._damage[0]) == pytest.approx(d0 * rd.damage_recovery, rel=1e-9), (
         "休耕到期损伤应按 damage_recovery 衰减")
@@ -215,7 +215,7 @@ def test_rotation_reborn_and_promote():
     rd._mask[patch_cell] = False
     rd._demoted[patch_cell] = True
     # rotate：先搬走 `_demoted` 的加成（promote_n ≥ 1），再处理到期重生（tick 3000 ≥ 2000）
-    rd.rotate(3000, np.linspace(0.0, 1.0, max(n_patch0, 1)))
+    rd.rotate(3000)
     assert rd.promote_n >= 1, "死格斑块加成应被搬移（promote）"
     assert not rd._dead[patch_cell], "到期死格应重生"
     assert rd.patch_reborn_n >= 1, "应记重生事件"
@@ -252,7 +252,7 @@ def test_dead_cell_max_frac_gate():
     rd._dead[:kill_frac_cells] = True
     rd._dead_since[:kill_frac_cells] = 0
     n_patch = int(rd._mask.sum())
-    rd.rotate(100, np.linspace(0.0, 1.0, max(n_patch, 1)))
+    rd.rotate(100)
     assert rd.forced_reborn_n > 0, "超阈应触发强制重生（反荒漠化闸）"
     assert int(rd._dead.sum()) <= int(0.5 * n), "闸后死格应回落到 ≤ 阈值"
 
@@ -286,3 +286,107 @@ def test_rd_probe_readback():
     assert len(e._id) > 0, "2000 tick 冒烟种群应存活"
     e_off = _engine(ticks=50, rd=False)
     assert e_off.resource_dynamics_probe() is None, "关档应 None（未适用）"
+
+
+# ------------------------------------------------- ⑪ R226 裁定③：rd「启用但不触发」≡ 关档
+
+def _digest_len(e: SphereEngine) -> tuple[int, int, float]:
+    """种群规模 + 个体 id 校验和 + 能量和（比 _digest 更严：含个体身份）。"""
+    return (int(len(e._flat)), int(e._flat.sum()), round(float(e._energy.sum()), 6))
+
+
+def _run_isolated(e: SphereEngine, n: int,
+                  global_state) -> tuple[int, int, float]:
+    """在**指定的全局 numpy 随机状态**下把 `e` 跑 n tick，返回末态摘要。
+
+    🔴 R226 追加发现（2026-09-27）——两个引擎**同进程交错步进**会因**全局 RNG 污染**
+    而假性分化（与 rd 无关）：
+      · `sphere_engine` 在感知噪声（`perception_noise>0`，:3243）与 Steels 对齐
+        （`steels_alignment`，:3687）两处用的是**进程级 `np.random`**，不是引擎自己的
+        `self.rng`；
+      · 引擎构造时 `np.random.seed(seed)`；当 A、B 交错 `step()` 时，A 步进消耗的全局
+        随机数会顺延给 B ⇒ 二者在**共享的噪声流上错位** ⇒ 轨迹必然分化（实测 4 个个
+        体移动到不同格，diff 恒为 [115 119 183 188]）。
+    本函数通过「步进前把全局状态复位到该引擎构造刚完成时的快照」来**消除该混淆**：
+    两个引擎各自从同一全局状态出发、互不干扰 ⇒ 得到的差异只可能来自引擎代码本身。
+    跨进程实测（`python -c` 两次独立运行）同样给出逐位一致，坐实"分化纯系同进程
+    全局 RNG 污染"。
+    """
+    np.random.set_state(global_state)
+    for _ in range(n):
+        if e.extinct:
+            break
+        e.step()
+    return _digest_len(e)
+
+
+@pytest.mark.parametrize("patchy", [False, True])
+def test_rd_enabled_but_noop_equivalent_to_off(patchy: bool):
+    """R226 裁定③（本次灭绝 bug 的漏检点）：rd **启用但不触发任何阈值**时，
+    种群轨迹必须 ≡ 关档（逐位对拍）。
+
+    构造：`enabled=True`，但把三条阈值全抬高到**永不触发**
+      · `rest_threshold = 1e30`   ⇒ 永不休耕
+      · `death_threshold = 1e30`  ⇒ 永不判死（主通道）
+      · `kill_frac = 1e30`        ⇒ 永不判死（补充通道）
+    此时 `growth_multiplier()` 应恒为 1（无 dead / 无 rest）⇒ 再生路径与关档逐位等价。
+
+    ⚠️ 旧实现漏检的原因：C7 只覆盖 `enabled=False`，而"enabled=True 但 no-op"这条
+    路径无人对拍 —— 恰是本次 `bg_production_zero=True` 下灭绝的藏身处。
+
+    ⚠️ 对拍方式（R226 追加）：**各自在独立的全局 RNG 状态下整段跑完**，不做逐 tick
+    交错（`_run_isolated`）——交错会因全局 `np.random` 共享而假性分化。
+    """
+    n = 60
+    e_off = _engine(ticks=0, rd=False, patchy=patchy)
+    off_state = np.random.get_state()        # 构造刚完成的全局状态
+
+    cfg = SimConfig(seed=42)
+    cfg.population.max_count = 600
+    cfg.predation.forage_tradeoff_k = 0.0
+    cfg.info_structure = InfoStructureConfig(
+        enabled=True, learning_rate=0.05, memory_gradient="none")
+    cfg.resources.distribution = "patchy" if patchy else "uniform"
+    cfg.simulation.use_sim_core = False
+    cfg.resource_dynamics = ResourceDynamicsConfig(enabled=True)
+    cfg.resource_dynamics.rest_threshold = 1e30
+    cfg.resource_dynamics.death_threshold = 1e30
+    cfg.resource_dynamics.kill_frac = 1e30
+    e_on = SphereEngine(cfg)
+    on_state = np.random.get_state()
+
+    # 两个引擎构造刚完成时的全局 RNG 状态应一致（同 seed、同构造消耗量）
+    assert all(np.array_equal(x, y)
+               for x, y in zip(off_state, on_state)), (
+        "两引擎构造后的全局 RNG 状态不一致 ⇒ 隔离对拍前提被破坏")
+
+    # 各自隔离地跑完（消除全局 RNG 交叉污染），再逐位比对末态
+    d_on = _run_isolated(e_on, n, on_state)
+    d_off = _run_isolated(e_off, n, off_state)
+    assert d_on == d_off, (
+        "rd 启用但不触发阈值时轨迹应 ≡ 关档（逐位）；"
+        f"on={d_on} off={d_off}")
+
+    # 过程不变量（在同一隔离上下文中单跑一遍 e_on 复查掩码稳定）
+    rd = e_on._rd
+    assert not rd._dead.any(), "阈值抬高后不应有死亡格"
+    assert (rd._rest_until < 0).all(), "阈值抬高后不应有休耕格"
+    assert int(rd._mask.sum()) == rd._n_mask_0, (
+        f"生产格数漂移 {rd._n_mask_0} → {int(rd._mask.sum())}")
+
+
+def test_bg_production_zero_keeps_regrowth_alive():
+    """R226 修复③回归：`bg_production_zero=True`（斑块=唯一粮仓）时，
+    rd 的死亡/休耕格**只减产不停产**（`dead_regen_mult/rest_regen_mult > 0`），
+    否则唯一粮仓被永久砍掉 ⇒ 灭绝（本次 bug 的最终机制）。"""
+    cfg = SimConfig(seed=42)
+    cfg.resources.distribution = "patchy"
+    cfg.resources.bg_production_zero = True
+    cfg.resource_dynamics = ResourceDynamicsConfig(enabled=True)
+    e = SphereEngine(cfg)
+    rd = e._rd
+    assert rd.bg_production_zero is True, "应识别出背景产能归零"
+    assert rd.dead_regen_mult > 0.0 and rd.rest_regen_mult > 0.0, (
+        "背景归零世界必须'减产不停产'（否则唯一粮仓被砍 ⇒ 灭绝）")
+    gm = rd.growth_multiplier()
+    assert float(gm.min()) > 0.0, "即使全格死亡/休耕，乘子也不该出现 0"
