@@ -92,6 +92,13 @@ _reclone_tmp/
 # R221 §四：run meta（续跑用 run 身份 + k）与快照**同行**，跨机分片要一起带走
 !_rerun_logs/snap/*.json
 
+# === R237（2026-09-27）：冒烟产物不入库 ===
+# T-F 的续跑冒烟（`rd_resume_smoke.py --out .../snap/smoke_*`）会在**子目录**里产生
+# `.snapshot*` 侧车（pkl/json）—— 上面的 `!_rerun_logs/snap/*.pkl` 通配符**不跨目录**，
+# 所以它们会以"未跟踪"身份常驻，把 `shutdown_gate.py` 的"工作区干净"一项长期挂红。
+# 冒烟产物可再生（重跑一条命令即有），**不入库**；正式批的快照（`snap/<preset>/`）不受影响。
+_rerun_logs/snap/smoke_*/
+
 # === R111：写入锁（同机机制，锁文件不入库；说明见 _share/.locks/README.md）===
 _share/.locks/*.lock
 _share/.locks/_retired/
