@@ -98,9 +98,15 @@ def main():
         c2.append({"seed": sd, "off_var_tail": vo, "on_var_tail": vn,
                    "on_gt_off": (vn is not None and vo is not None and vn > vo),
                    "ratio": (round(vn / vo, 3) if vo else None)})
+    n_pos = sum(1 for x in c2 if x["on_gt_off"])
     res["criteria"]["criterion_2_patch_var"] = {
         "line": "on 臂斑块方差 显著 > off 臂",
         "per_seed": c2,
+        # R229 §二 / R232 口径：**按 seed 分层**，多数 seed 一致为正即通过
+        #   （取代 R225 原「全 seed 通过」；原口径在 3 seed 下任一翻转即否，过严）
+        "n_seed": len(c2),
+        "n_seed_on_gt_off": n_pos,
+        "verdict_majority_pass": (n_pos * 2 > len(c2)) if c2 else None,
         "verdict_all_pass": (all(x["on_gt_off"] for x in c2) if c2 else None),
         "mean_off_var": (st.mean([x["off_var_tail"] for x in c2]) if c2 else None),
         "mean_on_var": (st.mean([x["on_var_tail"] for x in c2]) if c2 else None),
