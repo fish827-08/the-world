@@ -10,7 +10,9 @@
 - 单元：稀疏 `tick` 与全场版逐 tick 逐位一致（同随机写入/清除序列）
 - 前提守卫：不安全配置（ts≠1 / 光敏≠0 / 负背景倍率 / uniform）**自动拒绝启用**
 - 引擎：同 seed 开关两跑 digest 逐位一致（**且断言机制真的开了**，防静默 no-op）
-- 引擎：范围锁（use_sim_core / resource_dynamics 开 ⇒ 不启用）
+- 引擎：范围锁（use_sim_core ⇒ 两侧都不启用；resource_dynamics 开 ⇒ 仅**资源侧**不启用；
+  R231 T-E 起信号侧与资源侧解耦 ⇒ rd 开档信号照常稀疏，对拍见 ④b）
+- 引擎：rd 开档信号稀疏对拍（逐 tick digest + 快照续跑）—— R231 T-E 新增
 - 快照：稀疏档 save→load 后继续跑，与不中断的同批逐位一致（派生集重建正确）
 - 变异（R219 §二-2）：**漏标脏**的变异体必须让对拍变红（consume / consume_many 各一）；
   **多标脏**的变异体必须仍然全绿（"多标无害"才真成立）
@@ -236,7 +238,9 @@ def test_engine_sparse_scope_guards():
     c2 = _cfg(sparse=True)
     c2.resource_dynamics.enabled = True
     e2 = SphereEngine(c2)
-    assert e2._sparse_fields is False
+    # R231 T-E：rd 开 ⇒ **仅资源侧**退场；信号侧已解耦（与 rd 正交）⇒ 照常稀疏
+    assert e2._sparse_fields is False and e2.resources._lazy is False
+    assert e2.signals._sparse is True
 
     # 资源侧前提不满足 ⇒ 只有资源退回（信号照常稀疏）
     c3 = _cfg(sparse=True)
@@ -263,6 +267,63 @@ def test_engine_sparse_snapshot_roundtrip(tmp_path):
         e.step()
         e2.step()
     assert _digest(e) == _digest(e2), "恢复后续跑与不中断同批不一致 ⇒ 派生集重建有误"
+
+
+# ------------------------------------------------- ④b rd 开档信号解耦（R231 T-E）
+
+
+def _rd_cfg(sparse: bool, ticks: int = 150) -> SimConfig:
+    """`_cfg` + `resource_dynamics` 开（T-E 目标档：rd ∧ 信号稀疏）。"""
+    c = _cfg(sparse=sparse, ticks=ticks)
+    c.resource_dynamics.enabled = True
+    return c
+
+
+def test_engine_rd_on_signal_sparse_matches_full_bitwise():
+    """R231 T-E：rd 开档，信号稀疏开 vs 关 ⇒ **逐 tick** 全状态逐位一致。
+
+    资源侧两跑均为全场（资源侧闸未放开 ⇒ `_lazy is False`）⇒ 本测试只验
+    "信号稀疏在 rd 开档下不破等价"（rd 与信号活跃集正交）。
+    """
+    ea, eb = SphereEngine(_rd_cfg(sparse=False)), SphereEngine(_rd_cfg(sparse=True))
+    # 🔴 防静默 no-op：rd 真开、信号侧真稀疏（关侧真全场）、资源侧两跑都保持全场
+    assert ea._rd.enabled is True and eb._rd.enabled is True
+    assert eb.signals._sparse is True and ea.signals._sparse is False
+    assert ea.resources._lazy is False and eb.resources._lazy is False
+
+    saw_active = False
+    for t in range(150):
+        if ea.extinct or eb.extinct:
+            break
+        ea.step()
+        eb.step()
+        saw_active |= eb.signals._active_idx.size > 0
+        assert _digest(ea) == _digest(eb), f"rd 开档信号稀疏在 tick {t + 1} 破了等价"
+    assert ea.tick > 10, "两跑过早结束（灭绝）⇒ 证据不足"
+    assert saw_active, "信号活跃集全程为空 ⇒ 等价是平凡真（本测试空转）"
+
+
+def test_engine_rd_on_signal_sparse_snapshot_roundtrip(tmp_path):
+    """rd 开档稀疏信号 save→load：活跃集（派生量）重建 ⇒ 续跑与不中断同批逐位一致。"""
+    e = SphereEngine(_rd_cfg(sparse=True))
+    for _ in range(60):
+        if e.extinct:
+            break
+        e.step()
+    assert e.tick > 10, "过早灭绝 ⇒ 快照证据不足"
+    path = tmp_path / "rd_signal_snap.npz"
+    e.save_snapshot(str(path))
+    e2 = SphereEngine.load_snapshot(str(path))
+    assert e2.signals._sparse is True, "快照恢复后信号稀疏丢失（闸未随配置还原）"
+    assert e2.resources._lazy is False, "rd 档资源侧应保持全场（现状语义）"
+    assert _digest(e) == _digest(e2), "快照往返本身不一致（本测试前提）"
+
+    for _ in range(40):
+        if e.extinct:
+            break
+        e.step()
+        e2.step()
+    assert _digest(e) == _digest(e2), "恢复后续跑与不中断同批不一致 ⇒ 活跃集重建有误"
 
 
 def test_c7_digest_identical_with_sparse_switch():

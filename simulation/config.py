@@ -388,8 +388,10 @@ class SimulationConfig:
     #   （论证见 `world/resource_field.py::_regrow_lazy` 与 `world/signal_field.py::tick`）：
     #   窗口恒 1 tick、子集执行与全场逐元素同式、净格在非负增长下是逐位 no-op。
     # ⚠️ **范围锁**（引擎侧，任一不满足 ⇒ 退回全场路径，静默无害）：
-    #   `use_sim_core=False`（Rust 直写 `_grid`/`_marks`，打脏点覆盖不到）
-    #   且 `resource_dynamics` 关（每 tick 改 `_capacity`/掩码，勤耕前提被破坏）；
+    #   `use_sim_core=False`（Rust 直写 `_grid`/`_marks`，打脏点覆盖不到）——两侧共用；
+    #   资源侧再加 `resource_dynamics` 关（每 tick 改 `_capacity`/掩码，净格恒净前提被破坏）。
+    #   R231 T-E：**信号侧与资源侧解耦** —— 信号活跃集（`age>0`）自包含、与 rd 正交
+    #   （rd 不写 `_marks`）⇒ **rd 开档信号侧照常稀疏**（v1 拟再放开资源侧 bgzero 档）。
     #   资源侧另有前提校验（`ResourceField.enable_lazy`，如 `temp_sensitivity==1.0`）。
     # 🔴 默认 False = **旧行为逐位不变**（全场分支代码原样保留；本开关 = 唯一回滚点）。
     # ⚠️ 挂进 `SimConfig` ⇒ 经 `asdict` **自动进 `fingerprint()`**（同 `subpos` 家族）：

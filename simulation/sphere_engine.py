@@ -295,8 +295,9 @@ class SphereEngine:
         "_tick", "_extinct", "_finished", "_history",
         "_history_limit", "_run_born", "_run_died", "_run_deaths",
         "_use_sim_core", "_sim_core",
-        # R217 §五 #1 稀疏化 B：范围闸（配置开关 ∧ py 路径 ∧ ¬资源动态）；
-        #   逐字段惰性/稀疏开关在 `resources._lazy` / `signals._sparse`
+        # R217 §五 #1 稀疏化 B：本属性 = **资源侧**范围闸（配置开关 ∧ py 路径 ∧ ¬资源动态）；
+        #   逐字段开关在 `resources._lazy` / `signals._sparse`（R231 T-E 起两侧解耦，
+        #   `_sparse_fields=False` **不再**意味着信号侧退场）
         "_sparse_fields",
         "_fruit_grid", "_fruit_charge", "_seed_carried",  # L10a
         # ---- D-17/D-18/D-8（⑤⑥ 探针 + oracle）----
@@ -834,18 +835,22 @@ class SphereEngine:
         self._rd = _ResourceDynamics.from_field(
             _rdcfg0, self.resources, self.world)
         # ---- R217 §五 #1 稀疏化 B：惰性再生 / 稀疏信号（默认关 ⇒ 全场路径逐位不变）----
-        # 🔴 范围锁（缺一不可）：① 配置开关；② Python 路径（Rust `consume_many` /
-        #    `regrow_patchy` / `signal_emit` **直写** `_grid`/`_marks`，打脏点覆盖不到）；
-        #    ③ 资源动态关（每 tick 改 `_capacity`/斑块掩码，"净格恒净"前提被破坏）。
+        # 🔴 范围锁（引擎侧）：共用 ① 配置开关；② Python 路径（Rust `consume_many` /
+        #    `regrow_patchy` / `signal_emit` **直写** `_grid`/`_marks`，打脏点覆盖不到）。
+        #    资源侧再加 ③ 资源动态关（每 tick 改 `_capacity`/斑块掩码，"净格恒净"前提被破坏）。
         # 资源侧另有前提校验（`enable_lazy`：temp_sensitivity/light_sensitivity/倍率符号）
         # ⇒ 不满足时它返回 False 并**保持全场路径**（安全回退；`resources._lazy` 即真值）。
-        self._sparse_fields = bool(
+        # R231 T-E：**信号侧与资源侧解耦** —— 信号活跃集（`age>0`）自包含、与 rd 正交
+        #    （rd 不写 `_marks`）⇒ 信号侧范围锁只剩 ①②；rd 开档（含 bgzero S 线）照常稀疏。
+        #    两侧真值以 `resources._lazy` / `signals._sparse` 为准（`_sparse_fields` = 资源侧闸）。
+        _sparse_cfg = bool(
             getattr(config.simulation, "sparse_fields", False)
             and not self._use_sim_core
-            and not bool(getattr(self._rd, "enabled", False))
         )
+        self._sparse_fields = _sparse_cfg and not bool(getattr(self._rd, "enabled", False))
         if self._sparse_fields:
             self.resources.enable_lazy()
+        if _sparse_cfg:
             self.signals.enable_sparse()
         self._rd_intake_sum = np.zeros(self.world.n_cells, dtype=np.float64)
         self._rd_growth_sum = np.zeros(self.world.n_cells, dtype=np.float64)
