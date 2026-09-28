@@ -229,12 +229,14 @@ def patch_saturation(world, eng, labels: np.ndarray,
 
 # ---------- 单 run ----------
 
-def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
+def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
+            bg_low_prod_frac=0.0, bg_low_cap_mult=0.0):
     # 🔴 对齐 S1：subpos=on + S1_BASE 的 k/gain/subdiv/speed_max/max_count
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
         S1_BASE["speed_max"], S1_BASE["gain"], S1_BASE["subdiv"],
         S1_BASE["k"], S1_BASE["max_count"], rgm,
+        bg_low_prod_frac=bg_low_prod_frac, bg_low_cap_mult=bg_low_cap_mult,
     )
     c.simulation.use_sim_core = False          # 两臂统一 Python 路径（= S1 基线）
     c.resource_dynamics.enabled = bool(rd_on)  # 处理臂开局部可耗竭
@@ -250,6 +252,17 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
                      for lab in uniq0}
     init_cap_sum = float(eng.resources._capacity.sum())
 
+    # ---- 🔴 R242 附加核验：背景低产能带是否生效 + 生物是否真的用了它 ----
+    #   ① 低产能格实际占比（确认 40% 生效，不是静默）
+    #   ② 生物在背景格（含低产能格）的时间占比（验证"续命带"是否被使用）
+    _bm = getattr(eng.resources, "_bg_low_mask", None)
+    _pm_all = eng.resources._patch_mask
+    _n_low = int(_bm.sum()) if _bm is not None else 0
+    _n_bg = int((~_pm_all).sum()) if _pm_all is not None else 0
+    _bg_low_frac_actual = (_n_low / _n_bg) if _n_bg else 0.0
+    _bg_resid_sum = 0.0     # 累计"个体·tick 落在背景格"数
+    _obs_ticks = 0          # 累计观测 tick 数
+
     rows_out = []
     t_slice = time.perf_counter()
     last = 0
@@ -263,6 +276,10 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
     l0_any = {"dead": 0, "rest": 0, "demoted": 0}
     for t in range(1, ticks + 1):
         eng.step()
+        # ---- 🔴 R242 附加核验：背景停留统计（每 tick 累计，非仅采样点）----
+        if _pm_all is not None and len(eng._flat):
+            _bg_resid_sum += float((~_pm_all[eng._flat]).sum())
+            _obs_ticks += int(len(eng._flat))
         # L1：本 tick 的生物占格 → 折算到斑块标签（向量化，仅 bgzero 档 labels 稳定）
         flat = eng._flat
         if flat.size and n_patch_total:
@@ -347,6 +364,10 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
                 "d_old": dv.get("OLD_AGE", 0),
                 "d_pred": dv.get("PREDATION", 0),
                 "ms_per_tick": dt, **ps, **l1, **l2, **l3,
+                "bg_low_frac_actual": round(_bg_low_frac_actual, 6),
+                "bg_low_n": _n_low,
+                "bg_resid_frac": (round(_bg_resid_sum / _obs_ticks, 6)
+                                  if _obs_ticks else float("nan")),
                 "l0_peak_dead": l0_peak["dead"], "l0_peak_rest": l0_peak["rest"],
                 "l0_peak_demoted": l0_peak["demoted"],
                 "l0_any_dead": l0_any["dead"], "l0_any_rest": l0_any["rest"],
@@ -374,6 +395,11 @@ def main():
     ap.add_argument("--ticks", type=int, default=40000)
     ap.add_argument("--sample", type=int, default=250)
     ap.add_argument("--rgm", type=float, default=1.195)
+    # ---- 🔴 R242 背景低产能带（默认 0/0 = 现行为）----
+    ap.add_argument("--bg-low-prod-frac", type=float, default=0.0,
+                    help="背景格中获极低产能的比例（0=全零产能=现行为）")
+    ap.add_argument("--bg-low-cap-mult", type=float, default=0.0,
+                    help="背景低产能格的容量/再生倍率（0=零产能=现行为）")
     ap.add_argument("--arms", choices=("both", "on", "off"), default="both")
     ap.add_argument("--out", default="results/s2_depletion.csv")
     a = ap.parse_args()
@@ -397,20 +423,24 @@ def main():
               "l3_net_sum", "l3_net_per_capita", "l3_pop_mean",
               # ---- R241 L0 轮休（累计峰值 / 出现 tick 数） ----
               "l0_peak_dead", "l0_peak_rest", "l0_peak_demoted",
-              "l0_any_dead", "l0_any_rest", "l0_any_demoted"]
+              "l0_any_dead", "l0_any_rest", "l0_any_demoted",
+              # ---- 🔴 R242 背景低产能带核验 ----
+              "bg_low_frac_actual", "bg_low_n", "bg_resid_frac"]
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     with open(a.out, "w") as f:
         f.write(",".join(header) + "\n")
         print(f"# S2 探针：rows={a.rows} cols={a.cols} patches={a.patches} "
-              f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} arms={arms}")
+              f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} arms={arms} "
+              f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult}")
         print(",".join(header))
         summary = []
         for sd in seeds:
             for arm in arms:
                 t0 = time.time()
                 rows_out, stop = run_one(sd, a.rows, a.cols, a.pop, a.patches,
-                                         a.ticks, a.sample, a.rgm, arm == "on")
+                                         a.ticks, a.sample, a.rgm, arm == "on",
+                                         a.bg_low_prod_frac, a.bg_low_cap_mult)
                 for r in rows_out:
                     line = ",".join(str(r[h]) for h in header)
                     f.write(line + "\n")
