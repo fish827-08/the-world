@@ -1,0 +1,254 @@
+{
+  "per_seed": {},
+  "criteria": {
+    "criterion_1_K_drop": {
+      "line": "K 下降 ≤ 30%",
+      "per_seed": [
+        {
+          "seed": "42",
+          "K_on": 532.0,
+          "K_off": 901.0,
+          "drop_vs_off": 0.4095449500554939,
+          "pass_le_30pct": false
+        },
+        {
+          "seed": "43",
+          "K_on": 423.0,
+          "K_off": 791.0,
+          "drop_vs_off": 0.46523388116308473,
+          "pass_le_30pct": false
+        },
+        {
+          "seed": "44",
+          "K_on": 364.0,
+          "K_off": 893.0,
+          "drop_vs_off": 0.5923852183650616,
+          "pass_le_30pct": false
+        }
+      ],
+      "verdict_all_pass": false,
+      "mean_drop_vs_off": 0.48905468319454676
+    },
+    "criterion_2_patch_var": {
+      "line": "on 臂斑块方差 显著 > off 臂",
+      "per_seed": [
+        {
+          "seed": "42",
+          "off_var_tail": 0.03222275287021409,
+          "on_var_tail": 0.037190195841961676,
+          "on_gt_off": true,
+          "ratio": 1.154
+        },
+        {
+          "seed": "43",
+          "off_var_tail": 0.0314265405789731,
+          "on_var_tail": 0.02751124996186696,
+          "on_gt_off": false,
+          "ratio": 0.875
+        },
+        {
+          "seed": "44",
+          "off_var_tail": 0.025949177141998483,
+          "on_var_tail": 0.023196128608751757,
+          "on_gt_off": false,
+          "ratio": 0.894
+        }
+      ],
+      "n_seed": 3,
+      "n_seed_on_gt_off": 1,
+      "verdict_majority_pass": false,
+      "verdict_all_pass": false,
+      "mean_off_var": 0.02986615686372856,
+      "mean_on_var": 0.02929919147086013
+    },
+    "criterion_3_starvation": {
+      "line": "饿死占比上升（S1 基线 0.22–0.3）",
+      "per_seed": [
+        {
+          "seed": "42",
+          "off_starv_frac": 0.33032210809019724,
+          "on_starv_frac": 0.41237711055822607,
+          "rise": true,
+          "in_s1_band_off": false,
+          "in_s1_band_on": false
+        },
+        {
+          "seed": "43",
+          "off_starv_frac": 0.32352231156338784,
+          "on_starv_frac": 0.3814974182444062,
+          "rise": true,
+          "in_s1_band_off": false,
+          "in_s1_band_on": false
+        },
+        {
+          "seed": "44",
+          "off_starv_frac": 0.3463895751221076,
+          "on_starv_frac": 0.36712310987085467,
+          "rise": true,
+          "in_s1_band_off": false,
+          "in_s1_band_on": false
+        }
+      ],
+      "verdict_all_rise": true
+    }
+  },
+  "sanity_cap_lost": {
+    "max_cap_lost_frac": 0.0,
+    "note": "修复后生产格零损失 ⇒ 应 ≈ 0；非 0 说明 rd 又在丢格"
+  },
+  "layers_r241": {
+    "L0_rd_cycling": {
+      "line": "on 臂必须出现耗竭/休耕事件（>0）；恒 0 ⇒ 判『rd 未轮休』",
+      "per_seed": [
+        {
+          "seed": "42",
+          "peak_dead": 868.0,
+          "peak_rest": 70.0,
+          "peak_demoted": 0.0,
+          "any_dead_ticks": 20000.0,
+          "any_rest_ticks": 19999.0,
+          "any_demoted_ticks": 0.0
+        },
+        {
+          "seed": "43",
+          "peak_dead": 672.0,
+          "peak_rest": 81.0,
+          "peak_demoted": 0.0,
+          "any_dead_ticks": 20000.0,
+          "any_rest_ticks": 19992.0,
+          "any_demoted_ticks": 0.0
+        },
+        {
+          "seed": "44",
+          "peak_dead": 580.0,
+          "peak_rest": 65.0,
+          "peak_demoted": 0.0,
+          "any_dead_ticks": 20000.0,
+          "any_rest_ticks": 20000.0,
+          "any_demoted_ticks": 0.0
+        }
+      ],
+      "verdict_rd_cycling": true
+    },
+    "L1_exploration": {
+      "line": "on 臂覆盖率更高 / 首访更早（≥2/3 seed）",
+      "per_seed": [
+        {
+          "seed": "42",
+          "off_visited_frac": 0.1583710407239819,
+          "on_visited_frac": 0.15384615384615385,
+          "cover_on_gt_off": false,
+          "off_first_visit_median": 1.0,
+          "on_first_visit_median": 1.0,
+          "first_visit_on_earlier": false
+        },
+        {
+          "seed": "43",
+          "off_visited_frac": 0.13990825688073394,
+          "on_visited_frac": 0.13302752293577982,
+          "cover_on_gt_off": false,
+          "off_first_visit_median": 1.0,
+          "on_first_visit_median": 1.0,
+          "first_visit_on_earlier": false
+        },
+        {
+          "seed": "44",
+          "off_visited_frac": 0.13800904977375567,
+          "on_visited_frac": 0.13800904977375567,
+          "cover_on_gt_off": false,
+          "off_first_visit_median": 1.0,
+          "on_first_visit_median": 1.0,
+          "first_visit_on_earlier": false
+        }
+      ],
+      "n_seed": 3,
+      "n_cover_on_gt_off": 0,
+      "n_first_visit_earlier": 0,
+      "verdict_majority_pass": false
+    },
+    "L2_differentiation": {
+      "line": "on 臂访问掩码内方差/基尼 > off（≥2/3 seed）",
+      "per_seed": [
+        {
+          "seed": "42",
+          "off_visited_gini": 0.4522431364974271,
+          "on_visited_gini": 0.4750052824626494,
+          "gini_on_gt_off": true,
+          "gini_ratio": 1.0503316559793756,
+          "off_visited_var": 1147523.8230782114,
+          "on_visited_var": 1108197.4295701864,
+          "var_on_gt_off": false,
+          "var_ratio": 0.965729344596496
+        },
+        {
+          "seed": "43",
+          "off_visited_gini": 0.507370650051667,
+          "on_visited_gini": 0.4874060083464533,
+          "gini_on_gt_off": false,
+          "gini_ratio": 0.9606507753194224,
+          "off_visited_var": 1810047.486047777,
+          "on_visited_var": 1681275.6362275146,
+          "var_on_gt_off": false,
+          "var_ratio": 0.9288571980498508
+        },
+        {
+          "seed": "44",
+          "off_visited_gini": 0.4238828010413659,
+          "on_visited_gini": 0.4093839142293239,
+          "gini_on_gt_off": false,
+          "gini_ratio": 0.9657950575573669,
+          "off_visited_var": 1953821.723953061,
+          "on_visited_var": 1886323.9039956236,
+          "var_on_gt_off": false,
+          "var_ratio": 0.9654534397228051
+        }
+      ],
+      "n_seed": 3,
+      "n_gini_on_gt_off": 1,
+      "n_var_on_gt_off": 0,
+      "verdict_majority_pass": false
+    },
+    "L3_intake": {
+      "line": "无方向预设：on<off ⇒ 探索有成本；on≥off ⇒ 探索没挨饿",
+      "per_seed": [
+        {
+          "seed": "42",
+          "off_intake_per_capita": 3.216387448101839,
+          "on_intake_per_capita": 3.1646965254480093,
+          "intake_ratio_on_off": 0.9839288880808389,
+          "off_net_per_capita": 0.8245130985555535,
+          "on_net_per_capita": 0.7751003006730275,
+          "intake_on_lt_off": true
+        },
+        {
+          "seed": "43",
+          "off_intake_per_capita": 2.9905468242207287,
+          "on_intake_per_capita": 2.9037583267225004,
+          "intake_ratio_on_off": 0.9709790541330703,
+          "off_net_per_capita": 0.828583277768397,
+          "on_net_per_capita": 0.8107410215760141,
+          "intake_on_lt_off": true
+        },
+        {
+          "seed": "44",
+          "off_intake_per_capita": 2.681671587358711,
+          "on_intake_per_capita": 2.897618422121255,
+          "intake_ratio_on_off": 1.0805269503471298,
+          "off_net_per_capita": 0.7747964074002898,
+          "on_net_per_capita": 0.895680838847082,
+          "intake_on_lt_off": false
+        }
+      ],
+      "n_seed": 3,
+      "n_intake_on_lt_off": 2,
+      "mean_intake_ratio_on_off": 1.0118116308536798
+    },
+    "main_gate": {
+      "gate_A_rd_cycling": true,
+      "gate_A_L2_differentiation": false,
+      "gate_B_L1_exploration": false,
+      "verdict_main_gate_pass": false,
+      "note": "门A(L0 轮休 ∧ L2 分化) × 门B(L1 探索) 联合成立才通过"
+    }
+  }
+}
