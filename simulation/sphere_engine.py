@@ -594,6 +594,14 @@ class SphereEngine:
             bg_production_zero=bool(
                 getattr(config.resources, "bg_production_zero", False)
             ),
+            # 🔴 R242 背景低产能带：必须显式透传（同 13.5① 家族：不传 ⇒ 死字段 ⇒ 静默无变化）。
+            #   默认 0 ⇒ 走原路径，逐位等价（C7 不动）。
+            bg_low_prod_frac=float(
+                getattr(config.resources, "bg_low_prod_frac", 0.0)
+            ),
+            bg_low_cap_mult=float(
+                getattr(config.resources, "bg_cap_mult", 0.0)
+            ),
         )
         # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
         # 🔴 P0.0 A1（2026-09-26）：寿命原为硬编码 `duration=50`，现读配置
