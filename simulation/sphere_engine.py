@@ -207,6 +207,62 @@ DUEL_KEYS = ("skip_no_energy", "skip_no_prey", "skip_already_eaten",
              "real_attempts", "wounds", "kills")
 
 
+def _build_patch_centroid(world, patch_mask: np.ndarray) -> NDArray[np.int64]:
+    """S3 记忆 v2：斑块连通域标注 + 每斑块质心格（构造期一次性；零 RNG ⇒ C7 无关）。
+
+    返回 shape=(n_cells,) 的 int64 数组：`out[i]` = 格 i 所属斑块的**质心格 id**
+    （非斑块格 = -1；无斑块 = 全 -1）。质心格 ∈ 该斑块自身（到平均行列最近者）。
+
+    ⚠️ 经度缠绕：斑块内 col 平均用**角度平均**（sin/cos 均值再反正切）而非直接平均，
+       避免跨 0/cols 边界的斑块被"拉平"到错误经度；行平均直接取算术平均（无环绕）。
+    """
+    n = world.n_cells
+    cols = world.cols
+    out = np.full(n, -1, dtype=np.int64)
+    patch_cells = np.flatnonzero(patch_mask)
+    if patch_cells.size == 0:
+        return out
+    # 连通域标注（BFS；world.neighbors 尊重拓扑 + 经度缠绕；与探针 _label_patches 同式）
+    labels = np.full(n, -1, dtype=np.int64)
+    nxt = 0
+    for seed in patch_cells:
+        if labels[seed] != -1:
+            continue
+        lab = nxt
+        nxt += 1
+        q = [int(seed)]
+        labels[seed] = lab
+        while q:
+            c = q.pop()
+            for nb in world.neighbors(c):
+                nb = int(nb)
+                if patch_mask[nb] and labels[nb] == -1:
+                    labels[nb] = lab
+                    q.append(nb)
+    for lab in range(nxt):
+        cells = np.flatnonzero(labels == lab)
+        rs = cells // cols
+        cs = cells % cols
+        ang = 2.0 * np.pi * cs.astype(np.float64) / float(cols)
+        mc = int(round(
+            (np.arctan2(np.mean(np.sin(ang)), np.mean(np.cos(ang)))
+             % (2.0 * np.pi)) / (2.0 * np.pi) * float(cols))) % cols
+        mr = int(round(float(rs.mean())))
+        best = int(cells[0])
+        best_d = float("inf")
+        for c in cells:
+            cr = int(c) // cols
+            cc = int(c) % cols
+            dr = float(abs(cr - mr))
+            dcol = float(min(abs(cc - mc), cols - abs(cc - mc)))
+            d = dr * dr + dcol * dcol
+            if d < best_d:
+                best_d = d
+                best = int(c)
+        out[cells] = best
+    return out
+
+
 def _genome_summary(genes) -> dict:
     """基因组摘要（t=0 基线；**只读、不消费 RNG**）。
 
@@ -287,6 +343,10 @@ class SphereEngine:
         "_repro_cooldown",
         "_valence", "_arousal", "_expectation", "_baseline", "_trust",
         "_work_memory", "_mem_ptr", "_interpret", "_nb_table",
+        # S3 记忆 v2（egocentric）5 数组 + 质心表（实施规格 §二；R215 教训：漏登 = 无法赋值/续跑错位）
+        "_mem_az", "_mem_dist", "_mem_tick", "_mem_degraded", "_mem_food",
+        "_patch_centroid", "_mem_gain", "_mem_coarse_gain", "_mem_dist_scale",
+        "_mem_degrade_thr", "_mem_ttl", "_mem_noise", "_mem_noise_p", "_mem_v2_rng",
         # P0.1（T1）：紧凑邻居表 —— `_nb_table` 引用 world 的 `(n_cells,8)`，极点带另存
         "_pole_nb", "_pole_top", "_pole_bottom",
         # A′ 记忆朝向梯度计数器（2026-09-19）—— 本类用 `__slots__`，**新属性必须登记否则无法赋值**
@@ -428,6 +488,7 @@ class SphereEngine:
          "_ars_giveup",        # 赶路模式连走多少 tick 没咬到就重选方向
          "_ars_fast_tau", "_ars_slow_tau", "_ars_lat_exempt",
          "_ars_cos",           # (8,8) 槽位方向余弦矩阵（由参考格邻居表推导）
+        "_ars_unit",          # (8,2) 槽位单位方向向量（S3 记忆 v2 方向量化用）
          "_out_taken",         # 本 tick 每个体**实际咬到**的质量（本格+邻格；食腐不计）
          "_feed_fast",         # 快平均 EMA（τ=fast_tau）
          "_feed_slow",         # 慢平均 EMA（τ=slow_tau）＝"个体自己的期待"
@@ -855,6 +916,32 @@ class SphereEngine:
         _rdcfg0 = getattr(config, "resource_dynamics", None)
         self._rd = _ResourceDynamics.from_field(
             _rdcfg0, self.resources, self.world)
+        # ---- S3 记忆 v2（egocentric）：fail-loud ×2 + 构造期质心表（实施规格 §一/§七-2）----
+        # 🔴 两条 fail-loud（R236 §四-D-2 同族）：
+        #   ① 运行时：v2 ∧ use_sim_core=True ⇒ 硬报错（Rust 未下沉 v2；静默走旧路径 = dash PR 翻车形态）
+        #   ② 构造期：v2 ∧ rd.enabled ∧ not bg_production_zero ⇒ 硬报错（R236 §四-B-2：
+        #      rd 搬移会改变斑块掩码 ⇒ 静态质心/方位静默失效）
+        _mcfg2 = getattr(config, "info_structure", None)
+        _mv2 = bool(getattr(_mcfg2, "memory_v2", False))
+        if _mv2 and self._use_sim_core:
+            raise NotImplementedError(
+                "memory_v2 尚未下沉 Rust：use_sim_core=True 时开启 memory_v2 会静默走旧路径"
+                " ⇒ 硬报错。请设 use_sim_core=False。"
+            )
+        if _mv2 and bool(getattr(self._rd, "enabled", False)) \
+                and not bool(getattr(self._rd, "bg_production_zero", False)):
+            raise NotImplementedError(
+                "memory_v2 ∧ rd.enabled ∧ 背景格有产能 ⇒ 硬报错（R236 §四-B-2：rd 轮作搬移"
+                "会改变斑块掩码 ⇒ 静态质心/方位静默失效）。bg_production_zero 世界（S 线）允许。"
+            )
+        # 构造期质心表（仅 v2 需要；一次性 BFS 标注，不在 tick 内；零 RNG ⇒ C7 无关）
+        #   `_patch_centroid[i]` = 格 i 所属斑块的质心格 id（非斑块格 = -1；无斑块 = 全 -1）。
+        #   运行时个体**只查表**得到一个"质心格 id"再转方位 ⇒ 不暴露任何世界坐标本体（§三-3）。
+        self._patch_centroid = np.full(self.world.n_cells, -1, dtype=np.int64)
+        if _mv2:
+            _pm = getattr(self.resources, "_patch_mask", None)
+            if _pm is not None and bool(_pm.any()):
+                self._patch_centroid = _build_patch_centroid(self.world, _pm)
         # ---- R217 §五 #1 稀疏化 B：惰性再生 / 稀疏信号（默认关 ⇒ 全场路径逐位不变）----
         # 🔴 范围锁（引擎侧）：共用 ① 配置开关；② Python 路径（Rust `consume_many` /
         #    `regrow_patchy` / `signal_emit` **直写** `_grid`/`_marks`，打脏点覆盖不到）。
@@ -963,6 +1050,8 @@ class SphereEngine:
         _ln[_ln < 1e-12] = 1.0
         _unit = np.stack([_dr / _ln, _dc / _ln], axis=1)     # (8,2)
         self._ars_cos = (_unit @ _unit.T).astype(np.float64)  # (8,8)
+        # S3 记忆 v2：保留槽位单位向量（任意方向 → 最接近 Moore 槽位，内积 argmax）
+        self._ars_unit = np.asarray(_unit, dtype=np.float64)   # (8,2)
         # 个体状态数组（关档仍建 ⇒ 少一个特例 = 少一个坑；关档不消费 ⇒ 零轨迹影响）
         self._out_taken = np.zeros(n, dtype=np.float64)
         self._feed_fast = np.zeros(n, dtype=np.float64)
@@ -1017,6 +1106,29 @@ class SphereEngine:
         # 工作记忆（L5）：4 槽，存食物丰富格子位置（-1=空），round-robin 写入
         self._work_memory = np.full((n, 4), -1, dtype=np.int64)
         self._mem_ptr = 0
+        # ---- S3 前置：记忆 v2（egocentric）新增 5 数组（实施规格 §二；默认关 ⇒ 不读写）----
+        # 🔴 全部只被 `memory_v2=True` 路径消费；关档不进任何新代码路径（C7 回滚点）。
+        # `_mem_az`   = 记忆方位 q（自我参照系 Moore 槽位 0–7；-1 = 空槽）——**不存世界坐标**
+        # `_mem_dist` = 走过的距离 d（写入时 0，每 tick + 本步格数；**只增不减** ⇒ 不可逆降级自然成立）
+        # `_mem_tick` = 记录 tick（时效判定 + 槽替换依据）
+        # `_mem_degraded` = 精→粗**永久降级标记**（置 True 后不清除，除非重写该槽）
+        # `_mem_food` = 记录时刻食物比（留档，首期不参与打分）
+        self._mem_az = np.full((n, 4), -1, dtype=np.int8)
+        self._mem_dist = np.zeros((n, 4), dtype=np.float32)
+        self._mem_tick = np.full((n, 4), -1, dtype=np.int64)
+        self._mem_degraded = np.zeros((n, 4), dtype=bool)
+        self._mem_food = np.zeros((n, 4), dtype=np.float32)
+        # v2 运行期配置快照（关档不消费 ⇒ 零轨迹影响）+ 独立噪声 RNG
+        # 🔴 噪声档用**独立 rng 流**（不同 `self.rng`）：无噪声档 v2 完全不消费主 rng
+        #    ⇒ v2 开/关档主随机流形状不变 ⇒ 轨迹差异纯粹来自记忆机制（归因干净；§五 RNG 契约）。
+        self._mem_gain = float(getattr(_mcfg2, "memory_gradient_gain", 0.3))
+        self._mem_coarse_gain = float(getattr(_mcfg2, "memory_coarse_gain", 0.15))
+        self._mem_dist_scale = float(getattr(_mcfg2, "memory_dist_scale", 15.0))
+        self._mem_degrade_thr = float(getattr(_mcfg2, "memory_degrade_thr", 20.0))
+        self._mem_ttl = int(getattr(_mcfg2, "memory_ttl", 1000))
+        self._mem_noise = bool(getattr(_mcfg2, "memory_noise", False))
+        self._mem_noise_p = float(getattr(_mcfg2, "memory_noise_p", 0.1))
+        self._mem_v2_rng = np.random.default_rng(20260928)
         # 信号解读表（L5 文化传递）：(N,16)，对 16 种信号模式的响应倾向
         # 正值=移向，负值=逃避，0=忽略；初始随机，幼体向周围成体学习
         # R113/R121 信号字母表档位（fail-loud：未实施的档位在**构造期**即报错，
@@ -2985,7 +3097,16 @@ class SphereEngine:
             self.resources._grid[cur_flat]
             > FOOD_RICH_LEVEL * self.resources._capacity[cur_flat]
         )
-        if food_rich.any():
+        # S3 记忆 v2 写入开关（此段先于移动循环 ⇒ 独立读取，不复用移动段的 `_mv2_on`）
+        _mv2_food_on = bool(getattr(
+            self.config.info_structure, "memory_v2", False))
+        if _mv2_food_on:
+            # v2 下 **不再写/读** `_work_memory`（v2 取代 v1）。
+            # 无 RNG 消费（除噪声档独立流）⇒ 主随机流形状不变（归因干净）。
+            if food_rich.any():
+                self._mem_v2_write(
+                    np.flatnonzero(food_rich), cur_flat, int(self._tick))
+        elif food_rich.any():
             rich_idx = np.flatnonzero(food_rich)
             ptr = int(self._mem_ptr)
             self._work_memory[rich_idx, ptr] = cur_flat[rich_idx]
@@ -3335,6 +3456,9 @@ class SphereEngine:
                 # （⇒ 不再是单变量实验）。`none` 下走**原式**，逐位等价。
                 mem_grad_on = (ifcfg3.memory_gradient == "orientation")
                 mem_grad_gain = float(ifcfg3.memory_gradient_gain)
+                # S3 记忆 v2（egocentric）：与 A′ 同规格（不受 `enabled` 门控，单变量）。
+                #   构造期 assert 已保证 v2 ⇒ memory_gradient=="orientation" ⇒ mem_grad_on。
+                _mv2_on = bool(getattr(ifcfg3, "memory_v2", False))
                 # 🔴 P2②（[本地开发·性能线]）：vanilla 快路径门 —— 个体级可选机制**全关**
                 #    时参考循环退化为「纯打分 + argmax/平局」⇒ 允许整块向量化（逐位等价，
                 #    见 `_move_decide_batch`）。任一机制开启 ⇒ 一律走参考循环（不做半接线，
@@ -3345,7 +3469,8 @@ class SphereEngine:
                     self._batch_move_on
                     and not (_span2_on or d2_asym or d2_noise or d2_softmax
                              or mem_grad_on or _l1_on or _fearh_on or _cap_on
-                             or _l2_on or self._mig_on or self._ars_on)
+                             or _l2_on or self._mig_on or self._ars_on
+                             or _mv2_on)
                     and self.world.rows >= 3
                     and self.world.cols >= 2
                 )
@@ -3405,7 +3530,15 @@ class SphereEngine:
                         fr * 0.5 + sp * sig_weight
                     ) + soc * densities[nb]
                     valid_mem = self._work_memory[idx][self._work_memory[idx] >= 0]
-                    if mem_grad_on:
+                    if _mv2_on:
+                        # S3 记忆 v2：自我参照系打分（取代 v1 全部记忆项；v2 下不再读
+                        #   `_work_memory`）。gain（精/粗）已在函数内应用 ⇒ 这里只乘 perc。
+                        _hd_now = int(self._heading[idx])
+                        g = self._memory_egocentric_cos(
+                            idx, int(self._flat[idx]), nb, _hd_now)
+                        if float(np.abs(g).max()) > 1e-9:
+                            score = score + perc * g
+                    elif mem_grad_on:
                         # A′：先记"测到了没有"，再加朝向梯度（可观测性优先，见 memory_gradient_stats）
                         self._mem_grad_dec += 1
                         if len(valid_mem) > 0:
@@ -3616,15 +3749,25 @@ class SphereEngine:
                     # ── 14.9 ARS：记录本步方向（供下一 tick 的惯性项用）──────────────
                     # 🔴 heading 统一存 **Moore 槽位（0–7）**：4 邻模式下把 nb 内下标
                     #    经 `_VON_NEUMANN_IDX` 映射回 Moore 槽位（两模式共用一个 cos 矩阵）。
-                    if _ars_on and len(nb) in (4, 8):
+                    # S3 记忆 v2：`_mv2_on` 时 **ARS 关档也强制维护** heading（v2 的自我参照
+                    #    系需要持续朝向基准），并同步做记忆旋转/距离更新（`_mem_v2_step_one`）。
+                    if (_ars_on or _mv2_on) and len(nb) in (4, 8):
                         _same = np.flatnonzero(nb == targets[i])
                         if len(_same) == 1:
-                            if len(nb) == 8:
-                                self._heading[idx] = int(_same[0])
-                            else:
-                                self._heading[idx] = int(
-                                    self.world._VON_NEUMANN_IDX[int(_same[0])]
-                                )
+                            _hd_new = (
+                                int(_same[0])
+                                if len(nb) == 8
+                                else int(self.world._VON_NEUMANN_IDX[int(_same[0])])
+                            )
+                            if _mv2_on:
+                                _hd_old = int(self._heading[idx])
+                                self._heading[idx] = _hd_new
+                                # 距离步长：本 tick 换格 1（subpos 亚格位移由 4.6 段
+                                #    `steps` 变量给实际格数；此处取保守 1.0 即可满足
+                                #   "只增不减 + 降级"语义 —— 换格即消耗，见规格 §二）。
+                                self._mem_v2_step_one(idx, _hd_old, _hd_new, 1.0)
+                            elif _ars_on:
+                                self._heading[idx] = _hd_new
                     # ── R146/R149 L2 第二段：冲刺者改走 2 格（**盲选**）─────────────
                     # 位置：**在 score/softmax 之后** ⇒ `u = self.rng.random()` 仍按个体消费
                     # ⇒ 每 tick 随机抽取数与关档**逐字一致**（H2/H1 的形状要求）。
@@ -4264,6 +4407,17 @@ class SphereEngine:
                 [self._heading, np.full(K, -1, dtype=np.int64)])
             self._giveup_ct = np.concatenate(
                 [self._giveup_ct, np.zeros(K, dtype=np.int64)])
+            # S3 记忆 v2：子代继承**空记忆**（初值；记忆不遗传——学习/经验属于个体生命周期）
+            self._mem_az = np.concatenate(
+                [self._mem_az, np.full((K, 4), -1, dtype=np.int8)])
+            self._mem_dist = np.concatenate(
+                [self._mem_dist, np.zeros((K, 4), dtype=np.float32)])
+            self._mem_tick = np.concatenate(
+                [self._mem_tick, np.full((K, 4), -1, dtype=np.int64)])
+            self._mem_degraded = np.concatenate(
+                [self._mem_degraded, np.zeros((K, 4), dtype=bool)])
+            self._mem_food = np.concatenate(
+                [self._mem_food, np.zeros((K, 4), dtype=np.float32)])
             born = K
             new_max = int(self._generation.max())
             if new_max > self._max_generation:
@@ -4305,6 +4459,17 @@ class SphereEngine:
                 [self._heading[:P][keep], self._heading[P:]])
             self._giveup_ct = np.concatenate(
                 [self._giveup_ct[:P][keep], self._giveup_ct[P:]])
+            # S3 记忆 v2：随死亡压缩（**同一 `keep` 掩码**；漏掉 ⇒ 与个体错位 ⇒ 记忆乱指）
+            self._mem_az = np.concatenate(
+                [self._mem_az[:P][keep], self._mem_az[P:]])
+            self._mem_dist = np.concatenate(
+                [self._mem_dist[:P][keep], self._mem_dist[P:]])
+            self._mem_tick = np.concatenate(
+                [self._mem_tick[:P][keep], self._mem_tick[P:]])
+            self._mem_degraded = np.concatenate(
+                [self._mem_degraded[:P][keep], self._mem_degraded[P:]])
+            self._mem_food = np.concatenate(
+                [self._mem_food[:P][keep], self._mem_food[P:]])
             # S1 骨架：血条随死亡压缩（与 _energy 同节拍）；机制不接线，仅保数组同长
             self._health = np.concatenate(
                 [self._health[:P][keep], self._health[P:]]
@@ -4546,6 +4711,144 @@ class SphereEngine:
             "mem_inherit_far_frac": round(far / n, 6) if n else 0.0,
             "distance_convention": "grid_ring(行差+经度环绕列差)，未做纬度余弦缩放（上界）",
         }
+
+    # ------------------------------------------------ S3 记忆 v2（egocentric，2026-09-28）
+    # 规格：`docs/设计文档/设计-S3记忆改造-实施细化稿-20260927.md` §二/§三。
+    # 🔴 全部方法只在 `memory_v2=True` 路径被调用；关档不消费任何 RNG（C7 回滚点）。
+    # 🔴 与 Rust（`sim_core/src/movement.rs`）**逐字同式** —— 改任一侧必须同步另一侧。
+
+    def _cell_dir_slot(self, cur: int, target: int) -> int:
+        """两格 → 世界 Moore 槽位（0–7；同格/退化 ⇒ -1）。
+
+        经度环绕取最短列差（与 `_memory_orientation_cos` 同式：`+cols/2 % cols − cols/2`）；
+        行差直取。方向向量与 `_ars_unit`（8 槽位单位向量）做内积 argmax。
+        """
+        if cur == target:
+            return -1
+        cols = int(self.world.cols)
+        cr, cc = divmod(int(cur), cols)
+        tr, tc = divmod(int(target), cols)
+        dr = float(tr - cr)
+        dcc = ((float(tc - cc) + cols / 2.0) % cols) - cols / 2.0
+        ln = dr * dr + dcc * dcc
+        if ln < 1e-12:
+            return -1
+        ln = ln ** 0.5
+        u = np.array([dr / ln, dcc / ln], dtype=np.float64)
+        return int(np.argmax(self._ars_unit @ u))
+
+    def _mem_v2_write(self, idx_arr: np.ndarray, cur_flat: np.ndarray,
+                      tick: int) -> None:
+        """富食格写入（v2 分支；取代 v1 `_work_memory` 写入）。
+
+        质心格 = `_patch_centroid` 查表（**只查表、不存世界坐标本体**）；
+        `_mem_az = (质心世界方位 − heading) mod 8`；槽 = 最旧（含空槽 -1 ⇒ 空槽优先）；
+        未知朝向（heading<0，含极区）**不写入**（无朝向基准 ⇒ 无法做路径整合）。
+        """
+        ccell = self._patch_centroid[cur_flat[idx_arr]]
+        ok = ccell >= 0
+        if not ok.any():
+            return
+        ridx = idx_arr[ok]
+        cc = ccell[ok]
+        hd = self._heading[ridx]
+        slots = np.argmin(self._mem_tick[ridx], axis=1)
+        az = np.full(ridx.size, -1, dtype=np.int64)
+        for i in range(ridx.size):
+            s = self._cell_dir_slot(int(cur_flat[ridx[i]]), int(cc[i]))
+            if s < 0 or hd[i] < 0:
+                continue
+            az[i] = (s - int(hd[i])) % 8
+        m = az >= 0
+        if not m.any():
+            return
+        ri = ridx[m]
+        si = slots[m]
+        ai = az[m]
+        self._mem_az[ri, si] = ai.astype(np.int8)
+        self._mem_dist[ri, si] = 0.0
+        self._mem_tick[ri, si] = tick
+        self._mem_degraded[ri, si] = False
+        cap = np.maximum(self.resources._capacity[cur_flat[ri]], 1e-12)
+        self._mem_food[ri, si] = (
+            (self.resources._grid[cur_flat[ri]] / cap).astype(np.float32))
+
+    def _mem_v2_step_one(self, idx: int, hd_old: int, hd_new: int,
+                         steps: float) -> None:
+        """移动后单个体更新：① 记忆旋转（q ← (q + δ) mod 8，δ = heading 变化）；
+        ② 噪声扰动（独立 rng）；③ 距离累加（**只增不减**）；④ 精→粗永久降级。
+
+        未知朝向（hd_old/hd_new < 0，含极区）：跳过旋转（§三-5 极区豁免），
+        但仍做距离更新/降级。
+        """
+        az = self._mem_az[idx]
+        act = self._mem_tick[idx] >= 0
+        # ① 旋转（只对非空槽）
+        if hd_old >= 0 and hd_new >= 0 and hd_old != hd_new:
+            m = az >= 0
+            if m.any():
+                delta = int((hd_new - hd_old) % 8)
+                if delta != 0:
+                    self._mem_az[idx, m] = (
+                        (az[m].astype(np.int64) + delta) % 8).astype(np.int8)
+        # ② 噪声扰动（独立流 ⇒ 主 rng 形状不变）：每 tick 以 p 概率 ±1 档
+        if self._mem_noise:
+            m = az >= 0
+            if m.any():
+                r1 = self._mem_v2_rng.random(int(m.sum()))
+                hit = r1 < self._mem_noise_p
+                if hit.any():
+                    r2 = self._mem_v2_rng.random(int(hit.sum()))
+                    pert = np.where(r2 < 0.5, -1, 1).astype(np.int64)
+                    mi = np.flatnonzero(m)[hit]
+                    self._mem_az[idx, mi] = (
+                        (self._mem_az[idx, mi].astype(np.int64) + pert) % 8
+                    ).astype(np.int8)
+        # ③④ 距离累加 + 永久降级
+        if act.any():
+            self._mem_dist[idx, act] = np.minimum(
+                self._mem_dist[idx, act] + steps, 1e18)
+            over = act & ~self._mem_degraded[idx] & (
+                self._mem_dist[idx] > self._mem_degrade_thr)
+            self._mem_degraded[idx, over] = True
+
+    def _memory_egocentric_cos(self, idx: int, cur: int, nb: np.ndarray,
+                               heading_now: int) -> np.ndarray:
+        """打分（v2）：候选邻居 c 的**相对朝向** vs 记忆方位 q 的 `max cos`。
+
+        精记忆：`gain × perc × cos(ang(c) − q) × exp(−d / dist_scale)`（d 进公式）；
+        粗记忆：`coarse_gain × perc × cos(ang(c) − q)`（d 不进公式，降级即丢距离信息）；
+        多槽取 max（只让最对准的记忆槽说话）。
+        `ang(c) = (dir(c) − heading) mod 8`（自我参照系；unknown heading ⇒ 用世界槽位退化）。
+
+        ⚠️ 双路径契约：与 Rust（`sim_core/src/movement.rs`）逐字同式（含 `% 8` / mod）。
+        """
+        n_cand = len(nb)
+        out = np.zeros(n_cand, dtype=np.float64)
+        az = self._mem_az[idx]
+        ticks = self._mem_tick[idx]
+        valid = (az >= 0) & ((self._tick - ticks) <= self._mem_ttl)
+        if not valid.any():
+            return out
+        # 候选 c → 世界槽位（逐格量化；nb ≤ 8 小数组，循环开销可忽略）
+        dirs = np.full(n_cand, -1, dtype=np.int64)
+        for j in range(n_cand):
+            dirs[j] = self._cell_dir_slot(cur, int(nb[j]))
+        okd = dirs >= 0
+        if not okd.any():
+            return out
+        ang = (dirs[okd].astype(np.int64) - int(heading_now)) % 8 \
+            if heading_now >= 0 else dirs[okd].astype(np.int64)
+        qs = az[valid].astype(np.int64)
+        cosm = self._ars_cos[ang[:, None], qs[None, :]]          # (n_cand, n_slot)
+        deg = self._mem_degraded[idx, valid]
+        dvals = self._mem_dist[idx, valid].astype(np.float64)
+        gains = np.where(deg, self._mem_coarse_gain, self._mem_gain)
+        expd = np.where(deg, 1.0,
+                        np.exp(-np.clip(dvals, 0.0, 1e6) / self._mem_dist_scale))
+        scored = gains[None, :] * cosm * expd[None, :]
+        out[okd] = scored.max(axis=1)
+        return out
 
     # ------------------------------------------------ A′ 记忆**朝向梯度**（2026-09-19）
     def _memory_orientation_cos(self, cur: int, nb: np.ndarray,
@@ -5078,6 +5381,14 @@ class SphereEngine:
         data["heading"] = self._heading[:P].copy()
         data["giveup_ct"] = self._giveup_ct[:P].copy()
 
+        # --- 3.8 S3 记忆 v2 5 数组（按个体；实施规格 §二 —— 漏登 = 续跑丢记忆状态）---
+        data["mem_az"] = self._mem_az[:P].copy()
+        data["mem_dist"] = self._mem_dist[:P].copy()
+        data["mem_tick"] = self._mem_tick[:P].copy()
+        data["mem_degraded"] = self._mem_degraded[:P].copy()
+        data["mem_food"] = self._mem_food[:P].copy()
+        data["patch_centroid"] = self._patch_centroid.copy()
+
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
         data["resource_capacity"] = self.resources._capacity.copy()
@@ -5346,6 +5657,25 @@ class SphereEngine:
         engine._giveup_ct = (
             data["giveup_ct"].copy() if "giveup_ct" in data
             else np.zeros(_P, dtype=np.int64))
+
+        # --- 7.5 S3 记忆 v2 5 数组恢复（旧快照缺键 ⇒ 初值；长度按 _P 截断）---
+        engine._mem_az = (
+            data["mem_az"].copy() if "mem_az" in data
+            else np.full((_P, 4), -1, dtype=np.int8))
+        engine._mem_dist = (
+            data["mem_dist"].copy() if "mem_dist" in data
+            else np.zeros((_P, 4), dtype=np.float32))
+        engine._mem_tick = (
+            data["mem_tick"].copy() if "mem_tick" in data
+            else np.full((_P, 4), -1, dtype=np.int64))
+        engine._mem_degraded = (
+            data["mem_degraded"].copy() if "mem_degraded" in data
+            else np.zeros((_P, 4), dtype=bool))
+        engine._mem_food = (
+            data["mem_food"].copy() if "mem_food" in data
+            else np.zeros((_P, 4), dtype=np.float32))
+        if "patch_centroid" in data and data["patch_centroid"].size == engine.world.n_cells:
+            engine._patch_centroid = data["patch_centroid"].copy()
 
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()   # sparse:reset（下方 rebuild_lazy）

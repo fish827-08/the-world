@@ -626,6 +626,20 @@ class InfoStructureConfig:
     # False = 关闭（默认；完全无开销）。⑥a 暴露率 / ⑥b Δ_i / ⑥=⑥a×⑥b + argmax 翻转率辅助。
     measure_signal_response: bool = False
 
+    # ---- S3 前置：记忆改造 v2（egocentric 版；实施规格 §一）----
+    # 🔴 **不受 `enabled` 门控**（与 memory_gradient 同规格）：必须能**单独**开关（单变量）。
+    # v2 取代 v1 orientation 的"世界方向"语义（R239 §一 红线：世界方向 = 变相罗盘）：
+    #   记忆存**自我参照系方位 q**（Moore 槽位 0–7），打分用 `cos(候选相对朝向 − q)`，
+    #   全程只用 当前格 + 邻居 + `_heading`，**不存/不用任何世界坐标**。
+    # 默认 False = 现有行为逐位不变（回滚点；digest `(574887, 11266.746993)` 不漂移）。
+    memory_v2: bool = False            # v2 总开关。False = 现有行为逐位不变（回滚点）
+    memory_dist_scale: float = 15.0    # 精记忆距离衰减尺度 d0（= 斑块间距量级，R234 §一 实测）
+    memory_degrade_thr: float = 20.0   # 精→粗降级距离阈值（格）。超过即**永久降级**（不可逆，R236 §四-A）
+    memory_coarse_gain: float = 0.15   # 粗记忆增益 = 0.5 × memory_gradient_gain(0.3)（R236 §四-A）
+    memory_ttl: int = 1000             # 记忆时效（tick）。age > TTL ⇒ 槽视为空（R236 §四-B-3：5000→1000）
+    memory_noise: bool = False         # 朝向噪声档。False = 精确路径整合；True = 记忆方位旋转叠加噪声（±1 档）
+    memory_noise_p: float = 0.1        # 噪声档：每 tick 以该概率扰动记忆方位 ±1 档
+
     def __post_init__(self) -> None:
         assert self.perception_radius in (4, 8), "感知半径只支持4(Von Neumann)或8(Moore)"
         assert 0.0 <= self.learning_rate <= 1.0
@@ -641,6 +655,14 @@ class InfoStructureConfig:
         assert 0.0 <= self.alignment_rate <= 1.0
         assert 0.0 <= self.alignment_step <= 1.0
         assert self.alignment_noise >= 0
+        # S3 记忆 v2 预注册断言（实施规格 §一）：
+        assert (not self.memory_v2) or self.memory_gradient == "orientation", \
+            "memory_v2=True 要求 memory_gradient == 'orientation'（v2 取代 v1 世界方向版，不并存）"
+        assert self.memory_dist_scale > 0, "memory_dist_scale 必须 > 0"
+        assert self.memory_degrade_thr > 0, "memory_degrade_thr 必须 > 0"
+        assert self.memory_coarse_gain >= 0, "memory_coarse_gain 必须 ≥ 0"
+        assert self.memory_ttl > 0, "memory_ttl 必须 > 0"
+        assert 0.0 <= self.memory_noise_p <= 1.0, "memory_noise_p ∈ [0,1]"
 
 
 @dataclass
