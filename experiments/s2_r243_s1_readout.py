@@ -113,7 +113,35 @@ def main():
     print(f"  留守 L1中位={st.median(g0):.3f}  出走 L1中位={st.median(g1):.3f}  "
           f"差={(st.median(g1)-st.median(g0))/st.median(g0)*100:+.1f}%")
 
+    # ---- 对照臂（rd 关）：是否也有双峰？→ 因果归属 ----
+    print("\n【对照臂 off（rd 关）：双峰是否消失（因果归属）】")
+    offv=[]
+    for x in samples:
+        rs=sorted(g.get((x['seed'],'off'),[]),key=lambda r:int(r['tick']))
+        if rs: offv.append(fnum(rs[-1]['bg_resid_frac']))
+    onv=[x['bg_term'] for x in samples]
+    if offv:
+        ov=sorted(offv)
+        ogap=max(ov[i+1]-ov[i] for i in range(len(ov)-1)) if len(ov)>1 else 0.0
+        ogaps=sorted((ov[i+1]-ov[i],i) for i in range(len(ov)-1))
+        print(f"  off 臂 bg_resid: 单峰? min={ov[0]:.3f} max={ov[-1]:.3f} 中位={st.median(ov):.3f} "
+              f"σ={st.pstdev(ov):.4f}  最大间隙={ogap:.4f}")
+        print(f"  on  臂 bg_resid: 双峰? min={min(onv):.3f} max={max(onv):.3f} "
+              f"σ={st.pstdev(onv):.4f}  最大间隙={gap:.4f}")
+        print(f"  ⇒ σ 比={st.pstdev(onv)/st.pstdev(ov) if st.pstdev(ov) else float('nan'):.1f}×  "
+              f"最大间隙比={gap/ogap if ogap else float('nan'):.1f}× ⇒ 双稳由 rd 产生"
+              if st.pstdev(ov) else "  (off 臂无数据)")
+        # 对称性：相对 off 基线的偏移
+        print("  相对 off 基线的偏移：", end="")
+        for lb,nm in [(0,'留守'),(1,'出走')]:
+            d=[x['bg_term']-st.median(ov) for x in samples if x['label']==lb]
+            print(f"{nm} {st.median(d):+.3f}  ", end="")
+        print("⇒ 两侧相反（对称分岔）")
+
     summ={"n_seeds":len(samples),"cut":cut,"gap":gap,
+          "off_bg_resid":{"min":min(offv),"max":max(offv),"median":st.median(offv),
+                          "sd":st.pstdev(offv),"max_gap":max(ov[i+1]-ov[i] for i in range(len(ov)-1))}
+                          if offv else None,
           "basins":{('留守' if lb==0 else '出走'):{"n":sum(1 for x in samples if x['label']==lb),
                     "wilson":wilson(sum(1 for x in samples if x['label']==lb),n)}
                     for lb in sorted({x['label'] for x in samples})},
