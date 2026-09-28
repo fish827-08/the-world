@@ -230,7 +230,7 @@ def patch_saturation(world, eng, labels: np.ndarray,
 # ---------- 单 run ----------
 
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
-            bg_low_prod_frac=0.0, bg_low_cap_mult=0.0):
+            bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, sparse_fields=False):
     # 🔴 对齐 S1：subpos=on + S1_BASE 的 k/gain/subdiv/speed_max/max_count
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
@@ -239,6 +239,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
         bg_low_prod_frac=bg_low_prod_frac, bg_low_cap_mult=bg_low_cap_mult,
     )
     c.simulation.use_sim_core = False          # 两臂统一 Python 路径（= S1 基线）
+    c.simulation.sparse_fields = bool(sparse_fields)  # R244 v1：逐位等价加速（默认 False）
     c.resource_dynamics.enabled = bool(rd_on)  # 处理臂开局部可耗竭
     eng = SphereEngine(c)
     apply_post_build(eng, notes)
@@ -400,6 +401,8 @@ def main():
                     help="背景格中获极低产能的比例（0=全零产能=现行为）")
     ap.add_argument("--bg-low-cap-mult", type=float, default=0.0,
                     help="背景低产能格的容量/再生倍率（0=零产能=现行为）")
+    ap.add_argument("--sparse-fields", action="store_true",
+                    help="R244 v1：稀疏字段加速（rd+bgzero 档逐位等价，默认 False=旧行为）")
     ap.add_argument("--arms", choices=("both", "on", "off"), default="both")
     ap.add_argument("--out", default="results/s2_depletion.csv")
     a = ap.parse_args()
@@ -432,7 +435,8 @@ def main():
         f.write(",".join(header) + "\n")
         print(f"# S2 探针：rows={a.rows} cols={a.cols} patches={a.patches} "
               f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} arms={arms} "
-              f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult}")
+              f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
+              f"sparse={a.sparse_fields}")
         print(",".join(header))
         summary = []
         for sd in seeds:
@@ -440,7 +444,8 @@ def main():
                 t0 = time.time()
                 rows_out, stop = run_one(sd, a.rows, a.cols, a.pop, a.patches,
                                          a.ticks, a.sample, a.rgm, arm == "on",
-                                         a.bg_low_prod_frac, a.bg_low_cap_mult)
+                                         a.bg_low_prod_frac, a.bg_low_cap_mult,
+                                         a.sparse_fields)
                 for r in rows_out:
                     line = ",".join(str(r[h]) for h in header)
                     f.write(line + "\n")
