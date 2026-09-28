@@ -34,6 +34,9 @@ use crate::genes::{G_PERCEPTION, G_SOCIABILITY};
 /// - `nb_stride`: 主表每行邻居数（普通格）
 /// - `gene_count`: 基因数
 /// - `pole_top` / `pole_bottom`: 上下极点带的行号（`neighbors.rs::nb_slice`）
+/// - `mem_grad_mode` / `mem_grad_gain`: A′ 记忆朝向梯度（0=none 原式 / 1=orientation）
+/// - `h_norm`: (N,) 饥饿归一量（R247 HM ②）；**空 slice = 关档**（不进新代码路径）
+/// - `hm_beta`: HM ② 强度（仅 `h_norm` 非空时消费）
 #[allow(clippy::too_many_arguments)]
 pub fn step_movement(
     flat: &mut [i64],
@@ -59,11 +62,14 @@ pub fn step_movement(
     pole_bottom: usize,
     mem_grad_mode: u8,
     mem_grad_gain: f64,
+    h_norm: &[f64],
+    hm_beta: f64,
 ) {
     let n = flat.len();
     if n == 0 || move_inds.is_empty() {
         return;
     }
+    let hm_on = !h_norm.is_empty();
 
     for (k, &idx_i64) in move_inds.iter().enumerate() {
         let idx = idx_i64 as usize;
@@ -75,7 +81,12 @@ pub fn step_movement(
             continue;
         }
 
-        let perc = genes[idx * gene_count + G_PERCEPTION];
+        // R247 HM ②：只调制 perc 赋值行（与 Python 参考循环/向量化快路径**逐字同式**：
+        //   `perc * (1.0 + beta * h_norm[idx])`）。关档（h_norm 空）⇒ 括号内乘 1.0 都不做。
+        let mut perc = genes[idx * gene_count + G_PERCEPTION];
+        if hm_on {
+            perc *= 1.0 + hm_beta * h_norm[idx];
+        }
         let soc = (genes[idx * gene_count + G_SOCIABILITY] - 0.5) * 2.0;
         let trust_val = trust[idx];
 

@@ -47,6 +47,7 @@ from simulation.config import (  # noqa: E402
     SIGNAL_ALPHABET_IMPLEMENTED,
     SIGNAL_ALPHABET_STATES,
     CorpseWoundConfig,
+    HungerModConfig,
     InfoStructureConfig,
     PredationConfig,
     ResourceDynamicsConfig,
@@ -411,7 +412,14 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           #   `migration_enabled=False`（默认）⇒ 移动段整段不执行 ⇒ C7 基线不动。
           migration_enabled: bool = False,
           migration_gain: float = 50.0,
-          migration_min_abs_anomaly: float = 0.0) -> SphereEngine:
+          migration_min_abs_anomaly: float = 0.0,
+          # 🔴 R247 饥饿调制（HM；**默认关 = 旧行为逐位等价**）
+          #   ① 走停腿 `p_eff = clip(p × (1 + α·h_norm), 0, 1)`（三处同式含 Rust）
+          #   ② 感知腿 `perc_eff = perc × (1 + β·h_norm)`（三处同式含 Rust）
+          hunger_mod_enabled: bool = False,
+          hunger_alpha: float = 0.5, hunger_beta: float = 0.5,
+          hunger_h_mid: float = 0.5,
+          hunger_stay_gain: float = 0.0) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -469,6 +477,17 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.migration.enabled = bool(migration_enabled)
     c.migration.gain = float(migration_gain)
     c.migration.min_abs_anomaly = float(migration_min_abs_anomaly)
+    # 🔴 R247 饥饿调制（HM）—— 默认关 ⇒ 旧行为逐位等价（C7）。
+    #   ① 走/停腿与 ② 感知腿**三处同式**（Python 参考 / Rust / 向量化快路径）；
+    #   与 `use_sim_core` **无互斥**（Rust 侧已同式实现并重编，声明见交付贴）。
+    #   ⚠️ `stay_gain` 为**预留字段**（subpos 驻留调制，当前未接线）⇒ 仅进指纹/读回。
+    c.hunger_mod = HungerModConfig(
+        enabled=bool(hunger_mod_enabled),
+        alpha=float(hunger_alpha),
+        beta=float(hunger_beta),
+        h_mid=float(hunger_h_mid),
+        stay_gain=float(hunger_stay_gain),
+    )
     # R146/R149 L1/L2（R150 B1/B2）：**默认全关 ⇒ 旧行为**（H1 逐位等价，C7 已钉死）
     c.simulation.l1_seek = bool(l1_seek)
     c.simulation.l1_fear = bool(l1_fear)
@@ -963,6 +982,21 @@ def main() -> None:
                     type=float, default=0.0,
                     help="|A| 门槛：本地日长异常绝对值 ≤ 该值则跳过迁移项"
                          "（0 = 不设门槛，默认；A∈[−0.5,0.5]）")
+    # ── 🔴 R247 饥饿调制（HM）—— 默认关 = 旧行为逐位等价 ──
+    ap.add_argument("--hunger-mod-enabled", dest="hunger_mod_enabled",
+                    action="store_true", default=False,
+                    help="开启饥饿调制（HM）：① 走停 p_eff = clip(p×(1+α·h_norm),0,1)；"
+                         "② 感知 perc_eff = perc×(1+β·h_norm)。三处同式"
+                         "（Python/Rust/向量化快路径），可与 --use-sim-core 同用")
+    ap.add_argument("--hunger-alpha", dest="hunger_alpha", type=float, default=0.5,
+                    help="① 走/停调制强度（默认 0.5；0 = 该腿等价于关）")
+    ap.add_argument("--hunger-beta", dest="hunger_beta", type=float, default=0.5,
+                    help="② 感知权重调制强度（默认 0.5；0 = 该腿等价于关）")
+    ap.add_argument("--hunger-h-mid", dest="hunger_h_mid", type=float, default=0.5,
+                    help="中性饥饿度（默认 0.5；此点上下产生差异）")
+    ap.add_argument("--hunger-stay-gain", dest="hunger_stay_gain", type=float,
+                    default=0.0,
+                    help="（预留：当前未接线）subpos 驻留调制 —— 仅进指纹/读回")
     args = ap.parse_args()
     # ── 🔴 13.8 工具侧 fail-loud（设计稿 §3.5 的 M2 前置版）────────────────────
     # 引擎侧 M2 已拦"enabled ∧ 无季节"，但**工具侧也要拦**：否则命令行给
@@ -1061,6 +1095,12 @@ def main() -> None:
                   migration_enabled=bool(args.migration_enabled),
                   migration_gain=float(args.migration_gain),
                   migration_min_abs_anomaly=float(args.migration_min_abs_anomaly),
+                  # 🔴 R247 饥饿调制（默认关 ⇒ 逐位等价；无 Rust 互斥）
+                  hunger_mod_enabled=bool(args.hunger_mod_enabled),
+                  hunger_alpha=float(args.hunger_alpha),
+                  hunger_beta=float(args.hunger_beta),
+                  hunger_h_mid=float(args.hunger_h_mid),
+                  hunger_stay_gain=float(args.hunger_stay_gain),
                   stomach_cap_mass=args.stomach_cap_mass,
                   eat_threshold_frac=args.eat_threshold_frac,
                   starve_frac=args.starve_frac,
@@ -1188,6 +1228,9 @@ def main() -> None:
             # 13.8：迁徙开关同为**臂身份**（mig_base/mig_g/mig_2g/mig_noseason 的唯一差别）
             ("migration_enabled", bool(args.migration_enabled),
              bool(e.config.migration.enabled)),
+            # R247：饥饿调制开关同为**臂身份**（hm_on / hm_off 的唯一差别）
+            ("hunger_mod_enabled", bool(args.hunger_mod_enabled),
+             bool(e.config.hunger_mod.enabled)),
         ):
             if _cli != _snap:
                 raise SystemExit(
@@ -1528,6 +1571,15 @@ def main() -> None:
             "migration_enabled": bool(e.config.migration.enabled),
             "migration_gain": float(e.config.migration.gain),
             "migration_min_abs_anomaly": float(e.config.migration.min_abs_anomaly),
+            # ---- 🔴 R247 饥饿调制（HM；C4 读回；臂身份 = `hunger_mod_enabled`）----
+            # 关档 = 旧行为 ⇒ 这些键仍是"默认值读回"，不叫"未适用"（开关可读回是硬要求）。
+            "hunger_mod_enabled": bool(e.config.hunger_mod.enabled),
+            "hunger_alpha": float(e.config.hunger_mod.alpha),
+            "hunger_beta": float(e.config.hunger_mod.beta),
+            "hunger_h_mid": float(e.config.hunger_mod.h_mid),
+            "hunger_stay_gain": float(e.config.hunger_mod.stay_gain),
+            # 🔴 R247：`HungerModConfig` 经 asdict 进 fingerprint ⇒ 快照/续跑配置指纹
+            #    已含 HM；续跑混臂由上方 switches 冲突表拦（同 13.4 家族）。
             # 🔴 P7：基因位号必须自证（= 23）—— 位号错位是"接了却没接对"的隐形来源
             "migrate_gene_slot": int(Gene.MIGRATE_BIAS),
             # 🔴 R136 §一 增量 2（C4 自证缺口）：PC-1 三臂的 `switches.arm` **全为 main**，

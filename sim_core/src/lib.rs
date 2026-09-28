@@ -677,6 +677,9 @@ fn step_movement(
     pole_bottom: usize,
     mem_grad_mode: u8,
     mem_grad_gain: f64,
+    // R247 HM ②：逐个体饥饿归一量（len 0 = 关档；否则必须 == n）+ 强度 beta
+    h_norm: PyReadonlyArray1<'_, f64>,
+    hm_beta: f64,
 ) -> PyResult<()> {
     let n = unsafe { flat.as_array().len() };
     if n_cols == 0 || n_cells % n_cols != 0 {
@@ -693,6 +696,13 @@ fn step_movement(
     require_len("trust", trust.as_array().len(), n)?;
     require_len("work_memory", work_memory.as_array().len(), n * 4)?;
     require_len("move_cost_ind", move_cost_ind.as_array().len(), n)?;
+    // R247 HM ②：h_norm 允许空（关档）或与个体数等长；**不许**其它长度（静默错位 = 分岔源）
+    let hm_len = h_norm.as_array().len();
+    if hm_len != 0 && hm_len != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "h_norm: 长度 {hm_len} 应为 0（关档）或 n = {n}"
+        )));
+    }
     let n_move = move_inds.as_array().len();
     require_len("rand_choice", rand_choice.as_array().len(), n_move)?;
     require_len("food_ratio", food_ratio.as_array().len(), n_cells)?;
@@ -752,6 +762,7 @@ fn step_movement(
         move_cost_ind.as_slice()?,
         n_cells, nb_stride, gene_count,
         n_cols, pole_top, pole_bottom, mem_grad_mode, mem_grad_gain,
+        h_norm.as_slice()?, hm_beta,
     );
     Ok(())
 }

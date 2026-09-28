@@ -925,6 +925,50 @@ class SubposConfig:
 
 
 @dataclass
+class HungerModConfig:
+    """饥饿调制（HM，R247；实施规格 `docs/设计文档/实施规格-移动决策三件-20260928.md` §一）。
+
+    机制（三处同式；默认关 ⇒ 与本机制加入前**逐位等价**）
+    ----------------------------------------------------
+    现状：移动打分公式里**没有能量项** ⇒ 饿与饱的个体行为完全相同。本配置把
+    "自己有多饿"接进移动决策的两条通道（③ 离家倾向归 S3，**本批不做**）：
+
+        hunger = clip(1 − energy / max_energy, 0, 1)          # 0=饱 / 1=快饿死
+        h_norm = (hunger − h_mid) / max(1e-9, 1 − h_mid)      # 中性点 h_mid 归一
+
+        ① 走/停：move_prob_eff = clip(move_prob × (1 + alpha × h_norm), 0, 1)
+                  （subpos 路径作用于"移动概率" p_move = 1 − stay_eff）
+        ② 感知：  perc_eff = perc × (1 + beta × h_norm)
+                  （只调制 `perc` 赋值行 ⇒ 食物/信号/记忆/解读项同乘、
+                   `soc × 密度` 项不受影响 —— "饿 ⇒ 更专注找吃的/信号，
+                   社交项相对被压"）
+
+    🔴 三处同式（漏一处 = 双路径分岔）：Python 参考循环 / Rust `movement.rs` /
+      向量化快路径 `_move_decide_batch`。R247 已三处全接线 ⇒ 快路径**不**进
+      `_batch_ok` 排除表（HM 在快路径内逐行调制 `perc`，见调用点注释）。
+
+    🔴 参数三级标注（AGENT.md §12.10）：`alpha` / `beta` / `h_mid` / `stay_gain`
+       = **KNOB**（可独立调）；`enabled` = 总开关（默认关 = 回滚点）。
+    ⚠️ 不新增状态数组（只用已有 `self._energy`）⇒ 不触 `__slots__`/快照那套纪律。
+    ⚠️ 实施纪律（规格 §三）：**不得在饱和世界单独测**（没有值得去的地方 ⇒ "更愿意走"
+       只会变成"更快的随机游走"）；须 S2 过门后同批或紧随。
+    """
+
+    enabled: bool = False      # 🔴 默认关 ⇒ 整块跳过 ⇒ 基线 digest 不动（逐位等价）
+    alpha: float = 0.5         # KNOB｜① 走/停调制强度
+    beta: float = 0.5          # KNOB｜② 感知权重调制强度
+    h_mid: float = 0.5         # KNOB｜中性饥饿度（此点上下才产生差异）
+    stay_gain: float = 0.0     # KNOB｜（预留）subpos 路径驻留调制 —— 本批**不消费**
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.enabled, bool), "hunger_mod.enabled 必须是布尔值"
+        assert 0.0 <= self.alpha <= 2.0, "hunger_mod.alpha ∈ [0, 2]"
+        assert 0.0 <= self.beta <= 2.0, "hunger_mod.beta ∈ [0, 2]"
+        assert 0.0 <= self.h_mid <= 1.0, "hunger_mod.h_mid ∈ [0, 1]"
+        assert 0.0 <= self.stay_gain <= 1.0, "hunger_mod.stay_gain ∈ [0, 1]（预留字段）"
+
+
+@dataclass
 class MigrationConfig:
     """日历—罗盘式定向迁徙（13.8；fish 2026-09-25 批准 / 设计稿 `docs/设计文档/设计-日历罗盘式定向迁徙-20260925.md`）。
 
@@ -1124,6 +1168,9 @@ _SIGNALS_FIELDS: frozenset = frozenset(f.name for f in fields(SignalsConfig))
 #   此前未被发现：云端的 save/resume 验证跑在 subpos **关**（默认）档；T-F 才用 rd+subpos 档暴露。
 _SUBPOS_FIELDS: frozenset = frozenset(f.name for f in fields(SubposConfig))
 
+#: R247 饥饿调制白名单（同规格；R247 之前的存档无 `hunger_mod` 键 ⇒ 回退默认关）。
+_HUNGER_MOD_FIELDS: frozenset = frozenset(f.name for f in fields(HungerModConfig))
+
 
 @dataclass
 class SimConfig:
@@ -1161,6 +1208,10 @@ class SimConfig:
     # ---- P0.0 阶段 A1（2026-09-26）：信号场 tick 常数（默认 50 = 旧行为逐位等价）----
     #   挂进 SimConfig ⇒ 经 `asdict` **自动进指纹**（跨档续跑被拦，同 `subpos`）。
     signals: SignalsConfig = field(default_factory=SignalsConfig)
+    # ---- R247 饥饿调制（HM；默认关 = 旧行为**逐位等价**）----
+    #   实施规格：`docs/设计文档/实施规格-移动决策三件-20260928.md` §一（已冻结）。
+    #   挂进 SimConfig ⇒ 经 `asdict` **自动进指纹**（跨档续跑被拦，同 `subpos`）。
+    hunger_mod: HungerModConfig = field(default_factory=HungerModConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -1288,6 +1339,15 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("subpos") or {}).items()
                     if k in _SUBPOS_FIELDS
+                }
+            ),
+            # R247 饥饿调制；旧存档缺失 ⇒ 回退默认（enabled=False = 旧行为逐位等价）。
+            #   同款字段白名单过滤（向后兼容：R247 之前的存档无 `hunger_mod` 键）。
+            hunger_mod=HungerModConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("hunger_mod") or {}).items()
+                    if k in _HUNGER_MOD_FIELDS
                 }
             ),
         )

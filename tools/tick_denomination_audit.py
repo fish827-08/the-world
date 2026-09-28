@@ -189,6 +189,11 @@ KNOWN: dict[str, str] = {
     "genome.mutation_sigma": INVARIANT,
     "migration.gain": INVARIANT,
     "migration.min_abs_anomaly": INVARIANT,
+    # ---- R247 饥饿调制（HM）：无量纲调制系数/分位点 ⇒ 不承载 tick 面额 ----
+    #   （`hunger_mod.stay_gain` 为预留未接线字段 ⇒ 由"未接线字段"自动单列，不进本表）
+    "hunger_mod.alpha": INVARIANT,
+    "hunger_mod.beta": INVARIANT,
+    "hunger_mod.h_mid": INVARIANT,
     "ars.gain": INVARIANT,
     "ars.theta": INVARIANT,
     "ars.kappa": INVARIANT,

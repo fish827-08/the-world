@@ -2516,11 +2516,15 @@ class SphereEngine:
         densities: NDArray[np.float64],
         rand_choice: NDArray[np.int64],
         rep_w: float,
+        h_norm: NDArray[np.float64] | None = None,
+        hm_beta: float = 0.0,
     ) -> NDArray[np.int64]:
         """向量化移动决策（逐位等价；仅由调用点 `_batch_ok` 门启用）。
 
         门槛（调用点）保证 span2/asym/noise/softmax/mem_grad/L1/血条恐惧/迁徙/
         ARS/cap/L2 全关 ⇒ 参考循环退化为「纯打分 + argmax/平局」⇒ 可整块算。
+        **R247 HM 例外**：饥饿调制**已在本函数内接线**（`h_norm` 逐行调制 `perc`，
+        与参考循环/ Rust 逐字同式）⇒ HM 开启**不禁用**快路径（不进 `_batch_ok` 排除表）。
         逐位等价依据：
         - 打分各项与逐个体式**同操作数、同运算顺序**（列广播不改变单元素运算）；
         - 记忆项/解读项按**行条件**取舍：`np.where` 取原值 ⇒ 不做 `+0.0`
@@ -2552,6 +2556,9 @@ class SphereEngine:
         for g, nb in groups:
             gi = mi[g]
             perc = genes[gi, Gene.PERCEPTION]
+            if h_norm is not None and h_norm.size > 0:
+                # R247 HM ②：逐行调制 perc（与参考循环/Rust 逐字同式：`1.0 + beta * h_norm`）。
+                perc = perc * (1.0 + hm_beta * h_norm[gi])
             soc = (genes[gi, Gene.SOCIABILITY] - 0.5) * 2.0
             sig_weight = self._trust[gi] * (0.5 + rep_w * self._trust[gi])
             score = (perc[:, None] * (food_ratio[nb] * 0.5
@@ -3050,6 +3057,26 @@ class SphereEngine:
         _stay = float(self.config.simulation.stay_prob)
         move_prob = genes[:, Gene.MOVE_PROB] * (1.0 - genes[:, Gene.ROOTING]) * (1.0 - _stay)
         move_cost_ind = ocfg.move_cost * cold_penalty * (0.5 + genes[:, Gene.MOVE_COST])
+        # ── R247 饥饿调制（HM，实施规格 §一）：每 tick 一次，① ② 共用同一 `_h_norm` ──
+        #   ① 走/停：`move_prob_eff = clip(move_prob × (1 + alpha·h_norm), 0, 1)`
+        #     ⇒ 本处**就地调整** `move_prob`，下游两处 vanilla 走停（Rust 路径 + Python 路径）
+        #       自然同式；subpos 路径另有 `stay_eff` 结构 ⇒ 单独调制（见下方）。
+        #   ② 感知：`perc_eff = perc × (1 + beta·h_norm)`（三处同式：Python 参考循环 /
+        #     Rust `movement.rs` / 向量化快路径；h_norm 由本处算好传入，保双路径同值）。
+        #   🔴 关档 ⇒ 整块跳过（`_h_norm` 置空数组 = Rust 侧关档信号）⇒ 逐位等价（C7）。
+        #   🔴 不新增 RNG 抽取：`rng.random(P)` 的**次数与形状**两档完全一致。
+        _hmcfg = self.config.hunger_mod
+        _hm_on = bool(_hmcfg.enabled)
+        if _hm_on:
+            _hunger = np.clip(
+                1.0 - energy / max(1e-9, float(ocfg.max_energy)), 0.0, 1.0)
+            _h_norm = (_hunger - float(_hmcfg.h_mid)) / max(
+                1e-9, 1.0 - float(_hmcfg.h_mid))
+            move_prob = np.clip(
+                move_prob * (1.0 + float(_hmcfg.alpha) * _h_norm), 0.0, 1.0)
+        else:
+            _h_norm = np.empty(0, dtype=np.float64)
+        _hm_beta = float(_hmcfg.beta)
         # D2-3 信息不对称：感知半径4/噪声/softmax 暂未下沉 Rust，启用时走 Python 路径
         _ifcfg = self.config.info_structure
         _d2_asym = _ifcfg.enabled and (_ifcfg.perception_radius == 4 or _ifcfg.perception_noise > 0 or _ifcfg.softmax_tau > 0)
@@ -3098,6 +3125,9 @@ class SphereEngine:
                     self._pole_top, self._pole_bottom,
                     1 if _ifc_mg.memory_gradient == "orientation" else 0,
                     float(_ifc_mg.memory_gradient_gain),
+                    # R247 HM ②：逐个体 h_norm（空数组 = 关档）+ beta；
+                    #   Rust 侧 `if hm_on { perc *= 1.0 + beta * h_norm[idx] }`（同式）。
+                    _h_norm, _hm_beta,
                 )
                 # 5.6) 信任学习：移动到有信号的格子后验证真假
                 target_cells = self._flat[mi]
@@ -3155,7 +3185,17 @@ class SphereEngine:
                     * (self.signals._marks[_own_cells] > 0).astype(np.float64),
                     0.0, float(_subcfg.stay_max),
                 )
-                moved = self.rng.random(P) >= _stay_eff
+                if _hm_on:
+                    # R247 HM ①（subpos 叠加语义）：本路径的"移动概率"= p_move = 1 − stay_eff
+                    #   ⇒ `p_move_eff = clip(p_move × (1 + alpha·h_norm), 0, 1)`；
+                    #   判定保持 `u >= 1 − p_move_eff`（与 `u >= stay` 同翻转方向）。
+                    #   ⚠️ 关档必须走**原式**：`1 − (1 − stay) ≠ stay`（浮点尾差）⇒ 两分支不合并。
+                    _p_move_eff = np.clip(
+                        (1.0 - _stay_eff) * (1.0 + float(_hmcfg.alpha) * _h_norm),
+                        0.0, 1.0)
+                    moved = self.rng.random(P) >= (1.0 - _p_move_eff)
+                else:
+                    moved = self.rng.random(P) >= _stay_eff
             if not _sub_on:
                 moved = self.rng.random(P) < move_prob
             moved &= energy >= move_cost_ind  # 付得起才走
@@ -3278,6 +3318,8 @@ class SphereEngine:
                 #    时参考循环退化为「纯打分 + argmax/平局」⇒ 允许整块向量化（逐位等价，
                 #    见 `_move_decide_batch`）。任一机制开启 ⇒ 一律走参考循环（不做半接线，
                 #    A1 教训）。`_batch_move_on` 是**对拍/调试开关**（默认 True）。
+                # ⚠️ R247 HM **不进**排除表：其 ② 已在 `_move_decide_batch` 内逐行接线
+                #    （`h_norm`/`hm_beta` 透传 + 变异对拍测试覆盖）⇒ 开 HM 不失快路径。
                 _batch_ok = (
                     self._batch_move_on
                     and not (_span2_on or d2_asym or d2_noise or d2_softmax
@@ -3288,7 +3330,8 @@ class SphereEngine:
                 )
                 if _batch_ok:
                     targets = self._move_decide_batch(
-                        mi, food_ratio, sig_present, densities, rand_choice, rep_w)
+                        mi, food_ratio, sig_present, densities, rand_choice, rep_w,
+                        _h_norm, _hm_beta)
                 # 快路径命中 ⇒ 参考循环迭代集为空（**不重排**下方 280 行参考实现）。
                 for i, idx in enumerate(() if _batch_ok else mi):
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
@@ -3318,6 +3361,11 @@ class SphereEngine:
                         targets[i] = nb[0]
                         continue
                     perc = genes[idx, Gene.PERCEPTION]
+                    if _hm_on:
+                        # R247 HM ②：**只调制 perc 赋值行** ⇒ 食物/信号/记忆/解读项随 perc 同乘、
+                        #   `soc × 密度` 项不受影响（"饿 ⇒ 更专注找吃的/信号，社交项相对被压"）。
+                        #   ⚠️ 与 Rust / 批量路径**逐字同式**：`1.0 + beta * h_norm[idx]`。
+                        perc = perc * (1.0 + _hm_beta * _h_norm[idx])
                     soc = (genes[idx, Gene.SOCIABILITY] - 0.5) * 2.0
                     # D2-3 感知噪声：食物/信号感知加高斯噪声（F-D2 修复 B′：走每引擎独立的
                     # `_d2_rng`，种子/算法同旧全局播种 ⇒ 单引擎逐位不变、多引擎不再互相污染）
