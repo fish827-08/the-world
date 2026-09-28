@@ -1,0 +1,18 @@
+# SMELL-USE 证据清单 —— sha256sum 格式（生成于 2026-09-28 13:58:16）
+90c82b7dd29a1581ad6834724637ab94b9548ffbd00cb550cf44c67ca3c06d3c         3,282  _rerun_logs/smell_v1_smoke/commit_msg_smell_use.txt
+90d9370f450c12eb76e48644d868e2458d10c22d5371a726ad49a853390a4a97            98  _rerun_logs/smell_v1_smoke/del8use_M1_rust_term_green.txt
+bf1d7a3b75e048815f91ce2401b6cbfe5c1acc123ca03bd3b98141713ed72d14         1,372  _rerun_logs/smell_v1_smoke/del8use_M1_rust_term_red.txt
+e294d58817276d5377bf3bcb35039ecb555722eb3cfdba356c1a9238baaf8280            98  _rerun_logs/smell_v1_smoke/del8use_M2_py_term_green.txt
+da039912b668f3872dac872237556222854cbcc2bf3492bbefdfd050fcae6561         1,340  _rerun_logs/smell_v1_smoke/del8use_M2_py_term_red.txt
+90d9370f450c12eb76e48644d868e2458d10c22d5371a726ad49a853390a4a97            98  _rerun_logs/smell_v1_smoke/del8use_M3_clip_green.txt
+1b0879588404e4aed9b12c790696e5451bc3ca5c562d53d10849fe39626bc87f         1,324  _rerun_logs/smell_v1_smoke/del8use_M3_clip_red.txt
+d9025d7b2e5933db7317011935a5b5e0df5c4bcf0ae215b24c77a39e124cbbd8         1,163  _rerun_logs/smell_v1_smoke/pytest_full_use.txt
+d854eee6cf66e04158e83055c2cb0b03b24016cce511b5efcb4aaa3484993427         1,695  _rerun_logs/smell_v1_smoke/self_audit_digest.txt
+0e95a81c96b077defeefadb63761ee72e32dbc93a1fba72f14ac363fca8f315c         3,398  _rerun_logs/smell_v1_smoke/smell_use_perf_full.txt
+105e572120e2c440260a335dd19d30fda524e589777197544fd4c4e4ea71e2a5         1,028  results/smell_v1/smell_use_perf_N200.json
+7c990ebe7b02054e96388aaa2236eb1c33887c9cc34bb89c501edf4c7314b85d         1,033  results/smell_v1/smell_use_perf_N2000.json
+93b2e10c8e23accd0fb28352c210d414076e9b1dd69d0158470f571bbd8ef910        42,531  sim_core/src/lib.rs
+0950639467b6748b3cca0c6b19b10ba51420d2bf58b0c7eb98795e3e6846e21a         8,704  sim_core/src/movement.rs
+5bd696998ffe732d7d4a47ab60ca42cd8930ec91c1a4193c6bdb69a1a77ea1c6       344,580  simulation/sphere_engine.py
+089bdf8101f41f5a6dd13e884b5031fdb4d8e89496a86d3d5496051eb741562e         8,323  tests/test_smell_use.py
+87813de5d439e9021d57c077a7cd230430caff232c038b74887df5c74039adb7        21,228  world/smell_field.py
