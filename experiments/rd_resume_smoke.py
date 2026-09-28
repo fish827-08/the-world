@@ -8,13 +8,15 @@ rd 开档（S2/旗舰 主档）**从未验**。要答：快照能否忠实捕获
 口径（= `experiments/s2_depletion_probe.py` 的 S1_BASE，"S2 同款"）：
   480×960 / patches=480 / pop=2000 / subpos on / speed_max=gain=0.125 / subdiv=80
   / k=2.5 / max_count=30000 / rgm=1.195 ＋ `resource_dynamics.enabled=True`
-  ＋ `sparse_fields=True`（rd 开 + 信号侧稀疏，T-E 解耦后的组合）。
+  ＋ `sparse_fields=True`（rd 开 + 资源/信号两侧稀疏；R244 v1 起资源侧也子集化）。
 流程模拟 `--save-every 500`：t=500、1000 经 `save_ckpt` 存三件套；"中断"发生在 t=1000
 存档后；从 t=1000 快照 `load_ckpt` 续跑到 1500，与连续跑**逐 tick digest** 对拍。
 
 🔴 历史（首跑即抓到真缺陷，2026-09-27）：`SimConfig.from_dict` 曾整段漏传 `subpos`
   ⇒ `load_snapshot(config=None)` 静默把 subpos 退回默认（换运动模型）⇒ 续跑**不可**。
   修复见 `simulation/config.py`；本脚本此后应恒为"可"（回归即炸）。
+🔴 v1 更新（R244，2026-09-28）：rd ∧ bgzero（本档）已**放行**资源侧惰性 ⇒ `_lazy` 应为
+  True（此前锁 rd 时为 False）。本冒烟同时覆盖"脏格集（派生量）跨快照重建"。
 
 用法：.venv\\Scripts\\python.exe experiments/rd_resume_smoke.py
 边界：**同机同树**才保证逐位（跨机续跑不保证，R218 §二）。
@@ -47,7 +49,7 @@ SAVE_EVERY = 500
 
 
 def build() -> SphereEngine:
-    """S2 同款 + rd 开 + 稀疏开（信号侧；资源侧仍锁 rd ⇒ _lazy 应为 False）。"""
+    """S2 同款 + rd 开 + 稀疏开（R244 v1 起资源侧（rd ∧ bgzero）也放行 ⇒ `_lazy` 应为 True）。"""
     c, notes = make_cfg(seed=42, rows=480, cols=960, pop=2000, patches=480,
                         subpos=True, speed_max=0.125, gain=0.125, subdiv=80,
                         k=2.5, max_count=30000, rgm=1.195)
@@ -103,7 +105,7 @@ def main() -> int:
     # ---------- A：连续跑（参考臂） ----------
     A = build()
     assert A._rd.enabled is True and A.signals._sparse is True, "机制没开 ⇒ 冒烟空转"
-    assert A.resources._lazy is False, "rd 档资源侧应保持全场（现状语义）"
+    assert A.resources._lazy is True, "rd ∧ bgzero 档资源侧惰性应放行（R244 v1）"
     dA: dict[int, tuple] = {}
     rdA: dict[int, dict] = {}
     for t in range(1, T_END + 1):
@@ -139,8 +141,13 @@ def main() -> int:
           f"duration={B2.signals.duration}")
     if start_tick != T_SNAP:
         fails.append(f"start_tick={start_tick} != {T_SNAP}")
-    if not (B2.signals._sparse is True and B2.resources._lazy is False and B2._rd.enabled):
+    if not (B2.signals._sparse is True and B2.resources._lazy is True and B2._rd.enabled):
         fails.append(f"恢复后机制真值不对：sparse={B2.signals._sparse} lazy={B2.resources._lazy}")
+    # v1：脏格集是派生量（不进快照）⇒ 恢复后应与 `_grid < _capacity` 严格一致
+    dirty_ok = np.array_equal(
+        B2.resources._dirty_mask, B2.resources._grid < B2.resources._capacity)
+    if not dirty_ok:
+        fails.append("恢复后脏格集与 grid<capacity 不一致（rebuild_lazy 未生效？）")
 
     # 恢复瞬间：rd 内部数组 / 计数器 与参考臂逐位
     d_diff = rd_diff(rdA[T_SNAP], rd_state(B2))

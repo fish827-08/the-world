@@ -228,27 +228,43 @@ def test_engine_sparse_matches_default_bitwise():
 
 
 def test_engine_sparse_scope_guards():
-    """范围锁：Rust 路径 / 资源动态开 ⇒ 不启用（机制静默退回全场）。"""
+    """范围锁（R244 v1）：Rust 路径 ⇒ 不启用；`rd ∧ bgzero` ⇒ **放行**（新）；
+    `rd ∧ ¬bgzero` ⇒ **构造期 fail-loud**（验收③：rd ∧ sparse ⇒ bgzero）。"""
     c1 = _cfg(sparse=True)
     c1.simulation.use_sim_core = True
     e1 = SphereEngine(c1)
     assert e1._sparse_fields is False
     assert e1.resources._lazy is False and e1.signals._sparse is False
 
+    # R231 T-E + R244 v1：rd 开 ∧ bgzero（S2 主线档）⇒ 信号侧与**资源侧**都放行
     c2 = _cfg(sparse=True)
     c2.resource_dynamics.enabled = True
     e2 = SphereEngine(c2)
-    # R231 T-E：rd 开 ⇒ **仅资源侧**退场；信号侧已解耦（与 rd 正交）⇒ 照常稀疏
-    assert e2._sparse_fields is False and e2.resources._lazy is False
-    assert e2.signals._sparse is True
+    assert e2._sparse_fields is True, "rd ∧ bgzero 档资源侧应放行（R244 v1）"
+    assert e2.resources._lazy is True and e2.signals._sparse is True
 
-    # 资源侧前提不满足 ⇒ 只有资源退回（信号照常稀疏）
+    # R244 验收③：rd ∧ sparse ∧ ¬bgzero ⇒ 构造期 fail-loud（防未来开搬移时前提静默破裂）
+    c2b = _cfg(sparse=True)
+    c2b.resources.bg_production_zero = False
+    c2b.resource_dynamics.enabled = True
+    with pytest.raises(ValueError, match="bg_production_zero"):
+        SphereEngine(c2b)
+
+    # 资源侧前提不满足（temp_sensitivity≠1）⇒ 只有资源退回（信号照常稀疏；rd 关不受影响）
     c3 = _cfg(sparse=True)
     c3.resources.temp_sensitivity = 2.0
     e3 = SphereEngine(c3)
     assert e3._sparse_fields is True
     assert e3.resources._lazy is False
     assert e3.signals._sparse is True
+
+    # rd 开 ∧ bgzero ∧ 前提不满足（temp_sensitivity≠1）⇒ 资源侧静默退回全场，信号侧照常
+    c4 = _cfg(sparse=True)
+    c4.resources.temp_sensitivity = 2.0
+    c4.resource_dynamics.enabled = True
+    e4 = SphereEngine(c4)
+    assert e4._sparse_fields is True
+    assert e4.resources._lazy is False and e4.signals._sparse is True
 
 
 def test_engine_sparse_snapshot_roundtrip(tmp_path):
@@ -269,61 +285,82 @@ def test_engine_sparse_snapshot_roundtrip(tmp_path):
     assert _digest(e) == _digest(e2), "恢复后续跑与不中断同批不一致 ⇒ 派生集重建有误"
 
 
-# ------------------------------------------------- ④b rd 开档信号解耦（R231 T-E）
+# ------------------------------------------------- ④b rd 开档稀疏（T-E 信号 + v1 资源）
 
 
 def _rd_cfg(sparse: bool, ticks: int = 150) -> SimConfig:
-    """`_cfg` + `resource_dynamics` 开（T-E 目标档：rd ∧ 信号稀疏）。"""
+    """`_cfg` + `resource_dynamics` 开（R244 v1 目标档：rd ∧ bgzero ∧ 稀疏）。"""
     c = _cfg(sparse=sparse, ticks=ticks)
     c.resource_dynamics.enabled = True
     return c
 
 
-def test_engine_rd_on_signal_sparse_matches_full_bitwise():
-    """R231 T-E：rd 开档，信号稀疏开 vs 关 ⇒ **逐 tick** 全状态逐位一致。
+def test_engine_rd_on_sparse_matches_full_bitwise():
+    """R244 验收①：`(rd on × sparse on) ≡ (rd on × sparse off)` **逐 tick** digest 对拍。
 
-    资源侧两跑均为全场（资源侧闸未放开 ⇒ `_lazy is False`）⇒ 本测试只验
-    "信号稀疏在 rd 开档下不破等价"（rd 与信号活跃集正交）。
+    稀疏开侧同时吃到两条路径：信号稀疏（R231 T-E）+ **资源侧 rd 子集化**（R244 v1；
+    含 note_tick 分母补算）⇒ 一次对拍钉死两者；关侧 = 资源/信号全场基线。
     """
     ea, eb = SphereEngine(_rd_cfg(sparse=False)), SphereEngine(_rd_cfg(sparse=True))
-    # 🔴 防静默 no-op：rd 真开、信号侧真稀疏（关侧真全场）、资源侧两跑都保持全场
+    # 🔴 防静默 no-op：rd 真开；关侧真全场；开侧资源+信号两侧都真稀疏
     assert ea._rd.enabled is True and eb._rd.enabled is True
-    assert eb.signals._sparse is True and ea.signals._sparse is False
-    assert ea.resources._lazy is False and eb.resources._lazy is False
+    assert ea.signals._sparse is False and eb.signals._sparse is True
+    assert ea.resources._lazy is False, "关侧资源应保持全场（基线）"
+    assert eb.resources._lazy is True, "开侧资源惰性没开 ⇒ v1 路径没被走到（测试空转）"
+    assert eb._rd.kill_denom == "regrowth", "本用例须覆盖分母补算路径（默认口径）"
 
     saw_active = False
+    saw_dirty = False
     for t in range(150):
         if ea.extinct or eb.extinct:
             break
         ea.step()
         eb.step()
         saw_active |= eb.signals._active_idx.size > 0
-        assert _digest(ea) == _digest(eb), f"rd 开档信号稀疏在 tick {t + 1} 破了等价"
+        saw_dirty |= bool(eb.resources._dirty_mask.any())
+        assert _digest(ea) == _digest(eb), f"rd 开档稀疏（资源+信号）在 tick {t + 1} 破了等价"
     assert ea.tick > 10, "两跑过早结束（灭绝）⇒ 证据不足"
     assert saw_active, "信号活跃集全程为空 ⇒ 等价是平凡真（本测试空转）"
+    assert saw_dirty, "整批没有出现过脏格 ⇒ rd 子集化路径没被走到（测试空转）"
 
 
-def test_engine_rd_on_signal_sparse_snapshot_roundtrip(tmp_path):
-    """rd 开档稀疏信号 save→load：活跃集（派生量）重建 ⇒ 续跑与不中断同批逐位一致。"""
-    e = SphereEngine(_rd_cfg(sparse=True))
+def test_engine_rd_on_sparse_snapshot_roundtrip(tmp_path):
+    """R244 验收①（续跑半）：rd ∧ bgzero 稀疏档 save→load ⇒ 续跑与不中断同批逐位一致。
+
+    2×2：sparse 关/开各自快照 + 恢复 ⇒ (恢复 ≡ 不中断) ∧ (on ≡ off)（脏格集/活跃集
+    两个派生量都在 load 内由 `rebuild_lazy`/`rebuild_sparse` 重建）。
+    """
+    ea, eb = SphereEngine(_rd_cfg(sparse=False)), SphereEngine(_rd_cfg(sparse=True))
     for _ in range(60):
-        if e.extinct:
+        if ea.extinct or eb.extinct:
             break
-        e.step()
-    assert e.tick > 10, "过早灭绝 ⇒ 快照证据不足"
-    path = tmp_path / "rd_signal_snap.npz"
-    e.save_snapshot(str(path))
-    e2 = SphereEngine.load_snapshot(str(path))
-    assert e2.signals._sparse is True, "快照恢复后信号稀疏丢失（闸未随配置还原）"
-    assert e2.resources._lazy is False, "rd 档资源侧应保持全场（现状语义）"
-    assert _digest(e) == _digest(e2), "快照往返本身不一致（本测试前提）"
+        ea.step()
+        eb.step()
+    assert ea.tick > 10, "过早灭绝 ⇒ 快照证据不足"
+    assert _digest(ea) == _digest(eb), "快照前两跑已不一致（本测试前提）"
+    pa = tmp_path / "rd_full_snap.npz"
+    pb = tmp_path / "rd_sparse_snap.npz"
+    ea.save_snapshot(str(pa))
+    eb.save_snapshot(str(pb))
+    ra = SphereEngine.load_snapshot(str(pa))
+    rb = SphereEngine.load_snapshot(str(pb))
+    assert ra.signals._sparse is False and rb.signals._sparse is True
+    assert ra.resources._lazy is False and rb.resources._lazy is True, (
+        "恢复后资源侧稀疏真值丢失（闸未随配置还原）"
+    )
+    assert _digest(ea) == _digest(ra) and _digest(eb) == _digest(rb), "快照往返本身不一致（前提）"
+    assert _digest(ra) == _digest(rb), "恢复后 on/off 不一致"
 
     for _ in range(40):
-        if e.extinct:
+        if ea.extinct or eb.extinct:
             break
-        e.step()
-        e2.step()
-    assert _digest(e) == _digest(e2), "恢复后续跑与不中断同批不一致 ⇒ 活跃集重建有误"
+        ea.step()
+        eb.step()
+        ra.step()
+        rb.step()
+    assert _digest(ea) == _digest(ra), "恢复后续跑与不中断同批不一致 ⇒ 派生集重建有误"
+    assert _digest(eb) == _digest(rb), "恢复后续跑与不中断同批不一致 ⇒ 派生集重建有误（稀疏侧）"
+    assert _digest(ra) == _digest(rb), "恢复后 on/off 破等价 ⇒ v1 子集化破等价"
 
 
 def test_c7_digest_identical_with_sparse_switch():
@@ -359,6 +396,67 @@ def test_c7_digest_identical_with_sparse_switch():
     assert e1.signals._sparse is True and e1.resources._lazy is False
     assert saw1 > 0, "信号稀疏在本次跑中全程空转 ⇒ 等价是平凡真，构不成证据"
     assert d1 == d0, f"稀疏档 digest 与默认档不同：{d1} vs {d0}"
+
+
+# ------------------------------------------------- ④c v1 分母补算（R244 验收②）
+
+
+def test_rd_lazy_note_tick_denominator_backfill():
+    """R244 验收②：**满格（净格）被吃** ⇒ 分母补算后 full/lazy 杀死集逐位一致。
+
+    场景 = 极端密度补充通道（`kill_denom="regrowth"`，默认）：分母 = 本 tick 名义再生量。
+    regrow 子集化只填**脏格** ⇒ 净格（`grid==cap`，regrow 时被跳过）被吃时分母缺值 ⇒
+    被 `denom_k>0` 静默滤出（不炸但结果不同）。本测试同时证明：
+      ① 不补算 ⇒ 杀死集与全场**不一致**（该路径承重，用例非空转）；
+      ② 按引擎逻辑补算 ⇒ 杀死集**逐位一致**。
+    """
+    from world.resource_dynamics import ResourceDynamics
+
+    world, _, rf, _ = _rf_pair(regrowth_rate=0.01)
+    cfg = SimConfig(seed=42).resource_dynamics
+    cfg.enabled = True
+    tick = 50
+    m = np.flatnonzero(rf._patch_mask)
+    g_all = rf._regrowth_amount(tick)
+    c = int(m[np.argmax(g_all[m])])
+    assert g_all[c] > 0.0, "本用例需要该格名义再生 > 0（否则分母恒 0，通道本就不可达）"
+    # 前置：损伤主通道不得触发（隔离出"极端密度补充通道"）——intake 取 12.5× 名义再生
+    intake = np.zeros(world.n_cells)
+    intake[c] = 12.5 * g_all[c]
+    assert intake[c] / rf._capacity[c] < 0.8, "本用例需要 damage < death_threshold（隔离补充通道）"
+    # 把 c 补到满（净格）——这正是"regrow 子集化时会跳过"的格
+    rf._grid[c] = rf._capacity[c]
+
+    rd_full = ResourceDynamics.from_field(cfg, rf, world)
+    rd_nobf = ResourceDynamics.from_field(cfg, rf, world)   # 不补算的变异体
+    rd_lazy = ResourceDynamics.from_field(cfg, rf, world)
+    assert rd_full.kill_denom == "regrowth" and rd_full.kill_patch_only
+
+    # 全场基线：分母 = 全场名义再生
+    rd_full.note_tick(intake, g_all, tick)
+    assert rd_full._dead[c], "该格应被极端密度通道杀死（前提；否则用例无效）"
+
+    # lazy 数组（模拟 regrow 子集化：只填脏格；净格 c 缺值 = 0）
+    growth_lazy = np.zeros(world.n_cells)
+    dirty = rf._grid < rf._capacity
+    assert not dirty[c], "c 应为净格（用例前提）"
+    growth_lazy[dirty] = rf._regrowth_amount(tick, np.flatnonzero(dirty))
+
+    # ① 不补算 ⇒ 杀死集必然不一致（静默漏杀；证明该路径承重）
+    rd_nobf.note_tick(intake.copy(), growth_lazy.copy(), tick)
+    assert not np.array_equal(rd_full._dead, rd_nobf._dead), (
+        "分母缺失却不影响杀死集 ⇒ 用例空转（未覆盖目标路径）"
+    )
+
+    # ② 补算（复刻引擎逻辑）⇒ 杀死集逐位一致 + 损伤账本逐位一致
+    eaten = np.flatnonzero(intake)
+    miss = eaten[growth_lazy[eaten] == 0.0]
+    assert miss.size == 1 and int(miss[0]) == c, "补算集合应恰好含净格 c（用例前提）"
+    growth_lazy[miss] = rf._regrowth_amount(tick, miss)
+    rd_lazy.note_tick(intake, growth_lazy, tick)
+    assert np.array_equal(rd_full._dead, rd_lazy._dead), "分母补算后杀死集仍不一致"
+    assert _sha(rd_full._damage) == _sha(rd_lazy._damage), "分母补算后损伤账本不一致"
+    assert np.array_equal(rd_full._rest_until, rd_lazy._rest_until)
 
 
 # ---------------------------------------------------------------- ⑤ 变异测试（R219 §二-2）

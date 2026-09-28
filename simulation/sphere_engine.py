@@ -837,7 +837,9 @@ class SphereEngine:
         # ---- R217 §五 #1 稀疏化 B：惰性再生 / 稀疏信号（默认关 ⇒ 全场路径逐位不变）----
         # 🔴 范围锁（引擎侧）：共用 ① 配置开关；② Python 路径（Rust `consume_many` /
         #    `regrow_patchy` / `signal_emit` **直写** `_grid`/`_marks`，打脏点覆盖不到）。
-        #    资源侧再加 ③ 资源动态关（每 tick 改 `_capacity`/斑块掩码，"净格恒净"前提被破坏）。
+        #    资源侧锁③（R244 v1 改写）：原"rd 关" → **放行 `rd.enabled ∧ bgzero`**（S2/S3 主线）；
+        #    一般档（会搬斑块的世界 = rd ∧ ¬bgzero）保持全场 —— 搬移 ⇒ `_capacity`/掩码逐 tick
+        #    变 ⇒ "净格恒净"前提破裂（R226 修复①：bgzero 档禁搬移 ⇒ 掩码/容量恒定，实测恒真）。
         # 资源侧另有前提校验（`enable_lazy`：temp_sensitivity/light_sensitivity/倍率符号）
         # ⇒ 不满足时它返回 False 并**保持全场路径**（安全回退；`resources._lazy` 即真值）。
         # R231 T-E：**信号侧与资源侧解耦** —— 信号活跃集（`age>0`）自包含、与 rd 正交
@@ -847,7 +849,25 @@ class SphereEngine:
             getattr(config.simulation, "sparse_fields", False)
             and not self._use_sim_core
         )
-        self._sparse_fields = _sparse_cfg and not bool(getattr(self._rd, "enabled", False))
+        _rd_on0 = bool(getattr(self._rd, "enabled", False))
+        _bgzero0 = bool(getattr(self._rd, "bg_production_zero", False))
+        if _sparse_cfg and _rd_on0 and not _bgzero0:
+            # 🔴 R244 验收③：`rd ∧ sparse ⇒ bgzero` **构造期 fail-loud**（防未来开搬移时前提
+            #    静默破裂）。rd 子集化的前提 = "掩码/容量逐 tick 恒定"；bgzero 档由 R226 修复①
+            #    （禁搬移）保证；一般档（搬斑块）该前提不成立 ⇒ 宁炸不静默。
+            raise ValueError(
+                "sparse_fields=True ∧ resource_dynamics.enabled=True ∧ "
+                "bg_production_zero=False：该组合未经验证 —— 轮作会搬斑块 ⇒ 掩码/容量逐 tick "
+                "变化 ⇒ 脏格集（派生量）会漏标记新出现的欠容格 ⇒ 破逐位等价。"
+                "请改用 bg_production_zero=True 档（S2/S3 主线），或令 sparse_fields=False。"
+                "（R244 §二 验收③：rd ∧ sparse ⇒ bgzero，构造期 fail-loud）"
+            )
+        _rd_mults_ok = (
+            float(getattr(self._rd, "dead_regen_mult", 0.0)) >= 0.0
+            and float(getattr(self._rd, "rest_regen_mult", 0.0)) >= 0.0
+        )
+        # R244 v1 范围锁：rd 关 ⇒ 原行为；rd 开 ⇒ 仅 bgzero 档放行（负闸 ⇒ 静默退回全场）。
+        self._sparse_fields = _sparse_cfg and (not _rd_on0 or (_bgzero0 and _rd_mults_ok))
         if self._sparse_fields:
             self.resources.enable_lazy()
         if _sparse_cfg:
@@ -1371,14 +1391,26 @@ class SphereEngine:
         # patch_boost 生效：对 corpse_boost>0 的格补 +50% 再生（受容量上限），并递减
         bo = self._corpse_boost > 0
         if bo.any():
-            boost_amt = (
-                self.resources._regrowth_amount(self._tick)
-                * float(_cwc.corpse_patch_boost)
-            )
-            room = np.maximum(
-                0.0, self.resources._capacity[bo] - self.resources._grid[bo]
-            )
-            self.resources._grid[bo] += np.minimum(boost_amt[bo], room)   # sparse:inc（腐烂 boost，只增）
+            _bo = np.flatnonzero(bo)
+            if self.resources._lazy:
+                # R244 v1：只算 `bo` 子集（子集 `_regrowth_amount` ≡ 全场在其上逐位相同；
+                # 前提由 `enable_lazy` 校验）—— corpse 开档不再每 tick 全场算再生链
+                # （T-G profile：bo>0 占 84% tick、|bo| 中位 69 ⇒ 全场算是纯浪费）。
+                _g = self.resources._regrowth_amount(self._tick, _bo)
+                room = np.maximum(
+                    0.0, self.resources._capacity[_bo] - self.resources._grid[_bo]
+                )
+                self.resources._grid[_bo] += np.minimum(   # sparse:inc（腐烂 boost，只增）
+                    _g * float(_cwc.corpse_patch_boost), room)
+            else:
+                boost_amt = (
+                    self.resources._regrowth_amount(self._tick)
+                    * float(_cwc.corpse_patch_boost)
+                )
+                room = np.maximum(
+                    0.0, self.resources._capacity[bo] - self.resources._grid[bo]
+                )
+                self.resources._grid[bo] += np.minimum(boost_amt[bo], room)   # sparse:inc（腐烂 boost，只增）
             self._corpse_boost[bo] -= 1
 
     def _step_scavenging(self, P: int, stomach, stomach_cap, genes) -> None:
@@ -2238,12 +2270,32 @@ class SphereEngine:
         _rd_on = bool(getattr(self._rd, "enabled", False))
         if _rd_on:
             # 13.4 波 2A（T2）：资源动态**强制 Python 路径**（H3 已拦 use_sim_core）。
-            # 再生闸：休耕/死亡格再生乘子 = 0；其余 = 1（enabled=False ⇒ 全 1 = 逐位等价）。
+            # 再生闸：休耕/死亡格再生乘子（bgzero 档默认 0.5 = 减产不停产）；其余 = 1
+            # （enabled=False ⇒ 全 1 = 逐位等价）。
             self._rd_intake_sum[:] = 0.0          # 逐 tick 重建 intake（note_tick 输入）
-            self._rd_growth_sum = self.resources._regrowth_amount(self._tick)
-            growth = self._rd_growth_sum * self._rd.growth_multiplier()
-            np.minimum(self.resources._capacity, self.resources._grid + growth,   # sparse:n/a（rd 路径）
-                       out=self.resources._grid)
+            if self.resources._lazy:
+                # ---- R244 v1：rd 再生子集化（只结算脏格 = `_grid < _capacity`）----
+                # 逐位等价三条：① 子集 `_regrowth_amount` ≡ 全场在其上逐位相同（R217 前提，
+                # `enable_lazy` 已逐条校验）；② 净格跳过 = 逐位 no-op（`g = 名义×闸 ≥ 0`，
+                # 闸非负由 `_rd_mults_ok` + `enable_lazy` 前提把关）；③ rd 前提 = "掩码/容量
+                # 逐 tick 恒定"（bgzero ⇒ R226 禁搬移；非 bgzero 档已在构造期 fail-loud）。
+                self._rd_growth_sum[:] = 0.0      # 逐 tick 清零（预分配数组 + 子集回填）
+                idx = np.flatnonzero(self.resources._dirty_mask)   # ~0.28 ms @460800
+                if idx.size:
+                    nominal = self.resources._regrowth_amount(self._tick, idx)
+                    self._rd_growth_sum[idx] = nominal    # 名义再生（未乘闸；note_tick 分母）
+                    mult = self._rd.growth_multiplier()
+                    new = self.resources._grid[idx] + nominal * mult[idx]
+                    cap_i = self.resources._capacity[idx]
+                    np.minimum(cap_i, new, out=new)
+                    self.resources._grid[idx] = new   # sparse:lazy（rd 子集结算；脏标记在下方维护）
+                    # 到顶格转净（未到顶留脏；`>=` 而非 `==`：min 后不可能 > cap）
+                    self.resources._dirty_mask[idx[new >= cap_i]] = False
+            else:
+                self._rd_growth_sum = self.resources._regrowth_amount(self._tick)
+                growth = self._rd_growth_sum * self._rd.growth_multiplier()
+                np.minimum(self.resources._capacity, self.resources._grid + growth,   # sparse:n/a（rd 全场路径）
+                           out=self.resources._grid)
         elif self._use_sim_core and self.resources.distribution == "uniform":
             # 3.4：资源再生长沉到 Rust（与 ResourceField.regrow 逐位等价，
             # 默认 temp_sensitivity=1.0 时严格一致；≠1 有 ≤1-ULP 差异）
@@ -2884,6 +2936,16 @@ class SphereEngine:
         #       食腐写胃不入 note_tick —— 尸体不是"本格活再生"的取食压力）。
         #       🔴 与 `_rd_growth_sum`（regrow 段已存的本 tick 名义再生）配对。
         if _rd_on:
+            if self.resources._lazy and self._rd.kill_denom == "regrowth":
+                # R244 v1 分母补算：regrow 段只填**脏格**名义再生 ⇒ 净格（`grid==cap`）本 tick
+                # 被吃时分母缺值 ⇒ 被 `denom_k>0` 静默滤出（极端密度通道漏杀：不炸但结果不同）。
+                # 只对被吃格补算（O(活跃)）；`_rd_growth_sum==0` 含"已结算但名义=0"格 ⇒ 重算同值，无害。
+                _eaten = np.flatnonzero(self._rd_intake_sum)
+                if _eaten.size:
+                    _miss = _eaten[self._rd_growth_sum[_eaten] == 0.0]
+                    if _miss.size:
+                        self._rd_growth_sum[_miss] = self.resources._regrowth_amount(
+                            self._tick, _miss)
             self._rd.note_tick(self._rd_intake_sum, self._rd_growth_sum, self._tick)
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）

@@ -387,12 +387,15 @@ class SimulationConfig:
     #   ② 信号场只推进"有标记（`age>0`）"的格。两者都是**逐位等价**改写
     #   （论证见 `world/resource_field.py::_regrow_lazy` 与 `world/signal_field.py::tick`）：
     #   窗口恒 1 tick、子集执行与全场逐元素同式、净格在非负增长下是逐位 no-op。
-    # ⚠️ **范围锁**（引擎侧，任一不满足 ⇒ 退回全场路径，静默无害）：
-    #   `use_sim_core=False`（Rust 直写 `_grid`/`_marks`，打脏点覆盖不到）——两侧共用；
-    #   资源侧再加 `resource_dynamics` 关（每 tick 改 `_capacity`/掩码，净格恒净前提被破坏）。
+    # ⚠️ **范围锁**（引擎侧）：
+    #   `use_sim_core=True` ⇒ 两侧都不启用（Rust 直写 `_grid`/`_marks`，打脏点覆盖不到）；
     #   R231 T-E：**信号侧与资源侧解耦** —— 信号活跃集（`age>0`）自包含、与 rd 正交
-    #   （rd 不写 `_marks`）⇒ **rd 开档信号侧照常稀疏**（v1 拟再放开资源侧 bgzero 档）。
-    #   资源侧另有前提校验（`ResourceField.enable_lazy`，如 `temp_sensitivity==1.0`）。
+    #   （rd 不写 `_marks`）⇒ **rd 开档信号侧照常稀疏**。
+    #   R244 v1：**资源侧放开 rd+bgzero 档**（子集再生 + 分母补算，逐位对拍通过）；
+    #   `rd ∧ ¬bgzero` ⇒ **构造期 fail-loud**（轮作搬斑块 ⇒ 掩码/容量逐 tick 变化 ⇒
+    #   净格恒净前提破裂；宁炸不静默）—— 见 `SphereEngine.__init__`。
+    #   资源侧前提校验（`ResourceField.enable_lazy`：patchy / `temp_sensitivity==1.0` /
+    #   非负倍率等）不满足 ⇒ 资源侧静默退回全场（信号侧不受影响）。
     # 🔴 默认 False = **旧行为逐位不变**（全场分支代码原样保留；本开关 = 唯一回滚点）。
     # ⚠️ 挂进 `SimConfig` ⇒ 经 `asdict` **自动进 `fingerprint()`**（同 `subpos` 家族）：
     #   开关不同的两份配置指纹不同（跨档续跑会被拦——它虽不改数值，但改算路）。
