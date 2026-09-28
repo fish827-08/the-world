@@ -26,6 +26,25 @@ from simulation.config import (
 from simulation.sphere_engine import SphereEngine
 
 
+def _sim_core_ready() -> bool:
+    """R249：sim_core 编译扩展可用性（与引擎 R249 防护同口径）。
+
+    仓库 `sim_core/`（Rust 源码目录，无 `__init__.py`）在未编译扩展的机器上
+    会被 Python 当作命名空间空包 ⇒ import 成功但无符号。
+    """
+    try:
+        import sim_core
+    except ImportError:
+        return False
+    return hasattr(sim_core, "step_vectors_stage1")
+
+
+_requires_sim_core = pytest.mark.skipif(
+    not _sim_core_ready(),
+    reason="sim_core 编译扩展不可用（裸 Python/云端环境走 Python 路径；R249）",
+)
+
+
 def _engine(ticks: int = 0, *, seed: int = 42,
             rd: bool = False, use_sim_core: bool = False,
             patchy: bool = False) -> SphereEngine:
@@ -259,6 +278,7 @@ def test_dead_cell_max_frac_gate():
 
 # --------------------------------------------------------------- ⑦ H3
 
+@_requires_sim_core
 def test_rd_use_sim_core_h3():
     """H3 fail-loud：resource_dynamics ∧ use_sim_core ⇒ 构造期 NotImplementedError。"""
     with pytest.raises(NotImplementedError):

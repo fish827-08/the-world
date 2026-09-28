@@ -33,6 +33,25 @@ from world.signal_field import SignalField
 from world.sphere_world import SphereWorld
 
 
+def _sim_core_ready() -> bool:
+    """R249：sim_core 编译扩展可用性（与引擎 R249 防护同口径）。
+
+    仓库 `sim_core/`（Rust 源码目录，无 `__init__.py`）在未编译扩展的机器上
+    会被 Python 当作命名空间空包 ⇒ import 成功但无符号。
+    """
+    try:
+        import sim_core
+    except ImportError:
+        return False
+    return hasattr(sim_core, "step_vectors_stage1")
+
+
+_requires_sim_core = pytest.mark.skipif(
+    not _sim_core_ready(),
+    reason="sim_core 编译扩展不可用（裸 Python/云端环境走 Python 路径；R249）",
+)
+
+
 # ---------------------------------------------------------------- 构造helpers
 
 def _world_lt(rows: int = 24, cols: int = 48, rotation: int = 120):
@@ -227,15 +246,24 @@ def test_engine_sparse_matches_default_bitwise():
     assert _digest(ea) == _digest(eb), "开关两跑逐位不一致 ⇒ 稀疏化破了等价"
 
 
-def test_engine_sparse_scope_guards():
-    """范围锁（R244 v1）：Rust 路径 ⇒ 不启用；`rd ∧ bgzero` ⇒ **放行**（新）；
-    `rd ∧ ¬bgzero` ⇒ **构造期 fail-loud**（验收③：rd ∧ sparse ⇒ bgzero）。"""
+@_requires_sim_core
+def test_sparse_rust_path_disabled():
+    """范围锁（R244 v1）· Rust 路径段：use_sim_core ⇒ 两侧都不启用。
+
+    R249：本段需**真扩展**（构造 use_sim_core=True 引擎）⇒ 从
+    test_engine_sparse_scope_guards 拆出挂环境 skip；裸 Python 机不验此段。
+    """
     c1 = _cfg(sparse=True)
     c1.simulation.use_sim_core = True
     e1 = SphereEngine(c1)
     assert e1._sparse_fields is False
     assert e1.resources._lazy is False and e1.signals._sparse is False
 
+
+def test_engine_sparse_scope_guards():
+    """范围锁（R244 v1）· Python 路径段：`rd ∧ bgzero` ⇒ **放行**（新）；
+    `rd ∧ ¬bgzero` ⇒ **构造期 fail-loud**（验收③：rd ∧ sparse ⇒ bgzero）。
+    （Rust 路径段已拆至 test_sparse_rust_path_disabled —— R249）"""
     # R231 T-E + R244 v1：rd 开 ∧ bgzero（S2 主线档）⇒ 信号侧与**资源侧**都放行
     c2 = _cfg(sparse=True)
     c2.resource_dynamics.enabled = True
