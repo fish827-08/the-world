@@ -448,6 +448,10 @@ class SphereEngine:
          # 🔴 __slots__ 硬约束：新属性必须登记（加在块尾，减少同文件并发冲突面）。
          "smell",              # SmellField 实例；**全关 = None**（不进任何新代码路径 ⇒ 逐位不变）
          "_smell_on",          # 开关快照（构造期取一次；False ⇒ 整段不执行）
+         "_smell_dummy",       # 消费端关档时传给 Rust 的占位（长度 1；标志 0 ⇒ Rust 不索引）
+         "_smell_scratch",     # 消费端取数缓冲 = **按代缓存**：全场数组，值只对"本代已读格"有效
+         "_smell_stamp",       # 每格的"代"标记（int32；与缓存同代才复用 ⇒ 场一更新就全体失效）
+         "_smell_gen",         # 当前代（每次气味场 update() 后 +1）
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -600,6 +604,11 @@ class SphereEngine:
         from world.smell_field import SmellField   # 局部导入：全关档零 import 开销（同 rd 先例）
         self._smell_on = bool(tuple(config.smell.channels or ()))
         self.smell = SmellField(self.world, config.smell) if self._smell_on else None
+        self._smell_dummy = np.zeros(1, dtype=np.float64)   # R244 §二：Rust 传参占位（关档用）
+        self._smell_scratch = None                          # R244 §二：消费端取数缓存（惰性分配）
+        self._smell_stamp = None                            # R244 §二：每格"代"标记
+        self._smell_gen = 1                                 # R244 §二：当前代（**从 1 起**：
+        #   stamp 初始全 0 ⇒ 首 tick 全部视为"未算过"，不会误用零值缓存）
 
         # 预计算统一邻居表（L6 Rust 下沉用）：**P0.1（T1）紧凑化** —— 直接复用 world 的
         # 紧凑缓存（`(n_cells, 8)` int64 ≈ 29.5 MB @480×960），不再自建
@@ -2398,6 +2407,8 @@ class SphereEngine:
         #   源由引擎算（**稀疏**：只给有源的格）⇒ 注入项与扩散解耦（§8.2-③）。
         if self.smell is not None and self._tick % self.smell.update_every == 0:
             self.smell.update(self._smell_sources(), self._tick)
+            # R244 §二：场一变 ⇒ 消费端按代缓存**全体失效**（gen+1）
+            self._smell_gen += 1
         born, died, deaths = self._step_population()
         # 13.4 波 2A（T2）：每 tick 末轮作（死格重入候选池 + 反荒漠化闸 + 到期休耕恢复）
         # + 按当前掩码**重算** `_capacity`（`_capacity` 是基准 ⇒ 动态折扣走 `capacity_multiplier`）。
@@ -2580,6 +2591,7 @@ class SphereEngine:
         densities: NDArray[np.float64],
         rand_choice: NDArray[np.int64],
         rep_w: float,
+        smell_arr: "NDArray[np.float64] | None" = None,
     ) -> NDArray[np.int64]:
         """向量化移动决策（逐位等价；仅由调用点 `_batch_ok` 门启用）。
 
@@ -2640,6 +2652,9 @@ class SphereEngine:
                     score + (0.4 * perc)[:, None] * interp,
                     score,
                 )
+            # R244 §二：气味消费端（第三处同式；与参考循环/Rust 同位置、同操作数、同顺序）
+            if smell_arr is not None:
+                score = score + perc[:, None] * smell_arr[nb]
             k = nb.shape[1]
             pick = np.where(
                 (score.max(axis=1) - score.min(axis=1)) < 1e-9,
@@ -3117,6 +3132,33 @@ class SphereEngine:
         # D2-3 信息不对称：感知半径4/噪声/softmax 暂未下沉 Rust，启用时走 Python 路径
         _ifcfg = self.config.info_structure
         _d2_asym = _ifcfg.enabled and (_ifcfg.perception_radius == 4 or _ifcfg.perception_noise > 0 or _ifcfg.softmax_tau > 0)
+        # ── R244 §二：气味场**消费端**（默认关；🔴 只读**候选格并集** ⇒ O(N×k)，不是 O(n_cells)）──
+        #   口径：`_smell_arr[c] = Σ_ch w_ch·clip(S_ch(c)/S_max_ch, 0, 1)`（候选格并集**之外**恒 0）。
+        #   **三处同式同位置**：Python 参考循环 / Rust 热核 / 向量化快路径
+        #   （`score += perc × _smell_arr[nb]`）⇒ 无分岔（`_move_decide_batch` 收 `smell_arr` 参数）。
+        _smell_use_on = bool(self.config.smell.use_in_move) and self.smell is not None
+        _smell_arr = None
+        if _smell_use_on:
+            # 🔴 取数 = **按代缓存**：气味场只每 k tick 变一次 ⇒ 同一代内已读格的值可复用；
+            #   每 tick 只需补算"本代还没算过的格"（个体移动导致的新候选）。
+            #   代价：一次场更新内首次 ≈ O(候选格数)，其余 tick ≈ O(新增格) ⇒ 摊薄 ~0.3 ms/tick @N=2000。
+            _cache = self._smell_scratch
+            if _cache is None:
+                _cache = self._smell_scratch = np.zeros(self.world.n_cells, dtype=np.float64)
+                self._smell_stamp = np.zeros(self.world.n_cells, dtype=np.int32)
+            _smell_arr = _cache
+            _f = self._nb_table[self._flat[:P]].ravel()
+            _f = _f[_f >= 0]                              # 主表极行是 -1 占位
+            _pn = self._pole_nb.ravel()
+            _f = np.concatenate([_f, _pn[_pn >= 0]])      # 极格候选（极带整行）
+            if _f.size:
+                _stamp = self._smell_stamp
+                _gen = self._smell_gen
+                _new = _f[_stamp[_f] != _gen]
+                if _new.size:
+                    _new = np.unique(_new)                # 去重（同格被多个体/多次引用）
+                    _cache[_new] = self.smell.combined(_new)
+                    _stamp[_new] = _gen
         if self._use_sim_core and not _d2_asym:
             moved_raw = self.rng.random(P) < move_prob
             mi = np.flatnonzero(moved_raw & (energy >= move_cost_ind))
@@ -3162,6 +3204,9 @@ class SphereEngine:
                     self._pole_top, self._pole_bottom,
                     1 if _ifc_mg.memory_gradient == "orientation" else 0,
                     float(_ifc_mg.memory_gradient_gain),
+                    # R244 §二：气味消费端（关档传 dummy 单元素数组 + 标志 0 ⇒ Rust 不索引）
+                    1 if _smell_use_on else 0,
+                    _smell_arr if _smell_use_on else self._smell_dummy,
                 )
                 # 5.6) 信任学习：移动到有信号的格子后验证真假
                 target_cells = self._flat[mi]
@@ -3352,7 +3397,8 @@ class SphereEngine:
                 )
                 if _batch_ok:
                     targets = self._move_decide_batch(
-                        mi, food_ratio, sig_present, densities, rand_choice, rep_w)
+                        mi, food_ratio, sig_present, densities, rand_choice, rep_w,
+                        _smell_arr if _smell_use_on else None)
                 # 快路径命中 ⇒ 参考循环迭代集为空（**不重排**下方 280 行参考实现）。
                 for i, idx in enumerate(() if _batch_ok else mi):
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
@@ -3422,6 +3468,10 @@ class SphereEngine:
                             dtype=np.float64,
                         )
                         score = score + 0.4 * perc * interp
+                    # ── R244 §二：气味场消费端（默认关 ⇒ `_smell_arr is None` ⇒ 整段不执行）──
+                    # 🔴 与 Rust **同式同位置**（在信号项之后、L1 项之前）⇒ 双路径逐位一致。
+                    if _smell_use_on:
+                        score = score + perc * _smell_arr[nb]
                     # ── R146/R149 L1 两项（**逐候选**；本段 = [所有者·天平] 线 = B1）─────
                     # 🔴 R148-1 认账：若某项对**所有候选**取同值 ⇒ `argmax` 逐位不变、
                     #    `softmax` 数学无效应（`[实测]` 偏差 9.6e-15 / 20 万次 0 翻转）
@@ -5388,6 +5438,7 @@ class SphereEngine:
         if engine.smell is not None and "smell_S" in data:
             engine.smell.restore({"S": data["smell_S"],
                                   "Sc": data["smell_Sc"] if "smell_Sc" in data else None})
+            engine._smell_gen += 1     # R244 §二：恢复后缓存全体失效（stamp 可能带旧代）
         # R217 §五 #1 稀疏化 B：脏格集/活跃集是**派生量**（不进快照）⇒ 整体替换
         #   `_grid` / `_marks` / `_age` 之后必须按不变量重建，否则陈旧集合会漏结算（破等价）。
         #   （未启用时这两个方法是 no-op。）

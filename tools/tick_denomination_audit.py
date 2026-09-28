@@ -128,6 +128,13 @@ KNOWN: dict[str, str] = {
     "smell.inject_risk": INVARIANT,
     "smell.inject_kin": INVARIANT,
     "smell.channels": INVARIANT,             # 通道集（名字元组）
+    # ---- R244 §二 气味场消费端（本线 = [云端开发·云启]）----
+    "smell.use_in_move": INVARIANT,          # 开关（bool）—— 不承载 tick 面额
+    "smell.w_food": INVARIANT,               # 通道权重（无量纲固定权重；扩基因位留批 B）
+    "smell.w_prey": INVARIANT,
+    "smell.w_risk": INVARIANT,
+    "smell.w_kin": INVARIANT,
+    "smell.norm_mode": INVARIANT,            # 归一化模式（字符串）
     # ---- 每 tick 概率（1−(1−p)^k）----
     "predation.attack_prob_coef": PROB,
     "pleasure.baseline_rate": PROB,

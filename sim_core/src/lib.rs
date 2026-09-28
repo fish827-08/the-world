@@ -677,6 +677,9 @@ fn step_movement(
     pole_bottom: usize,
     mem_grad_mode: u8,
     mem_grad_gain: f64,
+    // R244 §二：气味场消费端（`smell_use=0` ⇒ 不索引 `smell_score`（可为 1 元素占位））
+    smell_use: u8,
+    smell_score: PyReadonlyArray1<'_, f64>,
 ) -> PyResult<()> {
     let n = unsafe { flat.as_array().len() };
     if n_cols == 0 || n_cells % n_cols != 0 {
@@ -738,6 +741,10 @@ fn step_movement(
         )));
     }
 
+    if smell_use != 0 {
+        require_len("smell_score", smell_score.as_array().len(), n_cells)?;
+    }
+
     let mut f = unsafe { flat.as_slice_mut()? };
     let mut e = unsafe { energy.as_slice_mut()? };
 
@@ -752,6 +759,7 @@ fn step_movement(
         move_cost_ind.as_slice()?,
         n_cells, nb_stride, gene_count,
         n_cols, pole_top, pole_bottom, mem_grad_mode, mem_grad_gain,
+        smell_use, smell_score.as_slice()?,
     );
     Ok(())
 }

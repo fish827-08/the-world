@@ -1154,7 +1154,31 @@ class SmellConfig:
     inject_kin: float = 1.0          # ④ 同类通道（源 = 活体个体；与 prey 同源、读端不同用途）
     risk_g16_threshold: float = 0.6  # ③ 的源定义：`g16`（AGGRESSION）≥ 此值 ⇒ 视为捕食者
 
+    # ---- R244 §二：气味场**消费端**（把通道值接进移动打分）----------------------
+    #  ✅ 已完成；🟢 R244 立项（实施规格-移动决策三件-20260928.md §二）
+    #
+    #  score += perc × Σ_ch  w_ch · Ŝ_ch(c)        （c = **候选邻居格**；仍是"感知 1 格"）
+    #  Ŝ_ch(c) = clip( S_ch(c) / S_max_ch , 0, 1 )，S_max_ch = inject_max_ch / (1 − decay^k)
+    #            （**解析上界**：本模块递推 `S ← decay^k·S + 注入` 的不动点 ⇒ 构造期可算）
+    #
+    #  🔴 两处口径（写死，防"数字没出处"）
+    #  * **权重自带符号**：设计稿 §2.2 写 `− w_risk·Ŝ_risk`，§2.1 又给 `w_risk=-0.5`（"负权重=回避"）
+    #    ⇒ 二者**互相矛盾**（双重取负会变成吸引）。本实现取"**权重自带符号**"（`Σ w_ch·Ŝ_ch`），
+    #    与 §2.1 的默认值自洽；若口径定为 `−w_risk` 形式 ⇒ 把默认改回 `+0.5` 即可（一行）。
+    #  * **固定权重**（本批=机制存在性验证）：扩"每通道 1 位权重 + 1 位阈值"= 8 位 = **纪元级**
+    #    （R238 §2）⇒ 留批 B；本组字段即为届时基因位的默认值来源。
+    #
+    #  ▶ 与 `channels`（场本体开关）**分开**：本开关只管"读不读/怎么读" ⇒ 场关时本项 fail-loud。
+    #  ▶ 性能口径（R244 §2.4）：每 tick **一次**候选格并集取数（O(N×k)，不是 O(n_cells)）⇒ 读路径。
+    use_in_move: bool = False        # 🔴 消费端总开关（默认关 = 回滚点，逐位不变）
+    w_food: float = 0.5              # ① 食物通道权重（正 = 趋近）
+    w_prey: float = 0.0
+    w_risk: float = -0.5             # ③ 风险通道权重（负 = 回避；见上"权重自带符号"）
+    w_kin: float = 0.0
+    norm_mode: str = "analytic"      # 归一化：`analytic`（解析上界，本批唯一实现）/ `window`（未实现）
+
     _KNOWN_CHANNELS = ("food", "prey", "risk", "kin")
+    _KNOWN_NORM_MODES = ("analytic",)
 
     def __post_init__(self) -> None:
         # 元组化（`to_dict` ⇒ tuple、快照 JSON ⇒ list；统一成 tuple ⇒ 指纹/比较稳定）
@@ -1172,6 +1196,18 @@ class SmellConfig:
         for nm in ("inject_food", "inject_prey", "inject_risk", "inject_kin"):
             assert getattr(self, nm) >= 0.0, f"{nm} 非负"
         assert 0.0 <= self.risk_g16_threshold <= 1.0, "risk_g16_threshold ∈ [0,1]"
+        # ---- R244 §二：消费端 ----
+        for nm in ("w_food", "w_prey", "w_risk", "w_kin"):
+            v = float(getattr(self, nm))
+            # `v == v` 挡 NaN（config.py 不依赖 numpy ⇒ 不用 isnan）
+            assert v == v and -10.0 <= v <= 10.0, f"{nm}={v} 非法（需有限且 |v| ≤ 10，防手滑量级）"
+        assert self.norm_mode in self._KNOWN_NORM_MODES, (
+            f"norm_mode={self.norm_mode!r} 未实现（本批只实现 {self._KNOWN_NORM_MODES}）"
+            f" —— 未实现的模式**必须炸**，不许静默退回解析上界")
+        if self.use_in_move:
+            assert self.channels, (
+                "use_in_move=True 但 channels 为空（场本体全关）⇒ 消费端会静默 no-op；"
+                "请先启用至少一个通道（B3 家族：禁静默空跑）")
 
 
 #: `from_dict` 的字段白名单（旧存档缺键 ⇒ 回退默认；多出的键 ⇒ 忽略而非报错）

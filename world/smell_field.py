@@ -106,7 +106,7 @@ class SmellField:
         "_r0", "_r1", "_fr", "_c0", "_c1", "_fc",
         "_updates", "_inj_cells_last",
         "_ms_decay", "_ms_inject", "_ms_coarse", "_ms_full",
-        "_reads_n", "_ms_read",
+        "_reads_n", "_ms_read", "_clip_n",
     )
 
     def __init__(self, world: SphereWorld, cfg: Any) -> None:
@@ -132,6 +132,10 @@ class SmellField:
         _known = tuple(getattr(type(cfg), "_KNOWN_CHANNELS", ("food", "prey", "risk", "kin")))
         _bad = [c for c in self.channels if c not in _known]
         assert not _bad, f"未知气味通道 {_bad}（允许：{_known}）—— 拼错通道必须炸，不许静默"
+        # 🔴 归一化模式自查（`SmellConfig.__post_init__` 管构造期；构造后改配置不走它）
+        _known_norm = tuple(getattr(type(cfg), "_KNOWN_NORM_MODES", ("analytic",)))
+        assert cfg.norm_mode in _known_norm, (
+            f"norm_mode={cfg.norm_mode!r} 未实现（只支持 {_known_norm}）—— 不许静默退回解析上界")
         self.n_chan = len(self.channels)
         self.update_every = int(cfg.update_every)
         self.downsample_req = int(cfg.downsample)
@@ -166,6 +170,7 @@ class SmellField:
         self._ms_full = 0.0
         self._reads_n = 0
         self._ms_read = 0.0
+        self._clip_n = 0
 
     # ---- 更新（唯一全场路径；引擎按节拍调用）---------------------------------
 
@@ -199,7 +204,11 @@ class SmellField:
             add = w * np.asarray(amounts, dtype=np.float64)
             np.add.at(self._S[ci], cells, add)            # smell:inj（同格累加）
             rr, cc = np.divmod(cells, self._cols)
-            np.add.at(self._Sc[ci], (rr // self._s, cc // self._s), add)   # smell:inj（分箱）
+            # 🔴 远场是**块均值**（同量纲浓度）⇒ 分箱后必须 ÷s²。
+            #   （v1 首版漏了这一除 ⇒ 粗网格 = 分箱**和** ⇒ 远场被放大 s² 倍；
+            #    消费端接入前自查发现。无批跑过 v1 ⇒ 无数据作废。）
+            _s2 = float(self._s * self._s)
+            np.add.at(self._Sc[ci], (rr // self._s, cc // self._s), add / _s2)   # smell:inj（分箱=块均值）
             n_inj += int(np.size(cells))
         t2 = time.perf_counter()
         # ③ 远场五点拉普拉斯（长程扩散；粗网格 ⇒ 成本 ÷s²）
@@ -246,6 +255,47 @@ class SmellField:
         out = self._S[ci][arr] + self._interp_cells(ci, arr)
         self._reads_n += int(np.size(arr))
         self._ms_read += (time.perf_counter() - t0) * 1e3
+        return out
+
+    # ---- R244 §二：消费端读接口（解析上界归一化 + 加权组合）--------------------
+
+    def s_max(self, channel: str) -> float:
+        """解析上界 `S_max = inject_max_ch / (1 − decay**update_every)`。
+
+        推导：本模块递推为 `S ← decay^k · S + 注入`（**先衰减、后注入**）⇒ 不动点
+        `S* = 注入 / (1 − decay^k)`。`inject_max_ch` 取该通道的**单体**注入量
+        （食物 ∈[0,1] ⇒ `inject_food`；个体类每源 1.0 ⇒ `inject_prey/risk/kin`）。
+        ⚠️ 同格多源重叠可**超过** `S_max`（个体类尤其）⇒ 由 `combined()` 的 clip 兜底，
+        截断次数在 `probe()["hat_clip_n"]` 报出（不静默）。
+        """
+        ci = self._idx.get(channel)
+        assert ci is not None, f"未启用通道 {channel!r}（启用：{self.channels}）"
+        inj = {"food": self.cfg.inject_food, "prey": self.cfg.inject_prey,
+               "risk": self.cfg.inject_risk, "kin": self.cfg.inject_kin}[channel]
+        dec = float(self.cfg.decay) ** self.update_every     # 每次更新的衰减
+        return max(float(inj) / max(1e-9, 1.0 - dec), 1e-9)
+
+    def use_weights(self) -> "dict[str, float]":
+        """本档的消费端权重（**显式读** ⇒ A2b 静态扫描能看见 `w_*`；拼写变化会当场报错）。"""
+        return {"food": self.cfg.w_food, "prey": self.cfg.w_prey,
+                "risk": self.cfg.w_risk, "kin": self.cfg.w_kin}
+
+    def combined(self, cells: NDArray[np.int64]) -> NDArray[np.float64]:
+        """消费端取数：`Σ_ch w_ch · clip(S_ch(c)/S_max_ch, 0, 1)`（**只算被读格** ⇒ 读路径）。
+
+        个体只对**候选邻居格**调用 ⇒ 仍是"感知 1 格"（气味是环境量，不违反红线）。
+        """
+        arr = np.asarray(cells, dtype=np.int64)
+        wmap = self.use_weights()
+        out = np.zeros(arr.shape, dtype=np.float64)
+        for i, ch in enumerate(self.channels):
+            w = float(wmap.get(ch, 0.0))
+            if w == 0.0:
+                continue                     # 权重 0 ⇒ 该通道零贡献（省一次取数）
+            hat = self._S[i][arr] + self._interp_cells(i, arr)
+            hat /= self.s_max(ch)
+            self._clip_n += int(np.count_nonzero(hat > 1.0))
+            out += w * np.clip(hat, 0.0, 1.0)
         return out
 
     def to_full(self, channel: str | None = None) -> NDArray[np.float64]:
@@ -316,6 +366,8 @@ class SmellField:
             "read_path_ms_total": round(self._ms_read, 3),
             "read_path_cells": self._reads_n,
             "to_full_ms_total": round(self._ms_full, 3),
+            # R244 §二：消费端归一化截断计数（`combined()` 里 `Ŝ > 1` 的格数）——不静默
+            "hat_clip_n": self._clip_n,
             "field": {c: {"S_max": float(self._S[i].max()), "Sc_max": float(self._Sc[i].max()),
                           "S_nonzero": int(np.count_nonzero(self._S[i])),
                           "Sc_nonzero": int(np.count_nonzero(self._Sc[i]))}

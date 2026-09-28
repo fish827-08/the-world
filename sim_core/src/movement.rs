@@ -59,6 +59,9 @@ pub fn step_movement(
     pole_bottom: usize,
     mem_grad_mode: u8,
     mem_grad_gain: f64,
+    // R244 §二：气味场消费端（`smell_use=0` ⇒ 不读 `smell_score`）
+    smell_use: u8,
+    smell_score: &[f64],
 ) {
     let n = flat.len();
     if n == 0 || move_inds.is_empty() {
@@ -165,6 +168,13 @@ pub fn step_movement(
             if mark > 0 {
                 let interp_val = interpret[idx * 16 + mark];
                 s += 0.4 * perc * interp_val;
+            }
+
+            // R244 §二：气味场消费端 —— 与 Python **同式同位置**（信号项之后）：
+            //   `s += perc × smell_score[nbc]`，`smell_score[c] = Σ_ch w_ch·clip(S_ch(c)/S_max, 0, 1)`
+            //   （由 Python 侧按"候选格并集"预算好；并集外恒 0）⇒ 双路径逐位一致。
+            if smell_use != 0 {
+                s += perc * smell_score[nbc];
             }
 
             scores.push(s);

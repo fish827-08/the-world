@@ -175,8 +175,10 @@ def test_injection_accumulates_same_cell():
     assert float(eng.smell._S[0, 5]) == 2.0, f"同格两体应累加到 2.0，实得 {eng.smell._S[0, 5]}"
     assert float(eng.smell._S[0, 7]) == 1.0
     rr, cc = np.divmod(np.array([5]), eng.world.cols)
-    # 5 与 7 落在**同一粗格**（s_eff=4 ⇒ 粗列 1）⇒ 远场分箱值 = 2 + 1 = 3（分箱语义自证）
-    assert float(eng.smell._Sc[0, int(rr[0]) // eng.smell._s, int(cc[0]) // eng.smell._s]) == 3.0
+    # 5 与 7 落在**同一粗格**（s_eff=4 ⇒ 粗列 1）⇒ 远场**块均值** = (2+1)/s² = 3/16
+    #   🔴 R244 自查修正：v1 首版此处漏 ÷s²（粗网格=分箱和）⇒ 远场被放大 s² 倍；已修。
+    _s2 = float(eng.smell._s * eng.smell._s)
+    assert float(eng.smell._Sc[0, int(rr[0]) // eng.smell._s, int(cc[0]) // eng.smell._s]) == 3.0 / _s2
 
 
 def test_snapshot_has_smell_key_only_when_on(tmp_path: Path):

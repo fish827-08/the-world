@@ -102,6 +102,45 @@ def run_arm(rows: int, cols: int, pop: int, patches: int, channels, ticks: int,
     return out
 
 
+def use_delta(rows: int, cols: int, pop: int, patches: int, channels, ticks: int) -> dict:
+    """R244 §二：**消费端**配对 —— 同一世界/种子/tick 跑三臂：
+    场关 ｜ 场开+消费关 ｜ 场开+消费开 ⇒ 报"消费端净增"与"合计"。
+    """
+    a = run_arm(rows, cols, pop, patches, (), ticks)
+    b = run_arm(rows, cols, pop, patches, channels, ticks)
+    c = run_use_arm(rows, cols, pop, patches, channels, ticks)
+    return {
+        "field_off": a, "field_on_use_off": b, "field_on_use_on": c,
+        "delta_field_ms": round(b["ms_per_tick"] - a["ms_per_tick"], 4),
+        "delta_use_ms": round(c["ms_per_tick"] - b["ms_per_tick"], 4),
+        "delta_total_ms": round(c["ms_per_tick"] - a["ms_per_tick"], 4),
+        "rel_use_pct": round((c["ms_per_tick"] - b["ms_per_tick"])
+                             / max(b["ms_per_tick"], 1e-9) * 100.0, 2),
+    }
+
+
+def _mk_use(rows, cols, pop, patches, channels, use, sparse=False):
+    c = _mk(rows, cols, pop, patches, channels, 0, sparse=sparse)
+    c.smell.use_in_move = bool(use)
+    return c
+
+
+def run_use_arm(rows: int, cols: int, pop: int, patches: int, channels, ticks: int) -> dict:
+    """场开 + 消费开 臂（与 `run_arm` 同口径，只多开消费端）。"""
+    cfg = _mk_use(rows, cols, pop, patches, channels, True)
+    eng = SphereEngine(cfg)
+    for _ in range(20):
+        eng.step()
+    t0 = time.perf_counter()
+    for _ in range(ticks):
+        eng.step()
+    ms = (time.perf_counter() - t0) / max(ticks, 1) * 1e3
+    p = eng.smell_probe()
+    return {"ms_per_tick": round(ms, 4), "N_end": int(len(eng._flat)),
+            "read_cells": p["read_path_cells"], "hat_clip_n": p["hat_clip_n"],
+            "concurrency": 1, "use_in_move": True}
+
+
 def paired(rows: int, cols: int, pop: int, patches: int, channels, ticks: int,
            sparse: bool = False) -> dict:
     """同一配置跑 关档 / 开档 两臂 ⇒ Δ 与相对比（配对口径）。"""
@@ -187,6 +226,23 @@ def main() -> int:
                         "read_cells": r["on"].get("read_cells"),
                         "to_full_ms_per_call": r["on"].get("to_full_ms_per_call")})
     print(f"\n产物：[云端开发·云启] 已写 {out}/smell_perf.json + .csv（**入数据仓**，R240 §〇-4）")
+
+    # ── R244 §二：消费端配对（三臂 × 两个 N 档 —— 读数随 N×候选数线性，须显式报 N）──
+    print("\n== R244 §二 气味场**消费端**配对（480×960，四通道）==")
+    chans4 = ("food", "prey", "risk", "kin")
+    for _pop in (2000, 200):
+        ud = use_delta(480, 960, _pop, 480, chans4, ticks_big)
+        print(f"   N≈{_pop}：场关 {ud['field_off']['ms_per_tick']:.3f} ｜ 场开·消费关 "
+              f"{ud['field_on_use_off']['ms_per_tick']:.3f} ｜ 场开·消费开 "
+              f"{ud['field_on_use_on']['ms_per_tick']:.3f} ms/tick")
+        print(f"          ⇒ 场本体 Δ {ud['delta_field_ms']:+.3f}｜**消费端净增 "
+              f"{ud['delta_use_ms']:+.3f}**（{ud['rel_use_pct']:+.2f}%）｜合计 "
+              f"{ud['delta_total_ms']:+.3f} ms/tick｜N末 {ud['field_on_use_on']['N_end']}"
+              f"｜截断计数 {ud['field_on_use_on']['hat_clip_n']}")
+        (out / f"smell_use_perf_N{_pop}.json").write_text(
+            json.dumps({"[R244·§二·云端开发·云启]": f"气味场消费端配对实测（三臂，pop_init={_pop}）",
+                        **ud}, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"   ⇒ 另存 {out}/smell_use_perf_N*.json")
     return 0
 
 
