@@ -518,6 +518,19 @@ class SphereEngine:
                     "use_sim_core=True 但 sim_core 未安装：请先在 sim_core/ 运行"
                     " `.venv\\Scripts\\python -m maturin develop`"
                 ) from exc
+            # R249：仓库自带 `sim_core/`（Rust 源码目录，无 `__init__.py`）在**未编译
+            # 扩展**的机器上会被 Python 3.3+ 当作"命名空间包"⇒ `import` 成功但模块
+            # 为空 ⇒ 上面的 ImportError 防护被绕过，深处才 AttributeError
+            # （2026-09-28 云端裸 Python 机冒烟实例：15 failed 全此因）。
+            # 显式校验关键符号：缺失 ⇒ 与未安装同罪，fail-loud（禁静默）。
+            if not hasattr(sim_core, "step_vectors_stage1"):
+                raise RuntimeError(
+                    "use_sim_core=True 但 import 到的 sim_core 不是编译扩展"
+                    "（疑似把仓库 sim_core/ 源码目录当成了命名空间空包）："
+                    "请在 venv 内执行 `python -m maturin develop --release`"
+                    "（见 sim_core/BUILD.md），或改走 use_sim_core=False 的"
+                    " Python 路径"
+                )
             self._sim_core = sim_core
             # Rust 基因索引常量 ↔ simulation.genes 注册表对照：防双写漂移。
             # native_gene_indicators() 返回 [(Rust 语义名, 值), ...]，

@@ -14,6 +14,26 @@ from simulation.sphere_engine import SphereEngine
 from simulation.genes import Gene
 
 
+def _sim_core_ready() -> bool:
+    """R249：sim_core 编译扩展是否可用。
+
+    仓库自带 `sim_core/`（Rust 源码目录，无 `__init__.py`）在**未编译扩展**的
+    机器上会被 Python 3.3+ 当作命名空间空包 ⇒ `import` 成功但无任何符号。
+    判定口径与引擎 R249 防护一致 = 关键符号存在。
+    """
+    try:
+        import sim_core
+    except ImportError:
+        return False
+    return hasattr(sim_core, "step_vectors_stage1")
+
+
+_requires_sim_core = pytest.mark.skipif(
+    not _sim_core_ready(),
+    reason="sim_core 编译扩展不可用（裸 Python/云端环境走 Python 路径；R249）",
+)
+
+
 def _make_config(seed=42, fruit_enabled=False):
     cfg = SimConfig(seed=seed)
     cfg.world.rows = 60
@@ -66,6 +86,7 @@ def _make_subpos_config(seed=42):
 class TestSnapshotBasic:
     """基本保存/恢复功能。"""
 
+    @_requires_sim_core
     def test_save_and_load_basic(self):
         cfg = _make_config()
         e1 = SphereEngine(cfg)
@@ -92,6 +113,7 @@ class TestSnapshotBasic:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_l10a_arrays_saved(self):
         """L10a 果实场数组必须保存/恢复。"""
         cfg = _make_config(fruit_enabled=True)
@@ -111,6 +133,7 @@ class TestSnapshotBasic:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_run_stats_saved(self):
         """运行统计（_run_born/_run_died/_run_deaths）必须保存/恢复。"""
         cfg = _make_config()
@@ -129,6 +152,7 @@ class TestSnapshotBasic:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_rng_state_saved(self):
         """RNG 状态必须保存/恢复（可复现的关键）。"""
         cfg = _make_config()
@@ -145,6 +169,7 @@ class TestSnapshotBasic:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_resource_state_saved(self):
         """资源场状态必须保存/恢复。"""
         cfg = _make_config()
@@ -167,6 +192,7 @@ class TestSnapshotBasic:
 class TestSnapshotReproducibility:
     """核心：恢复后续跑与不保存连续跑逐位一致。"""
 
+    @_requires_sim_core
     def test_continue_after_load_bitwise_equal(self):
         """保存→恢复→跑100tick，与不保存连续跑100tick逐位一致。"""
         cfg = _make_config()
@@ -200,6 +226,7 @@ class TestSnapshotReproducibility:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_continue_with_l10a_bitwise_equal(self):
         """L10a 开启时，恢复后续跑逐位一致。"""
         cfg = _make_config(fruit_enabled=True)
@@ -346,6 +373,7 @@ class TestSnapshotReproducibility:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_multiple_save_load_cycles(self):
         """多次保存/恢复循环后仍逐位一致。"""
         cfg = _make_config()
@@ -377,6 +405,7 @@ class TestSnapshotReproducibility:
 class TestSnapshotValidation:
     """版本/配置/gene_count 校验。"""
 
+    @_requires_sim_core
     def test_version_mismatch_raises(self):
         """快照版本不兼容时必须报错。"""
         cfg = _make_config()
@@ -397,6 +426,7 @@ class TestSnapshotValidation:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_config_fingerprint_mismatch_raises(self):
         """提供 config 时，指纹不匹配必须报错。"""
         cfg1 = _make_config(seed=42)
@@ -413,6 +443,7 @@ class TestSnapshotValidation:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_load_without_config_recovers_config(self):
         """不提供 config 时，从快照中恢复配置。"""
         cfg = _make_config(seed=42)
@@ -430,6 +461,7 @@ class TestSnapshotValidation:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_snapshot_file_is_compressed(self):
         """快照文件使用 npz 压缩，大小应合理。"""
         cfg = _make_config()
@@ -490,6 +522,7 @@ class TestSnapshotIdLedgerLengths:
         finally:
             os.unlink(path)
 
+    @_requires_sim_core
     def test_no_probe_keys_grows_ledgers_to_snapshot_next_id(self):
         """无探针键（默认档）：补齐长度用**快照** next_id，不是构造期 initial_count。"""
         cfg = _make_config()
@@ -506,6 +539,7 @@ class TestSnapshotIdLedgerLengths:
                 f"{name} 长度 {len(getattr(e2, name))} != _next_id {e2._next_id}"
                 "（R215 §七-1：补齐须在 _next_id 赋值之后）")
 
+    @_requires_sim_core
     def test_real_births_ledgers_match_next_id_after_load(self):
         """真路径：多世代跑 → 存 → 载 ⇒ 账本长度 == 快照 `_next_id`（守卫本体）。"""
         cfg = _make_config()
@@ -523,6 +557,7 @@ class TestSnapshotIdLedgerLengths:
         e2._rs_children[e2._next_id - 1] += 1
         assert e2._rs_children[e2._next_id - 1] == 1
 
+    @_requires_sim_core
     def test_all_slot_arrays_have_alive_length_after_load(self):
         """全量普查：恢复后**所有**按个体数组长度必须 == 存活数。
 
