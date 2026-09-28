@@ -20,7 +20,11 @@ import json
 import math
 import os
 import statistics as st
+import sys
 from collections import defaultdict
+
+# R98 纪律：非 ASCII 输出（如 ⇒、【】）在 GBK 控制台会 rc=1 假失败，入口统一兜底。
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def wilson(k: int, n: int, z: float = 1.96):
