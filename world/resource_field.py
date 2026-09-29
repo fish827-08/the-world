@@ -76,6 +76,10 @@ class ResourceField:
         "_patch_regrowth_mult",
         "_bg_regrowth_mult",
         "bg_production_zero",
+        # ---- 🔴 R242 背景低产能带（默认全 False/0 = 现行为）----
+        "_bg_low_mask",
+        "_bg_low_cap_mult",
+        "_bg_low_regrowth_mult",
         # ---- R217 §五 #1 稀疏化 B：惰性再生（默认关；见 `enable_lazy`）----
         "_lazy",
         "_dirty_mask",
@@ -102,6 +106,9 @@ class ResourceField:
         initial_fill: float = 0.5,
         patch_seed: int = 42,
         bg_production_zero: bool = False,
+        # ---- 🔴 R242 背景低产能带（默认 0 = 现行为逐位等价）----
+        bg_low_prod_frac: float = 0.0,
+        bg_low_cap_mult: float = 0.0,
     ) -> None:
         """铺好初始食物。
 
@@ -188,10 +195,39 @@ class ResourceField:
                         f"斑块容量倍率过大：patch_capacity_mult={patch_capacity_mult}, "
                         f"patch_count={patch_count} 导致背景容量为负。请调小倍率或斑块数。"
                     )
+            # ---- 🔴 R242 背景低产能带：子采样部分背景格给极低容量 ----
+            #   依据：R241 根因（背景全零 ⇒ 沙漠不可穿越 ⇒ 门B 结构性失败）。
+            #   做法：在**零产能背景**之上，按 bg_low_prod_frac 抽出**一部分背景格**，
+            #     给它们 `base_cap × bg_cap_mult`（极低）⇒ 稀疏"绿洲链"续命带。
+            #   🔴 用**独立 rng**（从 patch_seed 派生另一条流），**不消费引擎 self.rng**
+            #     ⇒ 不影响引擎 RNG 消费顺序（同 seed 同结果；C7 逐位等价）。
+            #   ✅ bg_low_prod_frac = 0（默认）⇒ 整块跳过 ⇒ 与原路径**逐位相同**。
+            bg_low_mask = np.zeros(world.n_cells, dtype=bool)
+            if (not bg_production_zero) and bg_low_prod_frac > 0.0:
+                # 注意：`bg_production_zero=False` 时背景本就有"守恒摊均"产能，
+                # 低产能带会被摊均值覆盖 ⇒ 语义冲突。故本机制**只在背景归零时有意义**。
+                raise ValueError(
+                    "bg_low_prod_frac 只在 bg_production_zero=True 时有意义"
+                    "（否则背景已有守恒摊均产能，低产能带被覆盖）。"
+                    "请设 bg_production_zero=True + bg_cap_mult 显式低倍率。"
+                )
+            if bg_production_zero and bg_low_prod_frac > 0.0:
+                bg_idx = np.flatnonzero(~patch_mask)
+                n_low = int(round(bg_low_prod_frac * bg_idx.size))
+                if n_low > 0:
+                    rng_bg = np.random.default_rng(patch_seed + 1_000_003)
+                    picked = rng_bg.choice(bg_idx, size=n_low, replace=False)
+                    bg_low_mask[picked] = True
+            self._bg_low_mask = bg_low_mask
+            self._bg_low_cap_mult = float(bg_low_cap_mult)
             self._capacity = np.where(
                 patch_mask,
                 base_cap * patch_capacity_mult,
-                base_cap * bg_cap_mult,
+                np.where(
+                    bg_low_mask,
+                    base_cap * self._bg_low_cap_mult,
+                    base_cap * bg_cap_mult,
+                ),
             )
             # 4) 再生守恒：patch_mult × patch_frac + bg_mult × bg_frac = 1
             #   ⚠️ 同上：背景归零时该守恒式**不再成立**（这是 13.5 的目的）⇒ 直接取 0.0。
@@ -202,8 +238,11 @@ class ResourceField:
                 0.0 if bg_production_zero
                 else float((1.0 - patch_regrowth_mult * patch_frac) / bg_frac)
             )
+            self._bg_low_regrowth_mult = float(bg_low_cap_mult)
             # 5) 初始填充：patch 格填满，背景格填 background_fill
             #   ⚠️ 背景归零 ⇒ `_capacity` 为 0 ⇒ `_grid` 自动为 0（连初始存量也不给）
+            #   🔴 R242：低产能背景格容量极低 ⇒ 初始存量按 background_fill 给一点点
+            #     （"绿洲链"要有初始food才能立刻续命；不给等于开局饿死，机制失去意义）
             self._grid = np.where(       # sparse:init（构造期；派生集尚不存在）
                 patch_mask,
                 self._capacity * 1.0,
@@ -216,6 +255,9 @@ class ResourceField:
             self._patch_mask = None
             self._patch_regrowth_mult = 1.0
             self._bg_regrowth_mult = 1.0
+            self._bg_low_mask = None
+            self._bg_low_cap_mult = 0.0
+            self._bg_low_regrowth_mult = 0.0
             self.bg_production_zero = False
         # ---- R217 §五 #1 稀疏化 B：惰性再生（默认关 = 全场路径逐位不变）----
         self._lazy = False
@@ -509,11 +551,30 @@ class ResourceField:
             growth = growth * lf
         # patchy 守恒：斑块格 × patch_mult，背景格 × bg_mult，周期总再生量不变
         if self.distribution == "patchy" and pm is not None:
-            growth = np.where(
-                pm,
-                growth * self._patch_regrowth_mult,
-                growth * self._bg_regrowth_mult,
-            )
+            # ---- 🔴 R242 背景低产能带：三类格各取自己的再生倍率 ----
+            #   原版是两路 `np.where(pm, patch_mult, bg_mult)`；本档把背景细分为
+            #   「低产能背景格（`_bg_low_mask`）」与「零产能背景格」两路。
+            #   ✅ 默认档 `_bg_low_mask` 全 False ⇒ 三路退化为两路，且
+            #      `_bg_low_regrowth_mult` 不参与 ⇒ 与原路径**逐位相同**（C7 不动）。
+            if self._bg_low_mask is not None and self._bg_low_mask.any():
+                low = (self._bg_low_mask[cells] if idx is not None
+                       else self._bg_low_mask)
+                growth = np.where(
+                    pm,
+                    growth * self._patch_regrowth_mult,
+                    np.where(
+                        low,
+                        growth * self._bg_low_regrowth_mult,
+                        growth * self._bg_regrowth_mult,
+                    ),
+                )
+            else:
+                growth = np.where(
+                    pm,
+                    growth * self._patch_regrowth_mult,
+                    growth * self._bg_regrowth_mult,
+                )
+        return growth
         return growth
 
     # ---- 快照 / 调试 ---------------------------------------------------------

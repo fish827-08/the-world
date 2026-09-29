@@ -118,7 +118,22 @@ class ResourceConfig:
     #   13.5 的预设显式置 True。
     #   ⚠️ 开启后两条构造期不变量**被有意打破**（这是本机制的目的，不是缺陷）：
     #     ① `Σcapacity` 从 183 430 降到 **32.3%**（斑块部分）；② 再生守恒式（=1）不再成立。
-    #     相关自检须按"期望值"判，不能仍按 1.0 判（见 `ResourceField.__init__` 注释）。
+    #   相关自检须按"期望值"判，不能仍按 1.0 判（见 `ResourceField.__init__` 注释）。
+
+    # ---- 🔴 R242 几何放宽（2026-09-28）：背景低产能带 ----------------------
+    #   依据：R241 根因（`bg_production_zero=True` 下生产格仅占 2.78%，斑块是零食物沙漠
+    #     中的孤岛 ⇒ 个体 97–100% 时间被钉在斑块格 ⇒ **跨斑块探索几何上不可能** ⇒ 门B 结构性失败）。
+    #   本组字段给**部分背景格**极低产能，形成"绿洲链"续命带：穿行时偶尔踩到 ⇒ 胃不空 ⇒
+    #     饿死豁免 ⇒ 能走更远；但净摄入 < 代谢 ⇒ **不养活**（不把沙漠变成宜居区）。
+    #
+    #   🔴 为什么不直接关掉 `bg_production_zero`（青梧执行令点名）：`resource_field` 的
+    #     容量守恒式 `bg_cap_mult = (total − patch·mult)/bg_area` 会**自动摊均**背景容量
+    #     ⇒ 背景拿回"正常产能" ⇒ 沙漠变宜居区 ⇒ **斑块的信息价值直接消失**（13.5① 的立论前提被推翻）。
+    #     必须用**显式低倍率**接管背景，才能既开口子又保持"背景远差于斑块"的格局。
+    #
+    #   ✅ 两个字段**默认 0** ⇒ 走原路径（背景全 0 产能）⇒ **C7 digest 不动**（逐位等价）。
+    bg_low_prod_frac: float = 0.0   # 背景格中获得低产能的比例（0=全零产能=现行为）
+    bg_cap_mult: float = 0.0        # 背景低产能格的容量/再生倍率（0=零产能=现行为）
 
     def __post_init__(self) -> None:
         assert self.capacity_per_area > 0, "容量为正"
@@ -133,6 +148,15 @@ class ResourceConfig:
             assert self.patch_radius >= 1, "斑块半径至少 1"
             assert self.patch_capacity_mult > 1.0, "斑块容量倍率必须 > 1（否则无富集）"
             assert self.patch_regrowth_mult > 0, "斑块再生倍率为正"
+            # ---- 🔴 R242 背景低产能带 ----
+            assert 0.0 <= self.bg_low_prod_frac <= 1.0, "bg_low_prod_frac 应在 0~1"
+            assert self.bg_cap_mult >= 0.0, "bg_cap_mult 非负"
+            # 语义守卫：给了比例却不给倍率（或反之）⇒ 静默无变化（C9 家族）⇒ 直接报错
+            if self.bg_low_prod_frac > 0.0:
+                assert self.bg_cap_mult > 0.0, (
+                    "bg_low_prod_frac>0 但 bg_cap_mult=0 ⇒ 低产能格仍是 0 产能，"
+                    "配置静默无效（C9）。请同时给出 bg_cap_mult>0。"
+                )
             assert 0.0 <= self.background_fill <= 1.0, "背景填充比例在 0~1"
 
 

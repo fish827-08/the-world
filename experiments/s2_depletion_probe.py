@@ -55,6 +55,111 @@ S1_BASE = dict(
 )
 
 
+# ---------- R241 四层指标（L0 轮休 / L1 探索 / L2 分化 / L3 人均摄入） ----------
+#
+# 依据：R241 复议方案（讨论板 2026-09-28 02:1x，青梧提出，云归实现）。
+# 背景：旧判据②（全局斑块方差）天花板敏感、且只测"食物不均匀"，
+#       没测"生物会不会主动离开"。语义链 = ①斑块可耗尽 → ②不均匀 →
+#       ③**生物主动离开找新食物** → ④信息有价值 → ⑤C3。②③④ 缺直接判据。
+#
+#   L0 机制验证：rd 到底有没有在轮休（读 rd 内部数组，零额外成本）
+#   L1 探索度  ：生物会不会离开去找新食物（逐 tick visit 集合）
+#   L2 分化度  ：访问过的斑块间剩余食物不均（排除死区）+ 基尼 + 方差分解
+#   L3 人均摄入：每个生物的真实待遇（人口归一）
+#
+# 🔴 只读引擎公开/内部已有量，不碰引擎（R241 §五 边界）。
+
+def l0_rd_state(eng) -> dict:
+    """L0：读 rd 内部数组，看轮休/耗竭事件规模。
+
+    恒 0 ⇒ rd 没在轮休（regen 太快/没吃空）⇒ 先调参，别判效应。
+    """
+    rd = getattr(eng, "_rd", None)
+    if rd is None:
+        return {"l0_dead_n": 0, "l0_rest_n": 0, "l0_demoted_n": 0,
+                "l0_mask_n": 0, "l0_rd_available": 0}
+    dead = getattr(rd, "_dead", None)
+    rest = getattr(rd, "_rest_until", None)
+    mask = getattr(rd, "_mask", None)
+    demoted = getattr(rd, "_demoted", None)
+    return {
+        "l0_rd_available": 1,
+        "l0_dead_n": int(dead.sum()) if dead is not None else 0,
+        "l0_rest_n": int((rest >= 0).sum()) if rest is not None else 0,
+        "l0_demoted_n": int(demoted.sum()) if demoted is not None else 0,
+        "l0_mask_n": int(mask.sum()) if mask is not None else 0,
+    }
+
+
+def gini(x: np.ndarray) -> float:
+    """基尼系数（0=完全均等，1=极度集中）。空/单元素 ⇒ 0。"""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size <= 1:
+        return 0.0
+    if x.min() < 0:
+        x = x - x.min()
+    s = x.sum()
+    if s <= 0:
+        return 0.0
+    xs = np.sort(x)
+    n = xs.size
+    idx = np.arange(1, n + 1, dtype=float)
+    return float((2.0 * (idx * xs).sum()) / (n * s) - (n + 1.0) / n)
+
+
+def l2_variance_decomposition(grid: np.ndarray, labels: np.ndarray,
+                              visited: np.ndarray) -> dict:
+    """L2：访问掩码内的方差/基尼 + 方差分解。
+
+    σ²_total = p·σ²_visited + p(1−p)(μ_v − μ_u)²
+      p       = 访问斑块占比
+      σ²_visited = 访问组内方差
+      (μ_v−μ_u)² = 组间均值差（访问 vs 未访问）
+    """
+    labs = labels[labels >= 0]
+    g = grid[labels >= 0]
+    if labs.size == 0:
+        return {"l2_visited_gini": 0.0, "l2_visited_var": 0.0,
+                "l2_total_var": 0.0, "l2_between_share": 0.0,
+                "l2_visited_frac": 0.0, "l2_visited_mean": 0.0,
+                "l2_unvisited_mean": 0.0, "l2_total_gini": 0.0}
+    uniq, inv = np.unique(labs, return_inverse=True)
+    patch_food = np.zeros(uniq.size, dtype=float)
+    np.add.at(patch_food, inv, g)
+    vis_mask = np.zeros(uniq.size, dtype=bool)
+    for lab in np.unique(labels[visited]):
+        if lab >= 0:
+            vis_mask[np.searchsorted(uniq, lab)] = True
+    n_vis = int(vis_mask.sum())
+    p = n_vis / uniq.size if uniq.size else 0.0
+    total_var = float(patch_food.var())
+    if n_vis == 0 or n_vis == uniq.size:
+        var_v = float(patch_food[vis_mask].var()) if n_vis else 0.0
+        return {"l2_visited_gini": gini(patch_food[vis_mask]) if n_vis else 0.0,
+                "l2_visited_var": var_v,
+                "l2_total_var": total_var,
+                "l2_between_share": 0.0,
+                "l2_visited_frac": float(p),
+                "l2_visited_mean": float(patch_food[vis_mask].mean()) if n_vis else 0.0,
+                "l2_unvisited_mean": float(patch_food[~vis_mask].mean()) if n_vis < uniq.size else 0.0,
+                "l2_total_gini": gini(patch_food)}
+    v = patch_food[vis_mask]
+    u = patch_food[~vis_mask]
+    var_v = float(v.var())
+    between = p * (1.0 - p) * float((v.mean() - u.mean()) ** 2)
+    return {
+        "l2_visited_gini": gini(v),
+        "l2_visited_var": var_v,
+        "l2_total_var": total_var,
+        "l2_between_share": (between / total_var) if total_var > 0 else 0.0,
+        "l2_visited_frac": float(p),
+        "l2_visited_mean": float(v.mean()),
+        "l2_unvisited_mean": float(u.mean()),
+        "l2_total_gini": gini(patch_food),
+    }
+
+
 # ---------- 斑块级饱和度（判据② 新指标） ----------
 
 def _label_patches(world, patch_mask: np.ndarray) -> np.ndarray:
@@ -124,14 +229,17 @@ def patch_saturation(world, eng, labels: np.ndarray,
 
 # ---------- 单 run ----------
 
-def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
+def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
+            bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, sparse_fields=False):
     # 🔴 对齐 S1：subpos=on + S1_BASE 的 k/gain/subdiv/speed_max/max_count
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
         S1_BASE["speed_max"], S1_BASE["gain"], S1_BASE["subdiv"],
         S1_BASE["k"], S1_BASE["max_count"], rgm,
+        bg_low_prod_frac=bg_low_prod_frac, bg_low_cap_mult=bg_low_cap_mult,
     )
     c.simulation.use_sim_core = False          # 两臂统一 Python 路径（= S1 基线）
+    c.simulation.sparse_fields = bool(sparse_fields)  # R244 v1：逐位等价加速（默认 False）
     c.resource_dynamics.enabled = bool(rd_on)  # 处理臂开局部可耗竭
     eng = SphereEngine(c)
     apply_post_build(eng, notes)
@@ -145,12 +253,52 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
                      for lab in uniq0}
     init_cap_sum = float(eng.resources._capacity.sum())
 
+    # ---- 🔴 R242 附加核验：背景低产能带是否生效 + 生物是否真的用了它 ----
+    #   ① 低产能格实际占比（确认 40% 生效，不是静默）
+    #   ② 生物在背景格（含低产能格）的时间占比（验证"续命带"是否被使用）
+    _bm = getattr(eng.resources, "_bg_low_mask", None)
+    _pm_all = eng.resources._patch_mask
+    _n_low = int(_bm.sum()) if _bm is not None else 0
+    _n_bg = int((~_pm_all).sum()) if _pm_all is not None else 0
+    _bg_low_frac_actual = (_n_low / _n_bg) if _n_bg else 0.0
+    _bg_resid_sum = 0.0     # 累计"个体·tick 落在背景格"数
+    _obs_ticks = 0          # 累计观测 tick 数
+
     rows_out = []
     t_slice = time.perf_counter()
     last = 0
     stop = "tick 用尽"
+    # R241 L1：逐 tick 累积「被访问过的斑块」；first_visit_tick 记首访
+    visited = np.zeros(eng.world.n_cells, dtype=bool)
+    first_visit = {}
+    n_patch_total = int(np.unique(labels[labels >= 0]).size)
+    # R241 L0：轮休事件累计（逐 tick 采样，取每个采样点的瞬时值 + 全程累计峰值）
+    l0_peak = {"dead": 0, "rest": 0, "demoted": 0}
+    l0_any = {"dead": 0, "rest": 0, "demoted": 0}
     for t in range(1, ticks + 1):
         eng.step()
+        # ---- 🔴 R242 附加核验：背景停留统计（每 tick 累计，非仅采样点）----
+        if _pm_all is not None and len(eng._flat):
+            _bg_resid_sum += float((~_pm_all[eng._flat]).sum())
+            _obs_ticks += int(len(eng._flat))
+        # L1：本 tick 的生物占格 → 折算到斑块标签（向量化，仅 bgzero 档 labels 稳定）
+        flat = eng._flat
+        if flat.size and n_patch_total:
+            cells = np.unique(flat)
+            visited[cells] = True
+            lab_here = labels[cells]
+            for lab in np.unique(lab_here):
+                if lab >= 0 and int(lab) not in first_visit:
+                    first_visit[int(lab)] = t
+        # L0：瞬时轮休状态（每 tick 读，成本可忽略：两个布尔/整数数组 sum）
+        l0 = l0_rd_state(eng)
+        if l0["l0_rd_available"]:
+            l0_peak["dead"] = max(l0_peak["dead"], l0["l0_dead_n"])
+            l0_peak["rest"] = max(l0_peak["rest"], l0["l0_rest_n"])
+            l0_peak["demoted"] = max(l0_peak["demoted"], l0["l0_demoted_n"])
+            l0_any["dead"] += 1 if l0["l0_dead_n"] > 0 else 0
+            l0_any["rest"] += 1 if l0["l0_rest_n"] > 0 else 0
+            l0_any["demoted"] += 1 if l0["l0_demoted_n"] > 0 else 0
         if eng.world.n_cells and len(eng._flat) == 0:
             stop = "灭绝"
         if t % sample == 0 or t == ticks or stop == "灭绝":
@@ -169,6 +317,45 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
             # 键为 DeathCause 枚举：str(k)="DeathCause.STARVATION" → 取末段
             dv = {str(k).split(".")[-1]: int(v) for k, v in dc.items()}
             ps = patch_saturation(eng.world, eng, labels, init_patch_cap)
+            # ---- L1 探索度（累积到本采样点） ----
+            n_vis_patch = len(first_visit)
+            fv = np.array(sorted(first_visit.values()), dtype=float)
+            l1 = {
+                "l1_visited_patch_n": n_vis_patch,
+                "l1_visited_patch_frac": (n_vis_patch / n_patch_total
+                                          if n_patch_total else 0.0),
+                "l1_first_visit_median": float(np.median(fv)) if fv.size else float("nan"),
+                "l1_first_visit_p25": float(np.percentile(fv, 25)) if fv.size else float("nan"),
+                "l1_first_visit_p75": float(np.percentile(fv, 75)) if fv.size else float("nan"),
+            }
+            # ---- L2 分化度（访问掩码内 + 方差分解） ----
+            l2 = l2_variance_decomposition(eng.resources._grid, labels, visited)
+            # ---- L3 人均摄入（累计算，人口归一） ----
+            l3 = {"l3_forage_sum": float("nan"), "l3_intake_per_capita": float("nan"),
+                  "l3_net_sum": float("nan"), "l3_net_per_capita": float("nan"),
+                  "l3_pop_mean": float("nan")}
+            if t == ticks or stop == "灭绝":
+                try:
+                    led = eng.energy_ledger()
+                    gsum = led.get("global", {})
+                    fs = float(gsum.get("intake_forage_sum", 0.0) or 0.0)
+                    nsum = (float(gsum.get("intake_forage_sum", 0.0) or 0.0)
+                            + float(gsum.get("intake_pred_sum", 0.0) or 0.0)
+                            + float(gsum.get("intake_scav_sum", 0.0) or 0.0)
+                            - float(gsum.get("cost_meta_sum", 0.0) or 0.0)
+                            - float(gsum.get("cost_move_sum", 0.0) or 0.0)
+                            - float(gsum.get("cost_attack_sum", 0.0) or 0.0))
+                    # 人口均值：以采样点人口（含本点 N）估算 N̄
+                    pops = [r["pop"] for r in rows_out] + [N]
+                    pop_mean = sum(pops) / len(pops)
+                    denom = max(pop_mean * t, 1.0)
+                    l3 = {"l3_forage_sum": fs,
+                          "l3_intake_per_capita": fs / denom,
+                          "l3_net_sum": nsum,
+                          "l3_net_per_capita": nsum / denom,
+                          "l3_pop_mean": pop_mean}
+                except Exception as e:
+                    l3["l3_note"] = f"energy_ledger 不可用: {e}"
             rows_out.append({
                 "seed": seed, "arm": "on" if rd_on else "off", "tick": t,
                 "pop": N, "global_sat": sat,
@@ -177,7 +364,15 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on):
                 "d_starv": dv.get("STARVATION", 0),
                 "d_old": dv.get("OLD_AGE", 0),
                 "d_pred": dv.get("PREDATION", 0),
-                "ms_per_tick": dt, **ps,
+                "ms_per_tick": dt, **ps, **l1, **l2, **l3,
+                "bg_low_frac_actual": round(_bg_low_frac_actual, 6),
+                "bg_low_n": _n_low,
+                "bg_resid_frac": (round(_bg_resid_sum / _obs_ticks, 6)
+                                  if _obs_ticks else float("nan")),
+                "l0_peak_dead": l0_peak["dead"], "l0_peak_rest": l0_peak["rest"],
+                "l0_peak_demoted": l0_peak["demoted"],
+                "l0_any_dead": l0_any["dead"], "l0_any_rest": l0_any["rest"],
+                "l0_any_demoted": l0_any["demoted"],
             })
             if stop == "灭绝":
                 break
@@ -201,6 +396,13 @@ def main():
     ap.add_argument("--ticks", type=int, default=40000)
     ap.add_argument("--sample", type=int, default=250)
     ap.add_argument("--rgm", type=float, default=1.195)
+    # ---- 🔴 R242 背景低产能带（默认 0/0 = 现行为）----
+    ap.add_argument("--bg-low-prod-frac", type=float, default=0.0,
+                    help="背景格中获极低产能的比例（0=全零产能=现行为）")
+    ap.add_argument("--bg-low-cap-mult", type=float, default=0.0,
+                    help="背景低产能格的容量/再生倍率（0=零产能=现行为）")
+    ap.add_argument("--sparse-fields", action="store_true",
+                    help="R244 v1：稀疏字段加速（rd+bgzero 档逐位等价，默认 False=旧行为）")
     ap.add_argument("--arms", choices=("both", "on", "off"), default="both")
     ap.add_argument("--out", default="results/s2_depletion.csv")
     a = ap.parse_args()
@@ -211,20 +413,39 @@ def main():
               "abs_food", "abs_cap", "cap_lost_frac",
               "d_starv", "d_old", "d_pred", "ms_per_tick",
               "n_patches", "patch_sat_mean", "patch_sat_var", "patch_sat_range",
-              "patch_sat_init_var", "patch_abs_food_var"]
+              "patch_sat_init_var", "patch_abs_food_var",
+              # ---- R241 L1 探索度 ----
+              "l1_visited_patch_n", "l1_visited_patch_frac",
+              "l1_first_visit_median", "l1_first_visit_p25", "l1_first_visit_p75",
+              # ---- R241 L2 分化度 ----
+              "l2_visited_gini", "l2_visited_var", "l2_total_var",
+              "l2_between_share", "l2_visited_frac", "l2_visited_mean",
+              "l2_unvisited_mean", "l2_total_gini",
+              # ---- R241 L3 人均摄入 ----
+              "l3_forage_sum", "l3_intake_per_capita",
+              "l3_net_sum", "l3_net_per_capita", "l3_pop_mean",
+              # ---- R241 L0 轮休（累计峰值 / 出现 tick 数） ----
+              "l0_peak_dead", "l0_peak_rest", "l0_peak_demoted",
+              "l0_any_dead", "l0_any_rest", "l0_any_demoted",
+              # ---- 🔴 R242 背景低产能带核验 ----
+              "bg_low_frac_actual", "bg_low_n", "bg_resid_frac"]
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     with open(a.out, "w") as f:
         f.write(",".join(header) + "\n")
         print(f"# S2 探针：rows={a.rows} cols={a.cols} patches={a.patches} "
-              f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} arms={arms}")
+              f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} arms={arms} "
+              f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
+              f"sparse={a.sparse_fields}")
         print(",".join(header))
         summary = []
         for sd in seeds:
             for arm in arms:
                 t0 = time.time()
                 rows_out, stop = run_one(sd, a.rows, a.cols, a.pop, a.patches,
-                                         a.ticks, a.sample, a.rgm, arm == "on")
+                                         a.ticks, a.sample, a.rgm, arm == "on",
+                                         a.bg_low_prod_frac, a.bg_low_cap_mult,
+                                         a.sparse_fields)
                 for r in rows_out:
                     line = ",".join(str(r[h]) for h in header)
                     f.write(line + "\n")
@@ -246,13 +467,43 @@ def main():
                     "n_patches": last["n_patches"],
                     "d_starv": last["d_starv"], "d_pred": last["d_pred"],
                     "wall_s": round(wall, 1),
+                    # ---- R241 四层 ----
+                    "l0_peak_dead": last["l0_peak_dead"],
+                    "l0_peak_rest": last["l0_peak_rest"],
+                    "l0_peak_demoted": last["l0_peak_demoted"],
+                    "l0_any_dead": last["l0_any_dead"],
+                    "l0_any_rest": last["l0_any_rest"],
+                    "l0_any_demoted": last["l0_any_demoted"],
+                    "l1_visited_patch_n": last["l1_visited_patch_n"],
+                    "l1_visited_patch_frac": last["l1_visited_patch_frac"],
+                    "l1_first_visit_median": last["l1_first_visit_median"],
+                    "l2_visited_gini": last["l2_visited_gini"],
+                    "l2_visited_var": last["l2_visited_var"],
+                    "l2_total_var": last["l2_total_var"],
+                    "l2_between_share": last["l2_between_share"],
+                    "l2_visited_frac": last["l2_visited_frac"],
+                    "l3_forage_sum": last["l3_forage_sum"],
+                    "l3_intake_per_capita": last["l3_intake_per_capita"],
+                    "l3_net_sum": last["l3_net_sum"],
+                    "l3_net_per_capita": last["l3_net_per_capita"],
+                    "l3_pop_mean": last["l3_pop_mean"],
                 })
                 print(f"# → seed {sd} arm {arm}: K={last['pop']} "
                       f"sat={last['global_sat']:.3f} "
                       f"capLost={last['cap_lost_frac']:.3f} "
                       f"patchVarInit={last['patch_sat_init_var']:.5f} "
                       f"(tail {var_tail:.5f}) "
-                      f"patchRange={last['patch_sat_range']:.3f} "
+                      f"patchRange={last['patch_sat_range']:.3f} | "
+                      f"L0 dead={last['l0_peak_dead']}/rest={last['l0_peak_rest']} "
+                      f"anyD={last['l0_any_dead']} anyR={last['l0_any_rest']} | "
+                      f"L1 vis={last['l1_visited_patch_n']}/{last['n_patches']} "
+                      f"({last['l1_visited_patch_frac']:.3f}) "
+                      f"med={last['l1_first_visit_median']} | "
+                      f"L2 gini={last['l2_visited_gini']:.4f} "
+                      f"vvar={last['l2_visited_var']:.1f} "
+                      f"betw={last['l2_between_share']:.3f} | "
+                      f"L3 in/cap={last['l3_intake_per_capita']:.1f} "
+                      f"net/cap={last['l3_net_per_capita']:.1f} | "
                       f"stop={stop} wall={wall:.0f}s", flush=True)
 
     # ---------- 判据②（修正口径）：on 臂斑块「相对初始容量」方差 是否 > off 臂 ----------

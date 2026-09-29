@@ -255,7 +255,9 @@ def merge_rows(old: list[dict], new: list[dict],
 def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
              subpos: bool, speed_max: float, gain: float, subdiv: int,
              k: float = 1.0, max_count: int = 0,
-             rgm: float = 1.195) -> tuple[SimConfig, dict]:
+             rgm: float = 1.195,
+             bg_low_prod_frac: float = 0.0,
+             bg_low_cap_mult: float = 0.0) -> tuple[SimConfig, dict]:
     c = SimConfig(seed=seed)
     c.world.rows, c.world.cols = rows, cols
     c.resources.distribution = "patchy"
@@ -264,6 +266,9 @@ def make_cfg(seed: int, rows: int, cols: int, pop: int, patches: int,
     #   {1.195 = T4 现状, 0.8, 0.6, 0.4} ⇒ 看 K 与饱和度怎么响应
     c.resources.patch_regrowth_mult = float(rgm)
     c.resources.patch_count = patches
+    # 🔴 R242 背景低产能带（默认 0/0 ⇒ 走原路径，逐位等价）
+    c.resources.bg_low_prod_frac = float(bg_low_prod_frac)
+    c.resources.bg_cap_mult = float(bg_low_cap_mult)
     if pop > 0:
         c.population.initial_count = pop
     if max_count > 0:
