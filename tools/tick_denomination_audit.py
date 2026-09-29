@@ -117,6 +117,24 @@ KNOWN: dict[str, str] = {
     # ---- P0.0 A1 新增：两个"硬编码搬进配置"的 tick 常数 ----
     "signals.duration_ticks": DURATION,
     "organisms.repro_cooldown_gene_scale": DURATION,
+    # ---- R240 T8 气味场（新机制；本线 = [云端开发·云启]）----
+    "smell.update_every": DURATION,          # 更新间隔（k tick）⇒ 时间压缩 ÷k（配 diffuse ×k ⇒ 每日扩散不变）
+    "smell.diffuse": RATE,                   # 每次更新的扩散权重 ⇒ 每日扩散 = (更新数/日)×系数 ⇒ ÷k 次配 ×k
+    "smell.decay": DECAY,                    # 「每 tick 衰减」⇒ 时间压缩 ^k
+    "smell.downsample": INVARIANT,           # 空间 LOD（1/s）—— 与 tick 无关
+    "smell.risk_g16_threshold": INVARIANT,   # 基因阈值（无量纲）
+    "smell.inject_food": INVARIANT,          # 注入权重（无量纲）
+    "smell.inject_prey": INVARIANT,
+    "smell.inject_risk": INVARIANT,
+    "smell.inject_kin": INVARIANT,
+    "smell.channels": INVARIANT,             # 通道集（名字元组）
+    # ---- R244 §二 气味场消费端（本线 = [云端开发·云启]）----
+    "smell.use_in_move": INVARIANT,          # 开关（bool）—— 不承载 tick 面额
+    "smell.w_food": INVARIANT,               # 通道权重（无量纲固定权重；扩基因位留批 B）
+    "smell.w_prey": INVARIANT,
+    "smell.w_risk": INVARIANT,
+    "smell.w_kin": INVARIANT,
+    "smell.norm_mode": INVARIANT,            # 归一化模式（字符串）
     # ---- 每 tick 概率（1−(1−p)^k）----
     "predation.attack_prob_coef": PROB,
     "pleasure.baseline_rate": PROB,

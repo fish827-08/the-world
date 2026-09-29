@@ -37,6 +37,8 @@ use crate::genes::{G_PERCEPTION, G_SOCIABILITY};
 /// - `mem_grad_mode` / `mem_grad_gain`: A′ 记忆朝向梯度（0=none 原式 / 1=orientation）
 /// - `h_norm`: (N,) 饥饿归一量（R247 HM ②）；**空 slice = 关档**（不进新代码路径）
 /// - `hm_beta`: HM ② 强度（仅 `h_norm` 非空时消费）
+/// - `smell_use`: R244 §二气味场消费开关（0=关 ⇒ 不读 `smell_score`）
+/// - `smell_score`: (n_cells,) 气味综合得分（仅 `smell_use != 0` 时索引）
 #[allow(clippy::too_many_arguments)]
 pub fn step_movement(
     flat: &mut [i64],
@@ -64,6 +66,9 @@ pub fn step_movement(
     mem_grad_gain: f64,
     h_norm: &[f64],
     hm_beta: f64,
+    // R244 §二：气味场消费端（`smell_use=0` ⇒ 不读 `smell_score`）
+    smell_use: u8,
+    smell_score: &[f64],
 ) {
     let n = flat.len();
     if n == 0 || move_inds.is_empty() {
@@ -176,6 +181,13 @@ pub fn step_movement(
             if mark > 0 {
                 let interp_val = interpret[idx * 16 + mark];
                 s += 0.4 * perc * interp_val;
+            }
+
+            // R244 §二：气味场消费端 —— 与 Python **同式同位置**（信号项之后）：
+            //   `s += perc × smell_score[nbc]`，`smell_score[c] = Σ_ch w_ch·clip(S_ch(c)/S_max, 0, 1)`
+            //   （由 Python 侧按"候选格并集"预算好；并集外恒 0）⇒ 双路径逐位一致。
+            if smell_use != 0 {
+                s += perc * smell_score[nbc];
             }
 
             scores.push(s);

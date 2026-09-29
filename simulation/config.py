@@ -1193,6 +1193,113 @@ class ResourceDynamicsConfig:
         assert 0.0 < self.damage_recovery <= 1.0, "damage_recovery ∈ (0,1]"
 
 
+@dataclass
+class SmellConfig:
+    """气味场（多通道标量场）—— R240 T8 / 设计稿《气味场与分功能感知》§二、§8.2。
+
+    为什么
+    ------
+    2D 随机游走的**首次命中**期望步数 ≈ d²（d = 斑块间距）：现状 d≈15 格 ⇒ ~225 步，
+    而满能量续航只有 273 格 ⇒ **82% 的个体在撞上斑块前就饿死**（S1 实测 31–47% 斑块格
+    从未被访问）。扩视觉要扩 15 倍（成本爆炸）；**气味场只用 1 格视野就能拿到 15 格外的信息**
+    （气味是**环境量**，个体仍"只读自己格"⇒ 不违反"感知 1 格"）。
+
+    模型（每个通道一个标量场，**每 k tick 更新一次**）
+    -------------------------------------------------
+        S ← decay^k × (S + 注入) + D × lap_粗↑(S)
+
+    🔴 三条内置优化（设计稿 §8.2，**红线，不可省**）
+    -----------------------------------------------
+    ① **降采样长程**：扩散（五点拉普拉斯）在 **1/s 粗网格**上算，再**双线性插值**回全分辨率
+       ⇒ 成本 ÷ s²（默认 s=8 ⇒ ÷64）
+    ② **降低更新频率**：每 **k tick** 一次（默认 k=4）⇒ 成本 ÷k
+    ③ **源注入稀疏**：只碰"有源"格（食物格 2.8% / 个体 0.65%），与扩散**解耦**
+    🔴 **禁止"每 tick 全场稠密卷积"** —— 那会把稀疏化刚拿到的 N=0 地板（13.63→0.13 ms/tick）
+       一口吃回去。`world/smell_field.py::update()` 是唯一全场路径，引擎每 k tick 只调一次。
+
+    ▶ 实现落在**新文件** `world/smell_field.py`（纯逻辑、零引擎依赖）⇒ 本配置只是它的参数契约。
+    ▶ **默认全关**：`channels == ()` ⇒ 引擎**不构造**该模块（`eng.smell is None`）⇒
+      零成本 + 旧行为**逐位不变**（C7 回滚点）。
+    ▶ 与 `sparse_fields` 的关系（设计稿 §8.4 取方案 (a)）：本模块**自带**稀疏/降采样路径
+      ⇒ **正交、独立开关**（不依赖 `sparse_fields`，也不受 rd 开档退回全场的影响）。
+    ▶ 通道（R238 裁定：四通道全上、分两批启用）：`food` / `prey` / `risk` / `kin`。
+      ⚠️ **消费端（score 加权）不在本配置**：权重需扩 8 个基因位 = **纪元级**（R238 §2）
+      ⇒ 属批 A/B 排期；本模块只提供**接口 + 读 API**（`SmellField.at()`）。
+
+    🔴 与设计稿的两处口径说明（防"数字没出处"）
+    -------------------------------------------
+    * 设计稿写 `smell_channels`；本仓配置按**分组惯例**落为 `SmellConfig.channels`（同 `signals.*`）。
+    * `downsample` 只在 `rows/cols` 都能整除时**精确**；否则构造期自动降到"≤s 的最大公约数"
+      （`SmellField.probe()["downsample_eff"]` 可读回，且与请求值不同时会告警 —— 不静默）。
+    """
+
+    channels: tuple[str, ...] = ()   # 启用通道（**空 = 全关**；子集 of ("food","prey","risk","kin")）
+    update_every: int = 4            # 每 k tick 更新一次（§8.2-②；线索延迟 k tick）
+    downsample: int = 8              # 粗网格因子 s（§8.2-①；实际取 min(s, gcd(rows,cols))）
+    decay: float = 0.88              # **每 tick** 衰减；每次更新实际乘 `decay**update_every`
+    diffuse: float = 0.12            # 每次更新的扩散权重（粗网格五点拉普拉斯 × 本系数）
+    inject_food: float = 1.0         # ① 食物通道注入权重（注入量 = 食物量/最大容量 ∈ [0,1]）
+    inject_prey: float = 1.0         # ② 猎物通道（源 = 活体个体）
+    inject_risk: float = 1.0         # ③ 风险通道（源 = g16 ≥ risk_g16_threshold 的个体）
+    inject_kin: float = 1.0          # ④ 同类通道（源 = 活体个体；与 prey 同源、读端不同用途）
+    risk_g16_threshold: float = 0.6  # ③ 的源定义：`g16`（AGGRESSION）≥ 此值 ⇒ 视为捕食者
+
+    # ---- R244 §二：气味场**消费端**（把通道值接进移动打分）----------------------
+    #  ✅ 已完成；🟢 R244 立项（实施规格-移动决策三件-20260928.md §二）
+    #
+    #  score += perc × Σ_ch  w_ch · Ŝ_ch(c)        （c = **候选邻居格**；仍是"感知 1 格"）
+    #  Ŝ_ch(c) = clip( S_ch(c) / S_max_ch , 0, 1 )，S_max_ch = inject_max_ch / (1 − decay^k)
+    #            （**解析上界**：本模块递推 `S ← decay^k·S + 注入` 的不动点 ⇒ 构造期可算）
+    #
+    #  🔴 两处口径（写死，防"数字没出处"）
+    #  * **权重自带符号**：设计稿 §2.2 写 `− w_risk·Ŝ_risk`，§2.1 又给 `w_risk=-0.5`（"负权重=回避"）
+    #    ⇒ 二者**互相矛盾**（双重取负会变成吸引）。本实现取"**权重自带符号**"（`Σ w_ch·Ŝ_ch`），
+    #    与 §2.1 的默认值自洽；若口径定为 `−w_risk` 形式 ⇒ 把默认改回 `+0.5` 即可（一行）。
+    #  * **固定权重**（本批=机制存在性验证）：扩"每通道 1 位权重 + 1 位阈值"= 8 位 = **纪元级**
+    #    （R238 §2）⇒ 留批 B；本组字段即为届时基因位的默认值来源。
+    #
+    #  ▶ 与 `channels`（场本体开关）**分开**：本开关只管"读不读/怎么读" ⇒ 场关时本项 fail-loud。
+    #  ▶ 性能口径（R244 §2.4）：每 tick **一次**候选格并集取数（O(N×k)，不是 O(n_cells)）⇒ 读路径。
+    use_in_move: bool = False        # 🔴 消费端总开关（默认关 = 回滚点，逐位不变）
+    w_food: float = 0.5              # ① 食物通道权重（正 = 趋近）
+    w_prey: float = 0.0
+    w_risk: float = -0.5             # ③ 风险通道权重（负 = 回避；见上"权重自带符号"）
+    w_kin: float = 0.0
+    norm_mode: str = "analytic"      # 归一化：`analytic`（解析上界，本批唯一实现）/ `window`（未实现）
+
+    _KNOWN_CHANNELS = ("food", "prey", "risk", "kin")
+    _KNOWN_NORM_MODES = ("analytic",)
+
+    def __post_init__(self) -> None:
+        # 元组化（`to_dict` ⇒ tuple、快照 JSON ⇒ list；统一成 tuple ⇒ 指纹/比较稳定）
+        self.channels = tuple(str(c) for c in (self.channels or ()))
+        bad = [c for c in self.channels if c not in self._KNOWN_CHANNELS]
+        assert not bad, (
+            f"未知气味通道 {bad} ⇒ 会把**拼错的通道**静默跑成 no-op（B3 家族）"
+            f"；允许：{self._KNOWN_CHANNELS}")
+        assert len(set(self.channels)) == len(self.channels), "通道不得重复"
+        assert self.update_every >= 1, "update_every 至少 1（=1 即每 tick；红线见类 docstring）"
+        assert 1 <= self.downsample <= 64, "downsample ∈ [1,64]"
+        assert 0.0 < self.decay <= 1.0, "decay ∈ (0,1]（=1 表示不衰减）"
+        assert 0.0 <= self.diffuse <= 0.25, (
+            "diffuse ∈ [0,0.25]：五点拉普拉斯显式格式的稳定域（>0.25 会振荡/发散）")
+        for nm in ("inject_food", "inject_prey", "inject_risk", "inject_kin"):
+            assert getattr(self, nm) >= 0.0, f"{nm} 非负"
+        assert 0.0 <= self.risk_g16_threshold <= 1.0, "risk_g16_threshold ∈ [0,1]"
+        # ---- R244 §二：消费端 ----
+        for nm in ("w_food", "w_prey", "w_risk", "w_kin"):
+            v = float(getattr(self, nm))
+            # `v == v` 挡 NaN（config.py 不依赖 numpy ⇒ 不用 isnan）
+            assert v == v and -10.0 <= v <= 10.0, f"{nm}={v} 非法（需有限且 |v| ≤ 10，防手滑量级）"
+        assert self.norm_mode in self._KNOWN_NORM_MODES, (
+            f"norm_mode={self.norm_mode!r} 未实现（本批只实现 {self._KNOWN_NORM_MODES}）"
+            f" —— 未实现的模式**必须炸**，不许静默退回解析上界")
+        if self.use_in_move:
+            assert self.channels, (
+                "use_in_move=True 但 channels 为空（场本体全关）⇒ 消费端会静默 no-op；"
+                "请先启用至少一个通道（B3 家族：禁静默空跑）")
+
+
 #: `from_dict` 的字段白名单（旧存档缺键 ⇒ 回退默认；多出的键 ⇒ 忽略而非报错）
 _RESOURCE_DYNAMICS_FIELDS: frozenset = frozenset(
     f.name for f in fields(ResourceDynamicsConfig)
@@ -1216,6 +1323,8 @@ _SUBPOS_FIELDS: frozenset = frozenset(f.name for f in fields(SubposConfig))
 
 #: R247 饥饿调制白名单（同规格；R247 之前的存档无 `hunger_mod` 键 ⇒ 回退默认关）。
 _HUNGER_MOD_FIELDS: frozenset = frozenset(f.name for f in fields(HungerModConfig))
+#: R240 T8 气味场配置白名单（同规格；T8 之前的存档无 `smell` 键 ⇒ 回退默认 = 全关）。
+_SMELL_FIELDS: frozenset = frozenset(f.name for f in fields(SmellConfig))
 
 
 @dataclass
@@ -1267,6 +1376,11 @@ class SimConfig:
 
     # ---- V-1 oracle 正向对照（R39 / D-8）；旧存档缺失回退默认关闭 ----
     oracle: OracleConfig = field(default_factory=OracleConfig)
+
+    # ---- R240 T8：气味场（多通道标量场；**默认全关 = 零成本 + 旧行为逐位不变**）----
+    #   实现落在新文件 `world/smell_field.py`；挂进 SimConfig ⇒ 经 `asdict` 自动进指纹
+    #   （跨档续跑被拦，同 `subpos` / `resource_dynamics` / `signals`）。
+    smell: SmellConfig = field(default_factory=SmellConfig)
 
     # ---- 可复现性辅助：配置 ⇄ dict ------------------------------
 
@@ -1394,6 +1508,17 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("hunger_mod") or {}).items()
                     if k in _HUNGER_MOD_FIELDS
+                }
+            ),
+            # R240 T8：气味场；旧存档缺失 ⇒ 回退默认（channels=() = 全关 = 旧行为逐位不变）。
+            #   同款字段白名单过滤（T8 之前的存档无 `smell` 键）。
+            #   ⚠️ 与 subpos 同族教训：**新组必须在此显式接线**，否则 `load_snapshot(config=None)`
+            #   的续跑会把该组静默退回默认（R233 T-F）。
+            smell=SmellConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("smell") or {}).items()
+                    if k in _SMELL_FIELDS
                 }
             ),
         )
