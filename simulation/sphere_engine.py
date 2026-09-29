@@ -919,20 +919,23 @@ class SphereEngine:
         # ---- S3 记忆 v2（egocentric）：fail-loud ×2 + 构造期质心表（实施规格 §一/§七-2）----
         # 🔴 两条 fail-loud（R236 §四-D-2 同族）：
         #   ① 运行时：v2 ∧ use_sim_core=True ⇒ 硬报错（Rust 未下沉 v2；静默走旧路径 = dash PR 翻车形态）
-        #   ② 构造期：v2 ∧ rd.enabled ∧ not bg_production_zero ⇒ 硬报错（R236 §四-B-2：
-        #      rd 搬移会改变斑块掩码 ⇒ 静态质心/方位静默失效）
+        #   ② 构造期：v2 ∧ rd.enabled ∧ not bg_production_zero ∧ not dynamic_centroid ⇒ 硬报错
+        #      （R236 §四-B-2：rd 搬移会改变斑块掩码 ⇒ 静态质心/方位静默失效）。
+        #      R264 修复：dynamic_centroid=True 时，搬移后质心表逐 tick 动态重算 ⇒ 不再硬报错。
         _mcfg2 = getattr(config, "info_structure", None)
         _mv2 = bool(getattr(_mcfg2, "memory_v2", False))
+        _mv2_dyn = bool(getattr(_mcfg2, "memory_v2_dynamic_centroid", True))
         if _mv2 and self._use_sim_core:
             raise NotImplementedError(
                 "memory_v2 尚未下沉 Rust：use_sim_core=True 时开启 memory_v2 会静默走旧路径"
                 " ⇒ 硬报错。请设 use_sim_core=False。"
             )
-        if _mv2 and bool(getattr(self._rd, "enabled", False)) \
+        if _mv2 and not _mv2_dyn and bool(getattr(self._rd, "enabled", False)) \
                 and not bool(getattr(self._rd, "bg_production_zero", False)):
             raise NotImplementedError(
-                "memory_v2 ∧ rd.enabled ∧ 背景格有产能 ⇒ 硬报错（R236 §四-B-2：rd 轮作搬移"
-                "会改变斑块掩码 ⇒ 静态质心/方位静默失效）。bg_production_zero 世界（S 线）允许。"
+                "memory_v2 ∧ rd.enabled ∧ 背景格有产能 ∧ 静态质心 ⇒ 硬报错（R236 §四-B-2："
+                "rd 轮作搬移会改变斑块掩码 ⇒ 静态质心/方位静默失效）。"
+                "请设 memory_v2_dynamic_centroid=True（R264 动态质心模式），或用 bg_production_zero 世界。"
             )
         # 构造期质心表（仅 v2 需要；一次性 BFS 标注，不在 tick 内；零 RNG ⇒ C7 无关）
         #   `_patch_centroid[i]` = 格 i 所属斑块的质心格 id（非斑块格 = -1；无斑块 = 全 -1）。
@@ -2473,6 +2476,12 @@ class SphereEngine:
         # 🔴 R226 修复①②：搬移已上移到 `note_tick`（死亡当 tick 原子完成）⇒ `rotate`
         #    不再消费引擎 RNG（rd 改用自有 `_rng`）；回写前做 **diff 校验**（fail-loud 兜底）。
         if _rd_on:
+            # R264 质心动态化：v2 动态模式下保存旧掩码用于搬移检测（仅 copy 引用，rotate 前快照）
+            _mv2_dyn_centroid = bool(getattr(
+                self.config.info_structure, "memory_v2_dynamic_centroid", True))
+            _old_patch_mask = None
+            if _mv2_dyn_centroid and self.resources._patch_mask is not None:
+                _old_patch_mask = self.resources._patch_mask.copy()
             self._rd.rotate(self._tick)
             _cap_new = self._rd.capacity_from_base()
             # R226 裁定②：回写前校验「生产格数」与「Σcapacity」不变量（破裂即报警）
@@ -2483,6 +2492,12 @@ class SphereEngine:
             #    （双掩码漂移 = I2 同族：两处规则不一致 ⇒ 归因不干净）。
             if self.resources._patch_mask is not None:
                 self.resources._patch_mask[:] = self._rd._mask
+            # R264 质心动态化：搬移后若掩码实际变化，重算质心表（v2 查表用）。
+            # 仅当旧掩码存在且与新掩码不同时才重算（多数 tick 无搬移 ⇒ 跳过 BFS，性能友好）。
+            if _mv2_dyn_centroid and _old_patch_mask is not None:
+                if not np.array_equal(_old_patch_mask, self._rd._mask):
+                    self._patch_centroid = _build_patch_centroid(
+                        self.world, self.resources._patch_mask)
         # 能量封顶（R144；`7516ba9` 引入 → 2026-09-21 补开关/测试/冒烟/纪元声明）
         # 关（默认）⇒ **与 E-017~E-031/calib1 逐位一致**（旧纪元）；开 ⇒ 新纪元（禁跨比）。
         if self.config.organisms.energy_cap_enabled:

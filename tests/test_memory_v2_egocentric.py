@@ -38,6 +38,7 @@ def _engine(*, seed: int = 42, max_count: int = 600,
             dist_scale: float = 15.0, degrade_thr: float = 20.0,
             ttl: int = 1000, rd_enabled: bool = False,
             use_sim_core: bool = False,
+            dynamic_centroid: bool = True,
             memory_gradient: str = "orientation") -> SphereEngine:
     cfg = SimConfig(seed=seed)
     cfg.simulation.use_sim_core = use_sim_core
@@ -54,6 +55,7 @@ def _engine(*, seed: int = 42, max_count: int = 600,
         memory_ttl=ttl,
         memory_noise=noise,
         memory_noise_p=noise_p,
+        memory_v2_dynamic_centroid=dynamic_centroid,
     )
     cfg.organisms.young_mob_mult = 0.55
     cfg.organisms.old_mob_mult = 0.55
@@ -141,13 +143,43 @@ def test_s4_v2_use_sim_core_fail_loud():
         _engine(v2=True, use_sim_core=True)
 
 
-def test_s4_v2_rd_enabled_nonzero_bg_fail_loud():
-    """v2 ∧ rd.enabled ∧ 背景有产能 ⇒ 硬报错（rd 搬移 ⇒ 静态质心失效）。"""
+def test_s4_v2_rd_enabled_nonzero_bg_static_fail_loud():
+    """v2 ∧ rd ∧ 背景有产能 ∧ 动态质心关 ⇒ 硬报错（静态质心失效）。"""
     with pytest.raises(NotImplementedError):
-        _engine(v2=True, patchy=True, bgzero=False, rd_enabled=True)
-    # bg_production_zero=True（S 线）允许
-    e = _engine(v2=True, patchy=True, bgzero=True, rd_enabled=True)
+        _engine(v2=True, patchy=True, bgzero=False, rd_enabled=True,
+                dynamic_centroid=False)
+
+
+def test_s4_v2_rd_enabled_nonzero_bg_dynamic_allows():
+    """R264：v2 ∧ rd ∧ 背景有产能 ∧ 动态质心开（默认）⇒ 不再报错。"""
+    e = _engine(v2=True, patchy=True, bgzero=False, rd_enabled=True,
+                dynamic_centroid=True)
     assert e is not None
+    # bg_production_zero=True（S 线）也允许
+    e2 = _engine(v2=True, patchy=True, bgzero=True, rd_enabled=True)
+    assert e2 is not None
+
+
+def test_s12_centroid_updates_after_rd_relocation():
+    """R264 质心动态化：rd 轮作搬移后质心表与新掩码一致。"""
+    e = _run(_engine(v2=True, patchy=True, bgzero=False, rd_enabled=True,
+                     max_count=2000), ticks=300)
+    # 搬移后质心表：每个斑块格的质心必须属于该斑块当前连通域
+    pm = e.resources._patch_mask
+    cent = e._patch_centroid
+    patch_cells = np.flatnonzero(pm)
+    if patch_cells.size == 0:
+        return  # 无斑块 ⇒ 质心全 -1，跳过
+    # 抽样验证：每个斑块格的质心格必须也是斑块格
+    sampled = patch_cells[::max(1, len(patch_cells) // 200)]
+    for c in sampled:
+        cid = int(cent[c])
+        assert cid >= 0, f"斑块格 {c} 的质心为 -1（搬移后未更新）"
+        assert bool(pm[cid]), f"斑块格 {c} 的质心 {cid} 不是斑块格（搬移后未更新）"
+    # 质心表与直接用当前掩码重算的结果一致（搬移后动态更新正确性）
+    from simulation.sphere_engine import _build_patch_centroid
+    expected = _build_patch_centroid(e.world, pm)
+    assert np.array_equal(cent, expected), "搬移后质心表与当前掩码重算结果不一致"
 
 
 # ---------------------------------------------------------------- S5 真写入
