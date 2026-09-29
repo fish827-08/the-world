@@ -184,6 +184,7 @@ KNOWN: dict[str, str] = {
     "info_structure.alignment_noise": INVARIANT,
     "info_structure.perception_noise": INVARIANT,
     "info_structure.memory_gradient_gain": INVARIANT,
+    "info_structure.memory_weight_gene": INVARIANT,  # 13.11 开关（bool）—— 乘子只改打分权重，不承载 tick 面额
     "info_structure.perception_radius": INVARIANT,
     "pleasure.optimism": INVARIANT,
     "pleasure.w_energy": INVARIANT,

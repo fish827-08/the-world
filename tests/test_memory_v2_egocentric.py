@@ -19,6 +19,8 @@ cos 打分语义 / 快照 roundtrip / 变异敏感性"写成常驻断言。
     S9 打分 cos 语义：对准 ≈ +1、背向 ≈ −1；精记忆带 exp(−d/scale) 衰减、粗记忆不带
     S10 快照 roundtrip：save → load ⇒ 5 数组逐位一致；繁殖/死亡后长度一致
     S11 **DEL-8 变异敏感性**：v2 开 ≠ 关 digest（机制真生效，不是字段存在）
+    S12 13.11 记忆权重基因位（g22）：乘子 2×g22 语义（0.5⇒基准 / 1⇒×2 / 0⇒零）、
+        开关∧¬v2 构造期 fail-loud、开档 ≠ 关档 digest（机制真接线）
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import pytest
 from simulation.config import (
     InfoStructureConfig, ResourceDynamicsConfig, SimConfig,
 )
+from simulation.genes import Gene
 from simulation.sphere_engine import SphereEngine
 
 
@@ -38,7 +41,8 @@ def _engine(*, seed: int = 42, max_count: int = 600,
             dist_scale: float = 15.0, degrade_thr: float = 20.0,
             ttl: int = 1000, rd_enabled: bool = False,
             use_sim_core: bool = False,
-            memory_gradient: str = "orientation") -> SphereEngine:
+            memory_gradient: str = "orientation",
+            weight_gene: bool = False) -> SphereEngine:
     cfg = SimConfig(seed=seed)
     cfg.simulation.use_sim_core = use_sim_core
     cfg.simulation.l2_dash = False
@@ -54,6 +58,7 @@ def _engine(*, seed: int = 42, max_count: int = 600,
         memory_ttl=ttl,
         memory_noise=noise,
         memory_noise_p=noise_p,
+        memory_weight_gene=weight_gene,
     )
     cfg.organisms.young_mob_mult = 0.55
     cfg.organisms.old_mob_mult = 0.55
@@ -284,6 +289,55 @@ def test_s11_v2_changes_digest_in_patchy_world():
     off = _digest(_engine(v2=False, patchy=True, max_count=3000), ticks=40)
     on = _digest(_engine(v2=True, patchy=True, max_count=3000), ticks=40)
     assert on != off, "v2 开档必须改变轨迹（否则 = 静默 no-op）"
+
+
+# ---------------------------------------------------------------- S12 13.11 记忆权重基因位
+
+def test_s12_gene_multiplier_semantics():
+    """乘子语义：`gain ← gain × 2×g22`（仅开关开档）；0.5 ⇒ 基准 / 1 ⇒ ×2 / 0 ⇒ 零贡献。"""
+    e = _engine(v2=True, patchy=True, max_count=3000, weight_gene=True)
+    idx = 0
+    cur = int(e._flat[idx])
+    nb = np.asarray(e.world.neighbors(cur), dtype=np.int64)[:8]
+    e._mem_az[idx] = [0, -1, -1, -1]          # q=0
+    e._mem_tick[idx] = [e.tick, -1, -1, -1]
+    e._mem_dist[idx] = [0.0, 0.0, 0.0, 0.0]
+    e._mem_degraded[idx] = [False, False, False, False]
+    dirs = np.array([e._cell_dir_slot(cur, int(x)) for x in nb])
+    if not (dirs == 0).any():
+        pytest.skip("世界邻居不含正对槽位（网格几何限制）")
+    aligned = int(np.argmax(dirs == 0))
+    # g22=0.5 ⇒ 乘子 1.0：精记忆 = 0.3（与关档同式，便于 S3 批对齐）
+    e._genes[idx, Gene.MEMORY_WEIGHT] = 0.5
+    assert abs(float(e._memory_egocentric_cos(idx, cur, nb, 0)[aligned]) - 0.3) < 1e-9
+    # g22=1.0 ⇒ 乘子 2.0
+    e._genes[idx, Gene.MEMORY_WEIGHT] = 1.0
+    assert abs(float(e._memory_egocentric_cos(idx, cur, nb, 0)[aligned]) - 0.6) < 1e-9
+    # 粗记忆同乘（2:1 比例不变）：0.15 × 2 = 0.3
+    e._mem_degraded[idx] = [True, False, False, False]
+    e._mem_dist[idx] = [1000.0, 0.0, 0.0, 0.0]
+    assert abs(float(e._memory_egocentric_cos(idx, cur, nb, 0)[aligned]) - 0.3) < 1e-9
+    # g22=0.0 ⇒ 乘子 0 ⇒ 该个体记忆项不贡献（全候选 0）
+    e._mem_degraded[idx] = [False, False, False, False]
+    e._mem_dist[idx] = [0.0, 0.0, 0.0, 0.0]
+    e._genes[idx, Gene.MEMORY_WEIGHT] = 0.0
+    assert float(np.abs(e._memory_egocentric_cos(idx, cur, nb, 0)).max()) == 0.0
+
+
+def test_s12_weight_gene_requires_v2():
+    """构造期 fail-loud：乘子只在 v2 打分路径被消费 ⇒ 开关∧¬v2 = 静默 no-op ⇒ 拒绝。"""
+    with pytest.raises(AssertionError):
+        InfoStructureConfig(
+            enabled=True, learning_rate=0.05,
+            memory_gradient="orientation", memory_v2=False,
+            memory_weight_gene=True)
+
+
+def test_s12_weight_gene_changes_digest():
+    """机制真接线（DEL-8 同族）：v2 开 + 基因位开 ≠ v2 开 + 关（否则 = 静默 no-op）。"""
+    off = _digest(_engine(v2=True, patchy=True, max_count=3000), ticks=40)
+    on = _digest(_engine(v2=True, patchy=True, max_count=3000, weight_gene=True), ticks=40)
+    assert on != off, "13.11 开关开档必须改变轨迹（否则 = 静默 no-op）"
 
 
 if __name__ == "__main__":

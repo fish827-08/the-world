@@ -640,6 +640,12 @@ class InfoStructureConfig:
     memory_noise: bool = False         # 朝向噪声档。False = 精确路径整合；True = 记忆方位旋转叠加噪声（±1 档）
     memory_noise_p: float = 0.1        # 噪声档：每 tick 以该概率扰动记忆方位 ±1 档
 
+    # ---- 13.11 记忆权重基因位（g22；S3.5 演化级前置；R258 §二）----
+    # 关（默认）= 固定权重（精 0.3/粗 0.15，= S3 批原语义，逐位不变）；
+    # 开 = 乘子 `2×g22` 生效（g22∈[0,1] 均匀 ⇒ 乘子∈[0,2]、总体均值 1.0）。
+    # 🔴 只在 memory_v2 打分路径被消费 ⇒ 要求 memory_v2=True（否则静默无消费点）。
+    memory_weight_gene: bool = False
+
     def __post_init__(self) -> None:
         assert self.perception_radius in (4, 8), "感知半径只支持4(Von Neumann)或8(Moore)"
         assert 0.0 <= self.learning_rate <= 1.0
@@ -663,6 +669,9 @@ class InfoStructureConfig:
         assert self.memory_coarse_gain >= 0, "memory_coarse_gain 必须 ≥ 0"
         assert self.memory_ttl > 0, "memory_ttl 必须 > 0"
         assert 0.0 <= self.memory_noise_p <= 1.0, "memory_noise_p ∈ [0,1]"
+        # 13.11 记忆权重基因位：乘子只在 v2 打分路径消费 ⇒ 不与 v2 同开 = 静默 no-op（B3 家族）
+        assert (not self.memory_weight_gene) or self.memory_v2, \
+            "memory_weight_gene=True 要求 memory_v2=True（乘子只在 v2 打分路径被消费）"
 
 
 @dataclass

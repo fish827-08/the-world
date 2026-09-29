@@ -930,6 +930,19 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **分支/证据** | `dev/yunqi-smell-v1` @ `28eadc1`（**已 rebase 到 main、未合 main**）｜证据包 `_audit/SMELL-V1/`｜数据仓 `results/smell_v1/` |
 | **消费端未接** | 通道权重需**扩 8 个基因位** = 纪元级（R238 §2）⇒ 批 A/B 排期；读接口 `eng.smell.at(cells, ch)` 已备 |
 
+### 13.11 「记忆权重基因位」纪元（2026-09-29 立；R258 §二 派工；`[本地开发·性能线]` 轻舟实施）
+
+| 项 | 内容 |
+|---|---|
+| **触发变更** | ① `Gene.TRUST_GENE(22)` **改名**为 `Gene.MEMORY_WEIGHT`（**值不变 ⇒ 基因组仍 24 位**；预留位接管，C3 G4）② 记忆 v2 打分段新增**逐个体乘子**：`InfoStructureConfig.memory_weight_gene=True` 时 `gain ← gain × 2×g22`（**精/粗同乘 ⇒ 2:1 比例不变**；乘子在 `perc` 之前 ⇒ 与其余打分项相对量纲不变）③ Rust 常量 `G_TRUST_GENE → G_MEMORY_WEIGHT`（**Rust 侧不消费**——memory_v2 强制 Python 路径，fail-loud 在前） |
+| **为什么** | S3 批（记忆 v2 固定权重）的**判据③"记忆基因频率被选择"因无基因载体而作废**（R257）⇒ 本纪元补上载体：记忆权重可遗传/变异 ⇒ 记忆的**收益差**才能被选择压表达 ⇒ S3.5（演化级）可判 |
+| **⚠️ 为何只接管 g22** | R258 §二 把 g17/g18/g22 列为"空闲位"**已过期**：g17/g18 自 §13.2（2026-09-22）起**已被消费**（追猎倾向/机动性）⇒ 本纪元只接管**唯一真空闲位 g22**（轻舟已回板更正，R258 派工单的更正见板） |
+| **默认与回滚** | 🔴 `memory_weight_gene=False`（默认）⇒ **乘子分支整段不执行 ⇒ 逐位等价**（S3 批语义不变；C7 digest `(574887, 11266.746993)` 不动）；构造期 fail-loud：`memory_weight_gene ∧ ¬memory_v2 ⇒ AssertionError`（乘子只在 v2 打分路径消费，防静默 no-op） |
+| **产物可自证字段**（C9） | `switches`：`memory_weight_gene`（开关）＋ `memory_weight_gene_slot`（=22，自证基因位未被挪，P7 家族） |
+| **纪律** | 🔴 **禁跨纪元比较**：`g22` 语义从"预留"变为"记忆权重乘子"⇒ 旧批 g22 频率不可与新批比；🔴 **S3 批（固定权重）与 S3.5 批（基因位开）不可混比**（前者权重为定值 0.3/0.15，后者为 `2×g22×` 基准的分布；乘子均匀 ⇒ 人口均值 1.0 仅保证**总体**可比，个体层不同） |
+| **⚠️ 需重建 `sim_core`（R199 环境约束）** | 本纪元**改了 Rust 基因常量名** ⇒ `validate_gene_wiring()` 按名字比对 ⇒ 未重建的环境报 `NAME_MISMATCH(rust=TRUST_GENE)=>REBUILD_SIM_CORE`；**本机已重建**（maturin release） |
+| **状态（2026-09-29，轻舟）** | ✅ **实施 + 测试落地**：加基因五步曲全走（Python enum/SEMANTICS/META/WIRED + Rust `genes.rs`/`lib.rs` + 引擎消费 + 注册表测试）；消费点 = `sphere_engine._memory_egocentric_cos`（**单点**，`:4934` 附近）；`tests/test_memory_v2_egocentric.py` S12 三例（乘子语义 0.5/1.0/0.0、开关∧¬v2 fail-loud、开档 ≠ 关档 digest）；另修一处**存量登记漂移**（g17/g18 早已消费但注册表仍标"未接线"，本次补登 `_GENE_WIRED`） |
+
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 
 > **背景**：本项目进入"结构改造 + 短实验"高频迭代期（R152–R157）。为把机时与开发解耦，fish 裁定：

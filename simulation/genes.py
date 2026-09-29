@@ -52,12 +52,12 @@ class Gene(IntEnum):
     PERCEPTION = 14          # 感知半径（移动决策 perc 项，Rust movement 消费）
     SIGNAL_STRENGTH = 15     # 信号发射概率（L3）
     AGGRESSION = 16          # 攻击性（捕食概率，L4，Rust predation 消费）
-    DIET = 17                # 食性（未接线，预留）
-    DEFENSE = 18             # 防御（未接线，预留）
+    DIET = 17                # ⚠️13.2 起被消费 = 追猎倾向 SEEK_TENDENCY（L1a `w_seek_max×g17`）；枚举名待改（§13.2 登记）
+    DEFENSE = 18             # ⚠️13.2 起被消费 = 机动性 MOBILITY（L2 dash/速度）；枚举名待改（§13.2 登记）
     ROOTING = 19             # 植物化扎根（移动概率 ×(1-g19) + 额外光合，L4）
     PERSISTENCE = 20         # 赶路惯性（ARS 14.9：extensive 模式下沿上一步方向继续走的强度）
     GIVE_UP = 21             # 失望阈值（ARS 14.9：extensive 模式下连走多少格没咬到就重选方向）
-    TRUST_GENE = 22          # 信任阈值（未接线，预留）
+    MEMORY_WEIGHT = 22       # 记忆权重乘子（13.11 接线；仅 memory_v2 路径消费：eff = cfg_gain × 2×g22）
     MIGRATE_BIAS = 23        # 迁徙倾向（日历—罗盘式定向迁徙，13.8 接线；原 RESERVED）
 
 
@@ -125,12 +125,12 @@ GENE_SEMANTICS: tuple[str, ...] = (
     "感知半径",            # g14
     "信号发射概率",        # g15
     "攻击性",              # g16
-    "食性（未接线）",      # g17
-    "防御（未接线）",      # g18
+    "追猎倾向（13.2 接线；原名改名待做）",  # g17（原「食性」）
+    "机动性（13.2 接线；原名改名待做）",    # g18（原「防御」）
     "植物化扎根",          # g19
     "赶路惯性（ARS）",    # g20
     "失望阈值（ARS）",    # g21
-    "信任阈值（未接线）",  # g22
+    "记忆权重乘子（仅记忆v2路径；13.11）",  # g22（原「信任阈值」）
     "迁徙倾向（日历—罗盘）",  # g23（13.8 接线；原「预留」）
 )
 
@@ -144,6 +144,10 @@ _GENE_WIRED: set[int] = {
     int(Gene.SIGNAL_STRENGTH), int(Gene.AGGRESSION), int(Gene.ROOTING),
     int(Gene.MIGRATE_BIAS),
     int(Gene.PERSISTENCE), int(Gene.GIVE_UP),
+    # 13.2 起被消费（L1a 追猎倾向 / L2 机动性）；此前误留"未接线"，2026-09-29 补登
+    int(Gene.DIET), int(Gene.DEFENSE),
+    # 13.11：记忆权重乘子（最后一个预留位接管；memory_v2 打分路径消费）
+    int(Gene.MEMORY_WEIGHT),
 }
 GENE_WIRED: frozenset[int] = frozenset(_GENE_WIRED)
 
@@ -184,12 +188,12 @@ GENE_META: tuple[GeneMeta, ...] = (
     GeneMeta(0.08, 1),    # g14 感知半径：探索性，高值有利（信息优势）
     GeneMeta(0.10, 0),    # g15 信号发射概率：高探索性，中性（信号成本/收益权衡）
     GeneMeta(0.08, 0),    # g16 攻击性：中性（捕食/防御权衡，密度依赖）
-    GeneMeta(0.10, 0),    # g17 食性（预留）：默认
-    GeneMeta(0.10, 0),    # g18 防御（预留）：默认
+    GeneMeta(0.10, 0),    # g17 追猎倾向（13.2 接线；原名 DIET）：探索性，中性
+    GeneMeta(0.10, 0),    # g18 机动性（13.2 接线；原名 DEFENSE）：探索性，中性
     GeneMeta(0.08, 1),    # g19 植物化扎根：高值有利（静态生态位）
     GeneMeta(0.10, 0),    # g20 赶路惯性（ARS）：中性，环境决定方向
     GeneMeta(0.10, 0),    # g21 失望阈值（ARS）：中性，环境决定方向
-    GeneMeta(0.10, 0),    # g22 信任阈值（预留）：默认
+    GeneMeta(0.10, 0),    # g22 记忆权重乘子（13.11 接线；原名 TRUST_GENE）：探索性，方向由选择压定
     GeneMeta(0.10, 0),    # g23 迁徙倾向（13.8 接线；探索性位，宽松突变）
 )
 

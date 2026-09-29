@@ -1505,6 +1505,10 @@ def main() -> None:
             # 无法回答"跑的到底是哪个档"，与 R127 的 C8 前提对账同型缺陷。
             "memory_gradient": str(e.config.info_structure.memory_gradient),
             "memory_gradient_gain": float(e.config.info_structure.memory_gradient_gain),
+            # 13.11：记忆权重基因位（g22）—— 开关 + **位号自证**（P7 家族：位号错位
+            # 是"接了却没接对"的隐形来源）；S3.5 批的臂身份 = 本键。
+            "memory_weight_gene": bool(e.config.info_structure.memory_weight_gene),
+            "memory_weight_gene_slot": int(Gene.MEMORY_WEIGHT),
             # R135 第 -1 步③：**t=0 基线**（跨批可比 + 搭车诊断）
             # 没有它，同一个 g16 读数在 A 批是"选择"、在 B 批是"搭车"，无法分辨。
             "g16_t0_mean": round(t0["g16_mean"], 4),

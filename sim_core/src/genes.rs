@@ -43,9 +43,10 @@ pub const G_PERCEPTION: usize = 14;
 pub const G_SIGNAL_STRENGTH: usize = 15;
 // g16 攻击性
 pub const G_AGGRESSION: usize = 16;
-// g17 食性（预留）
+// g17 ⚠️13.2 起被消费 = 追猎倾向（SEEK_TENDENCY；L1a `w_seek_max×g17`）。枚举名
+//   `DIET` 系历史遗留，改名登记于 AGENT.md §13.2（"改名未做"），Rust 侧同延。
 pub const G_DIET: usize = 17;
-// g18 防御（预留）
+// g18 ⚠️13.2 起被消费 = 机动性（MOBILITY；L2 dash/速度）。枚举名 `DEFENSE` 同 13.2 登记待改。
 pub const G_DEFENSE: usize = 18;
 // g19 植物化扎根
 pub const G_ROOTING: usize = 19;
@@ -54,8 +55,10 @@ pub const G_ROOTING: usize = 19;
 pub const G_PERSISTENCE: usize = 20;
 // g21 失望阈值（ARS 14.9）—— 同上，仅对齐用。
 pub const G_GIVE_UP: usize = 21;
-// g22 信任阈值（预留）
-pub const G_TRUST_GENE: usize = 22;
+// g22 记忆权重乘子（13.11 接线）—— ⚠️ Rust 侧**不消费**该机制：memory_v2 强制 Python
+//   路径（`memory_v2 ∧ use_sim_core` ⇒ 构造期 fail-loud，由 sphere_engine 守卫负责），
+//   本常量仅作「索引 ↔ 语义」对齐用（同 G_PERSISTENCE/G_GIVE_UP/G_MIGRATE_BIAS 先例）。
+pub const G_MEMORY_WEIGHT: usize = 22;
 // g23 迁徙倾向（日历—罗盘式定向迁徙，13.8）—— ⚠️ Rust 侧**未实现**该机制，
 // 本常量仅作「索引 ↔ 语义」对齐用；值与历史 G_RESERVED 相同（=23，**基因组长度不变**）。
 // Rust 移动路径**不消费**本基因位（13.8 强制 Python 路径，fail-loud 由引擎侧守卫负责）。

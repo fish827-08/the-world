@@ -346,7 +346,8 @@ class SphereEngine:
         # S3 记忆 v2（egocentric）5 数组 + 质心表（实施规格 §二；R215 教训：漏登 = 无法赋值/续跑错位）
         "_mem_az", "_mem_dist", "_mem_tick", "_mem_degraded", "_mem_food",
         "_patch_centroid", "_mem_gain", "_mem_coarse_gain", "_mem_dist_scale",
-        "_mem_degrade_thr", "_mem_ttl", "_mem_noise", "_mem_noise_p", "_mem_v2_rng",
+        "_mem_degrade_thr", "_mem_ttl", "_mem_noise", "_mem_noise_p",
+        "_mem_weight_gene", "_mem_v2_rng",
         # P0.1（T1）：紧凑邻居表 —— `_nb_table` 引用 world 的 `(n_cells,8)`，极点带另存
         "_pole_nb", "_pole_top", "_pole_bottom",
         # A′ 记忆朝向梯度计数器（2026-09-19）—— 本类用 `__slots__`，**新属性必须登记否则无法赋值**
@@ -1148,6 +1149,10 @@ class SphereEngine:
         self._mem_ttl = int(getattr(_mcfg2, "memory_ttl", 1000))
         self._mem_noise = bool(getattr(_mcfg2, "memory_noise", False))
         self._mem_noise_p = float(getattr(_mcfg2, "memory_noise_p", 0.1))
+        # 13.11 记忆权重基因位（g22）：关（默认）⇒ 固定权重（0.3/0.15，逐位不变 = C7）；
+        # 开 ⇒ 精/粗 gain 同乘 `2×g22`（g22∈[0,1] 均匀初始化 ⇒ 乘子均值 1.0，
+        # ⇒ 种群总体权重与 S3 固定权重批可比，个体差异才是唯一变量）。
+        self._mem_weight_gene = bool(getattr(_mcfg2, "memory_weight_gene", False))
         self._mem_v2_rng = np.random.default_rng(20260928)
         # 信号解读表（L5 文化传递）：(N,16)，对 16 种信号模式的响应倾向
         # 正值=移向，负值=逃避，0=忽略；初始随机，幼体向周围成体学习
@@ -4935,6 +4940,10 @@ class SphereEngine:
         多槽取 max（只让最对准的记忆槽说话）。
         `ang(c) = (dir(c) − heading) mod 8`（自我参照系；unknown heading ⇒ 用世界槽位退化）。
 
+        13.11：`memory_weight_gene=True` 时 `gain ← gain × 2×g22`（精/粗同乘 ⇒ 2:1 比例不变；
+        乘子在 `perc` 之前 ⇒ 与其余打分项的相对量纲不变）。该乘子**仅 Python 路径**
+        （v2 ∧ use_sim_core 已 fail-loud ⇒ 无对拍侧；关档默认 ⇒ 基础式逐位不变）。
+
         ⚠️ 双路径契约：与 Rust（`sim_core/src/movement.rs`）逐字同式（含 `% 8` / mod）。
         """
         n_cand = len(nb)
@@ -4958,6 +4967,9 @@ class SphereEngine:
         deg = self._mem_degraded[idx, valid]
         dvals = self._mem_dist[idx, valid].astype(np.float64)
         gains = np.where(deg, self._mem_coarse_gain, self._mem_gain)
+        if self._mem_weight_gene:
+            # 13.11：个体记忆权重乘子（关档此分支不执行 ⇒ 逐位不变）
+            gains = gains * (2.0 * float(self._genes[idx, Gene.MEMORY_WEIGHT]))
         expd = np.where(deg, 1.0,
                         np.exp(-np.clip(dvals, 0.0, 1e6) / self._mem_dist_scale))
         scored = gains[None, :] * cosm * expd[None, :]
