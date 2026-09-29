@@ -639,6 +639,9 @@ class InfoStructureConfig:
     memory_ttl: int = 1000             # 记忆时效（tick）。age > TTL ⇒ 槽视为空（R236 §四-B-3：5000→1000）
     memory_noise: bool = False         # 朝向噪声档。False = 精确路径整合；True = 记忆方位旋转叠加噪声（±1 档）
     memory_noise_p: float = 0.1        # 噪声档：每 tick 以该概率扰动记忆方位 ±1 档
+    memory_v2_dynamic_centroid: bool = True  # R264 质心动态化：rd 轮作搬移后同步重算受影响斑块质心。
+    # True = 动态模式（rd+背景产能下允许 v2，搬移后质心表自动更新）；
+    # False = 静态模式（rd+背景产能下 fail-loud 硬报错，保留旧行为）。
 
     # ---- 13.11 记忆权重基因位（g22；S3.5 演化级前置；R258 §二）----
     # 关（默认）= 固定权重（精 0.3/粗 0.15，= S3 批原语义，逐位不变）；
