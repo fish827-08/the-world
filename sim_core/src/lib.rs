@@ -683,6 +683,12 @@ fn step_movement(
     // R244 §二：气味场消费端（`smell_use=0` ⇒ 不索引 `smell_score`（可为 1 元素占位））
     smell_use: u8,
     smell_score: PyReadonlyArray1<'_, f64>,
+    // R239 ASM：模式仲裁（`asm_on=0` ⇒ 后四者不读；占位 mode 可空、sf/sr/sk 可为 1 元素）
+    asm_on: u8,
+    asm_mode: PyReadonlyArray1<'_, i8>,
+    asm_sf: PyReadonlyArray1<'_, f64>,
+    asm_sr: PyReadonlyArray1<'_, f64>,
+    asm_sk: PyReadonlyArray1<'_, f64>,
 ) -> PyResult<()> {
     let n = unsafe { flat.as_array().len() };
     if n_cols == 0 || n_cells % n_cols != 0 {
@@ -754,6 +760,13 @@ fn step_movement(
     if smell_use != 0 {
         require_len("smell_score", smell_score.as_array().len(), n_cells)?;
     }
+    // R239 ASM：仲裁档三数组必须全场长（错位 = 静默分岔源）；模式必须逐个体对齐
+    if asm_on != 0 {
+        require_len("asm_mode", asm_mode.as_array().len(), n)?;
+        require_len("asm_sf", asm_sf.as_array().len(), n_cells)?;
+        require_len("asm_sr", asm_sr.as_array().len(), n_cells)?;
+        require_len("asm_sk", asm_sk.as_array().len(), n_cells)?;
+    }
 
     let mut f = unsafe { flat.as_slice_mut()? };
     let mut e = unsafe { energy.as_slice_mut()? };
@@ -771,6 +784,11 @@ fn step_movement(
         n_cols, pole_top, pole_bottom, mem_grad_mode, mem_grad_gain,
         h_norm.as_slice()?, hm_beta,
         smell_use, smell_score.as_slice()?,
+        asm_on,
+        asm_mode.as_slice()?,
+        asm_sf.as_slice()?,
+        asm_sr.as_slice()?,
+        asm_sk.as_slice()?,
     );
     Ok(())
 }

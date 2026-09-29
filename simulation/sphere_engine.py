@@ -263,6 +263,41 @@ def _build_patch_centroid(world, patch_mask: np.ndarray) -> NDArray[np.int64]:
     return out
 
 
+def _asm_wta_select(
+    sal: NDArray[np.float64],
+    mode: NDArray[np.int8],
+    mode_tick: NDArray[np.int32],
+    tick: int,
+    hyst: float,
+    hold_ticks: int,
+) -> "tuple[NDArray[np.bool_], NDArray[np.bool_]]":
+    """ASM 模式仲裁核心（实施规格 §三 3.3 ①②；**纯函数、零 RNG**）。
+
+    `sal` (4, P) 四模式显著度；`mode` / `mode_tick` (P,) **就地更新**（调用方传视图）。
+    返回 `(switched, hold_blocked)`（bool (P,)；读数口径见 `SphereEngine.asm_probe`）。
+
+    - **最小锁定**：`tick − mode_tick < hold_ticks` ⇒ 必不切换（哪怕显著度已超阈值）；
+    - **迟滞**：`max(sal) > sal[mode] + hyst` 才切（`argmax` 取**首个**最大 ⇒ 确定性）；
+    - `hyst=0` / `hold_ticks=0` 是**变异测试**档（规格 §3.4-6），不是生产配置。
+    """
+    p = mode.shape[0]
+    assert sal.shape == (4, p), f"sal 形状 {sal.shape} 应为 (4, {p})"
+    if p == 0:
+        _e = np.zeros(0, dtype=bool)
+        return _e, _e
+    ar = np.arange(p)
+    allow = (np.int64(tick) - mode_tick.astype(np.int64)) >= np.int64(hold_ticks)
+    best = np.argmax(sal, axis=0)
+    cur_sal = sal[mode.astype(np.int64), ar]
+    best_sal = sal[best, ar]
+    over = best_sal > cur_sal + hyst
+    sw = allow & over
+    hb = (~allow) & over
+    mode[sw] = best[sw].astype(np.int8)
+    mode_tick[sw] = np.int32(tick)
+    return sw, hb
+
+
 def _genome_summary(genes) -> dict:
     """基因组摘要（t=0 基线；**只读、不消费 RNG**）。
 
@@ -514,6 +549,21 @@ class SphereEngine:
          "_smell_scratch",     # 消费端取数缓冲 = **按代缓存**：全场数组，值只对"本代已读格"有效
          "_smell_stamp",       # 每格的"代"标记（int32；与缓存同代才复用 ⇒ 场一更新就全体失效）
          "_smell_gen",         # 当前代（每次气味场 update() 后 +1）
+         # ---- R239/R258：ASM 模式仲裁（本线 = [本地开发·性能线] 轻舟）----------------
+         # 🔴 关档（`mode="fusion"`，默认）⇒ `_asm_on=False` ⇒ 相关代码整段不执行
+         #   （无 RNG、无状态改变）⇒ 旧行为**逐位等价**（C7 回滚点）。
+         "_asm_on",            # 开关快照（mode=="arbitration"；构造期取一次）
+         "_asm_base_explore",  # 探索模式保底显著度（sal_explore 常数）
+         "_asm_hyst",          # 迟滞（进入阈值 − 退出阈值）
+         "_asm_hold",          # 最小锁定 tick 数（防 dithering；规格 §3.4-4）
+         "_asm_w_feed", "_asm_w_hunger", "_asm_w_flee", "_asm_w_join",
+         "_mode",              # (N,) int8 当前模式（0 feed / 1 flee / 2 join / 3 explore）
+         "_mode_tick",         # (N,) int32 进入模式 tick（锁定计时；初值 −10^9 = 立即资格）
+         "_asm_sf", "_asm_sr", "_asm_sk",   # 候选格逐通道 Ŝ 缓存（按代；惰性分配）
+         "_asm_dummy",         # 关档时传给 Rust 的单元素 f64 占位（同 `_smell_dummy` 先例）
+         "_asm_sw_n",          # 读数：模式切换总次数（Σ 个体）
+         "_asm_hold_block_n",  # 读数：因最小锁定被挡下的"本应切换"次数
+         "_asm_mode_n",        # 读数：(4,) 每 tick 模式计数**累计**（时间占比分布用）
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -958,6 +1008,68 @@ class SphereEngine:
                 "rd 轮作搬移会改变斑块掩码 ⇒ 静态质心/方位静默失效）。"
                 "请设 memory_v2_dynamic_centroid=True（R264 动态质心模式），或用 bg_production_zero 世界。"
             )
+        # ---- R239/R258：ASM 模式仲裁守卫（实施规格 §三；本线 = [本地开发·性能线] 轻舟）----
+        # 🔴 仲裁档 = 邻居选择**整段替换**融合 score（规格 §3.3）⇒ 任何"往融合 score 里加项/
+        #    改选格语义"的机制同开会**静默吞掉其一**（R148-1 家族）⇒ 一律构造期硬报错。
+        #    默认 mode="fusion" ⇒ 本块不触发、零影响（C7 回滚点）。
+        _acfg0 = getattr(config, "action_selection", None)
+        assert _acfg0 is not None, (
+            "config.action_selection 缺失（SimConfig 必须含该组）——旧配置必须走 from_dict 回退")
+        assert str(_acfg0.mode) in ("fusion", "arbitration"), (
+            f"action_selection.mode={_acfg0.mode!r} 未实现"
+            f"（只实现 fusion/arbitration）—— 拼错的模式必须炸，不许静默退回 fusion")
+        if str(_acfg0.mode) == "arbitration":
+            _asm_missing = [
+                _ch for _ch in ("food", "risk", "kin")
+                if _ch not in tuple(getattr(config.smell, "channels", ()) or ())
+            ]
+            if _asm_missing:
+                raise NotImplementedError(
+                    f"action_selection.mode=\"arbitration\" 需要气味通道 {_asm_missing}"
+                    f"（salience 输入 = Ŝ_food/Ŝ_risk/Ŝ_kin；缺则必须炸，不许静默降级成融合）。"
+                    f"请在 smell.channels 里启用 food/risk/kin 三通道。"
+                )
+            _sim_a = getattr(config, "simulation", None)
+            _blocked: "list[str]" = []
+            if bool(getattr(_mcfg2, "enabled", False)):
+                # 🔴 R208 §三/R213 §六：兜底值 == config 默认（缺属性 ⇒ 视为"开"⇒ 守卫拦），
+                #   不许回退成"机制关"旧闸值（0.0）——config_fallback_audit 会红。
+                if float(getattr(_mcfg2, "softmax_tau", 0.15)) > 0.0:
+                    _blocked.append("info_structure.softmax_tau>0")
+                if float(getattr(_mcfg2, "perception_noise", 0.05)) > 0.0:
+                    _blocked.append("info_structure.perception_noise>0")
+                if float(getattr(_mcfg2, "reputation_weight", 0.0)) > 0.0:
+                    _blocked.append("info_structure.reputation_weight>0")
+            if str(getattr(_mcfg2, "memory_gradient", "none")) == "orientation":
+                _blocked.append("info_structure.memory_gradient=orientation")
+            if _mv2:
+                _blocked.append("info_structure.memory_v2")
+            if bool(getattr(_sim_a, "l1_seek", False)) or bool(getattr(_sim_a, "l1_fear", False)):
+                _blocked.append("simulation.l1_seek|l1_fear")
+            if bool(getattr(_sim_a, "l2_dash", False)):
+                _blocked.append("simulation.l2_dash")
+            if int(getattr(_sim_a, "perception_span", 1)) == 2:
+                _blocked.append("simulation.perception_span=2")
+            if bool(getattr(_sim_a, "cell_occupancy_cap_enabled", False)):
+                _blocked.append("simulation.cell_occupancy_cap_enabled")
+            if bool(getattr(getattr(config, "migration", None), "enabled", False)):
+                _blocked.append("migration.enabled")
+            if bool(getattr(getattr(config, "ars", None), "enabled", False)):
+                _blocked.append("ars.enabled")
+            _cwc_a = getattr(config, "corpse_wound", None)
+            # 🔴 R213 §六：`w_fear_health` 兜底钉死 = config 默认 0.5（不回退旧闸值 0.0）。
+            if bool(getattr(_cwc_a, "wound_enabled", False)) and \
+                    float(getattr(_cwc_a, "w_fear_health", 0.5)) > 0.0:
+                _blocked.append("corpse_wound.wound_enabled ∧ w_fear_health>0")
+            if bool(getattr(config.smell, "use_in_move", False)):
+                _blocked.append("smell.use_in_move")
+            if _blocked:
+                raise NotImplementedError(
+                    "action_selection.mode=\"arbitration\" 与下列机制互斥（规格 §三：仲裁档"
+                    "整段替换融合 score ⇒ 同开会**静默吞掉其一**；R148-1 家族）："
+                    + "；".join(_blocked)
+                    + "。请一次只开一件（规格 §〇 纪元纪律），或等批 B（信号→模式接线/组合验证）。"
+                )
         # 构造期质心表（仅 v2 需要；一次性 BFS 标注，不在 tick 内；零 RNG ⇒ C7 无关）
         #   `_patch_centroid[i]` = 格 i 所属斑块的质心格 id（非斑块格 = -1；无斑块 = 全 -1）。
         #   运行时个体**只查表**得到一个"质心格 id"再转方位 ⇒ 不暴露任何世界坐标本体（§三-3）。
@@ -1157,6 +1269,33 @@ class SphereEngine:
         # ⇒ 种群总体权重与 S3 固定权重批可比，个体差异才是唯一变量）。
         self._mem_weight_gene = bool(getattr(_mcfg2, "memory_weight_gene", False))
         self._mem_v2_rng = np.random.default_rng(20260928)
+        # ---- R239/R258：ASM 模式仲裁（本线 = [本地开发·性能线] 轻舟；实施规格 §三）------
+        # 🔴 关档（`mode="fusion"`，默认）⇒ `_asm_on=False` ⇒ 移动段整段不执行
+        #   （无 RNG、无状态改变）⇒ 旧行为**逐位等价**（C7 回滚点）。
+        #   状态数组**仍然**建好（少一个特例 = 少一个坑；关档不消费 ⇒ 零轨迹影响）。
+        #   守卫（通道前置 + 互斥机制）在构造期上方已 fail-loud（`mode=="arbitration"` 才查）。
+        _acfg = config.action_selection
+        self._asm_on = (str(_acfg.mode) == "arbitration")
+        self._asm_base_explore = float(_acfg.base_explore)
+        self._asm_hyst = float(_acfg.hyst)
+        self._asm_hold = int(_acfg.hold_ticks)
+        self._asm_w_feed = float(_acfg.w_feed)
+        self._asm_w_hunger = float(_acfg.w_hunger)
+        self._asm_w_flee = float(_acfg.w_flee)
+        self._asm_w_join = float(_acfg.w_join)
+        # 两状态数组（规格 §3.2；int8 模式 + int32 锁定计时）
+        #   初值 = explore（3，中性）+ mode_tick=-10^9（**立即具备切换资格**，不被空锁卡住）
+        self._mode = np.full(n, 3, dtype=np.int8)
+        self._mode_tick = np.full(n, -10**9, dtype=np.int32)
+        # 候选格逐通道 Ŝ 缓存（按代；惰性分配 ⇒ 关档零内存）+ Rust 关档占位
+        self._asm_sf = None
+        self._asm_sr = None
+        self._asm_sk = None
+        self._asm_dummy = np.zeros(1, dtype=np.float64)
+        # 读数（B4 口径；关档不累加 ⇒ `asm_probe()` 返回 None = "未适用"，不是 0）
+        self._asm_sw_n = 0
+        self._asm_hold_block_n = 0
+        self._asm_mode_n = np.zeros(4, dtype=np.int64)
         # 信号解读表（L5 文化传递）：(N,16)，对 16 种信号模式的响应倾向
         # 正值=移向，负值=逃避，0=忽略；初始随机，幼体向周围成体学习
         # R113/R121 信号字母表档位（fail-loud：未实施的档位在**构造期**即报错，
@@ -2159,6 +2298,34 @@ class SphereEngine:
             ),
         }
 
+    def asm_probe(self) -> dict | None:
+        """R239 ASM 模式仲裁读数（本线 = [本地开发·性能线] 轻舟；实施规格 §三 3.4/§3.5）。
+
+        🔴 `mode="fusion"`（默认）⇒ **None（未适用）**，**不是 0**（R120 / §五.12 口径铁律）。
+        - `sw_n` / `hold_block_n`：模式切换累计数与"被最小锁定挡下的本应切换"数
+          （预注册判据：切换率 ≠0 且 ≤ 1/hold ⇒ dithering 红线的主读数）；
+        - `mode_n` / `mode_share`：四模式累计时间占比分布（无模式 ≈0 或 ≈100% = 异常）。
+        """
+        if not self._asm_on:
+            return None
+        _tot = int(self._asm_mode_n.sum())
+        return {
+            "mode": "arbitration",
+            "base_explore": float(self._asm_base_explore),
+            "hyst": float(self._asm_hyst),
+            "hold_ticks": int(self._asm_hold),
+            "w_feed": float(self._asm_w_feed),
+            "w_hunger": float(self._asm_w_hunger),
+            "w_flee": float(self._asm_w_flee),
+            "w_join": float(self._asm_w_join),
+            "tick": int(self._tick),
+            "sw_n": int(self._asm_sw_n),
+            "hold_block_n": int(self._asm_hold_block_n),
+            "mode_n": [int(x) for x in self._asm_mode_n],
+            "mode_share": (
+                [round(float(x) / _tot, 6) for x in self._asm_mode_n] if _tot else None),
+        }
+
     def _ensure_far_tables(self) -> None:
         """惰性构造 L2 冲刺用的 2 跳环表（S0，2026-09-25）。
 
@@ -2736,6 +2903,38 @@ class SphereEngine:
 
     # ---- P2②：移动决策整块向量化（vanilla 配置专用快路径） ----------------
 
+    def _asm_update_modes(self, P: int) -> None:
+        """ASM 模式仲裁前置：每 tick 一次的四模式显著度 + WTA/迟滞/锁定（规格 §三 3.3 ①②）。
+
+        🔴 **三条移动路径共用**（本处在 `_step_population` 的路径分岔**之前**调用）⇒
+        Python 参考 / Rust 热核 / 向量化快路径消费的都是**同一份** `_mode`/`_mode_tick`
+        （单点实现 ⇒ 物理上无从分岔）。**零 RNG**、零快照外副作用。
+        salience 输入全部"本格/基因域"可直读 ⇒ **不违反"感知 1 格"**：
+        `sal_feed = w_feed·Ŝ_food(own) + w_hunger·hunger`；
+        `sal_flee = w_flee·Ŝ_risk(own)`（⚠️ 设计稿 ×(1+fear_gene) 乘子留批 B）；
+        `sal_join = w_join·Ŝ_kin(own)·(2·g13−1)`；`sal_explore = base_explore`。
+        """
+        own = self._flat[:P]
+        _sf = self.smell.channel_norm(own, "food")
+        _sr = self.smell.channel_norm(own, "risk")
+        _sk = self.smell.channel_norm(own, "kin")
+        hunger = np.clip(
+            1.0 - self._energy[:P] / max(1e-9, float(self.config.organisms.max_energy)),
+            0.0, 1.0)
+        g13 = self._genes[:P, Gene.SOCIABILITY]
+        sal = np.empty((4, P), dtype=np.float64)
+        sal[0] = self._asm_w_feed * _sf + self._asm_w_hunger * hunger
+        sal[1] = self._asm_w_flee * _sr
+        sal[2] = self._asm_w_join * _sk * (2.0 * g13 - 1.0)
+        sal[3] = self._asm_base_explore
+        sw, hb = _asm_wta_select(
+            sal, self._mode[:P], self._mode_tick[:P], int(self._tick),
+            self._asm_hyst, self._asm_hold)
+        self._asm_sw_n += int(sw.sum())
+        self._asm_hold_block_n += int(hb.sum())
+        self._asm_mode_n += np.bincount(
+            self._mode[:P].astype(np.int64), minlength=4)
+
     def _move_decide_batch(
         self,
         mi: NDArray[np.int64],
@@ -2747,6 +2946,7 @@ class SphereEngine:
         h_norm: NDArray[np.float64] | None = None,
         hm_beta: float = 0.0,
         smell_arr: "NDArray[np.float64] | None" = None,
+        asm: "tuple[NDArray[np.int8], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]] | None" = None,
     ) -> NDArray[np.int64]:
         """向量化移动决策（逐位等价；仅由调用点 `_batch_ok` 门启用）。
 
@@ -2754,6 +2954,8 @@ class SphereEngine:
         ARS/cap/L2 全关 ⇒ 参考循环退化为「纯打分 + argmax/平局」⇒ 可整块算。
         **R247 HM 例外**：饥饿调制**已在本函数内接线**（`h_norm` 逐行调制 `perc`，
         与参考循环/ Rust 逐字同式）⇒ HM 开启**不禁用**快路径（不进 `_batch_ok` 排除表）。
+        **R239/R258 ASM 例外**：仲裁档（`asm` 参数非 None）亦已在本函数内接线
+        （模式目标**整段替换**融合 score；守卫已禁掉同开机制）⇒ 同样不进排除表。
         逐位等价依据：
         - 打分各项与逐个体式**同操作数、同运算顺序**（列广播不改变单元素运算）；
         - 记忆项/解读项按**行条件**取舍：`np.where` 取原值 ⇒ 不做 `+0.0`
@@ -2784,37 +2986,51 @@ class SphereEngine:
                 ))
         for g, nb in groups:
             gi = mi[g]
-            perc = genes[gi, Gene.PERCEPTION]
-            if h_norm is not None and h_norm.size > 0:
-                # R247 HM ②：逐行调制 perc（与参考循环/Rust 逐字同式：`1.0 + beta * h_norm`）。
-                perc = perc * (1.0 + hm_beta * h_norm[gi])
-            soc = (genes[gi, Gene.SOCIABILITY] - 0.5) * 2.0
-            sig_weight = self._trust[gi] * (0.5 + rep_w * self._trust[gi])
-            score = (perc[:, None] * (food_ratio[nb] * 0.5
-                                      + sig_present[nb] * sig_weight[:, None])
-                     + soc[:, None] * densities[nb])
-            wm = self._work_memory[gi]
-            has_mem = (wm >= 0).any(axis=1)
-            if has_mem.any():
-                mem_in_nb = (nb[:, :, None] == wm[:, None, :]).any(axis=2)
+            if asm is not None:
+                # ── R239/R258：ASM 模式仲裁档（规格 §三 3.3 ③；与参考循环/Rust 同式同序）──
+                #   `_md==0/1/2/3` ⇒ feed/flee/join/explore；explore 全 0 ⇒ 平局分支随机
+                #   （规格允许"随机（或上一步方向持久性）"，批 A 取随机 = `rand_choice % k`）。
+                _mode_g, _sf, _sr, _sk = asm
+                _md = _mode_g[gi]
                 score = np.where(
-                    has_mem[:, None],
-                    score + (0.3 * perc)[:, None] * mem_in_nb.astype(np.float64),
-                    score,
+                    _md[:, None] == 0, _sf[nb],
+                    np.where(
+                        _md[:, None] == 1, -_sr[nb],
+                        np.where(_md[:, None] == 2, _sk[nb] + densities[nb], 0.0),
+                    ),
                 )
-            nb_sigs = self.signals._marks[nb]
-            has_sig = (nb_sigs > 0).any(axis=1)
-            if has_sig.any():
-                interp = np.where(
-                    nb_sigs > 0, self._interpret[gi[:, None], nb_sigs], 0.0)
-                score = np.where(
-                    has_sig[:, None],
-                    score + (0.4 * perc)[:, None] * interp,
-                    score,
-                )
-            # R244 §二：气味消费端（第三处同式；与参考循环/Rust 同位置、同操作数、同顺序）
-            if smell_arr is not None:
-                score = score + perc[:, None] * smell_arr[nb]
+            else:
+                perc = genes[gi, Gene.PERCEPTION]
+                if h_norm is not None and h_norm.size > 0:
+                    # R247 HM ②：逐行调制 perc（与参考循环/Rust 逐字同式：`1.0 + beta * h_norm`）。
+                    perc = perc * (1.0 + hm_beta * h_norm[gi])
+                soc = (genes[gi, Gene.SOCIABILITY] - 0.5) * 2.0
+                sig_weight = self._trust[gi] * (0.5 + rep_w * self._trust[gi])
+                score = (perc[:, None] * (food_ratio[nb] * 0.5
+                                          + sig_present[nb] * sig_weight[:, None])
+                         + soc[:, None] * densities[nb])
+                wm = self._work_memory[gi]
+                has_mem = (wm >= 0).any(axis=1)
+                if has_mem.any():
+                    mem_in_nb = (nb[:, :, None] == wm[:, None, :]).any(axis=2)
+                    score = np.where(
+                        has_mem[:, None],
+                        score + (0.3 * perc)[:, None] * mem_in_nb.astype(np.float64),
+                        score,
+                    )
+                nb_sigs = self.signals._marks[nb]
+                has_sig = (nb_sigs > 0).any(axis=1)
+                if has_sig.any():
+                    interp = np.where(
+                        nb_sigs > 0, self._interpret[gi[:, None], nb_sigs], 0.0)
+                    score = np.where(
+                        has_sig[:, None],
+                        score + (0.4 * perc)[:, None] * interp,
+                        score,
+                    )
+                # R244 §二：气味消费端（第三处同式；与参考循环/Rust 同位置、同操作数、同顺序）
+                if smell_arr is not None:
+                    score = score + perc[:, None] * smell_arr[nb]
             k = nb.shape[1]
             pick = np.where(
                 (score.max(axis=1) - score.min(axis=1)) < 1e-9,
@@ -3318,6 +3534,15 @@ class SphereEngine:
         else:
             _h_norm = np.empty(0, dtype=np.float64)
         _hm_beta = float(_hmcfg.beta)
+        # ---- R239/R258：ASM 模式仲裁（本线 = [本地开发·性能线] 轻舟；实施规格 §三）------
+        # 🔴 `_asm_on`（构造期快照）关档（默认 fusion）⇒ 下方相关代码整段不执行
+        #   （无 RNG、无状态改变）⇒ 逐位等价（C7 回滚点）。
+        # 🔴 规格 §3.3：「HM 的 ②（感知权重调制）在仲裁档下**关闭**（由 `w_hunger` 承担）」
+        #   ⇒ 三处移动路径消费的 perc 调制**统一以 `_hm2_on` 为准**（单点开关 ⇒ 无从分岔）；
+        #   HM ①（走停调制）在上方已完成、与仲裁正交（规格只关 ②）。
+        _asm_on = self._asm_on
+        _hm2_on = _hm_on and not _asm_on
+        _h_norm_perc = _h_norm if _hm2_on else np.empty(0, dtype=np.float64)
         # D2-3 信息不对称：感知半径4/噪声/softmax 暂未下沉 Rust，启用时走 Python 路径
         _ifcfg = self.config.info_structure
         _d2_asym = _ifcfg.enabled and (_ifcfg.perception_radius == 4 or _ifcfg.perception_noise > 0 or _ifcfg.softmax_tau > 0)
@@ -3327,15 +3552,26 @@ class SphereEngine:
         #   （`score += perc × _smell_arr[nb]`）⇒ 无分岔（`_move_decide_batch` 收 `smell_arr` 参数）。
         _smell_use_on = bool(self.config.smell.use_in_move) and self.smell is not None
         _smell_arr = None
-        if _smell_use_on:
+        _asm_sf = _asm_sr = _asm_sk = None
+        if _smell_use_on or _asm_on:
             # 🔴 取数 = **按代缓存**：气味场只每 k tick 变一次 ⇒ 同一代内已读格的值可复用；
             #   每 tick 只需补算"本代还没算过的格"（个体移动导致的新候选）。
             #   代价：一次场更新内首次 ≈ O(候选格数)，其余 tick ≈ O(新增格) ⇒ 摊薄 ~0.3 ms/tick @N=2000。
-            _cache = self._smell_scratch
-            if _cache is None:
-                _cache = self._smell_scratch = np.zeros(self.world.n_cells, dtype=np.float64)
+            #   R239 ASM：复用**同一代缓存机制**（同一 `_smell_stamp`/`_smell_gen` ⇒ 两套缓存
+            #   同代同失效），额外补三通道逐格值（feed/flee/join 的模式内目标用）。
+            if _smell_use_on:
+                _cache = self._smell_scratch
+                if _cache is None:
+                    _cache = self._smell_scratch = np.zeros(self.world.n_cells, dtype=np.float64)
+                _smell_arr = _cache
+            if self._smell_stamp is None:
                 self._smell_stamp = np.zeros(self.world.n_cells, dtype=np.int32)
-            _smell_arr = _cache
+            if _asm_on:
+                if self._asm_sf is None:
+                    self._asm_sf = np.zeros(self.world.n_cells, dtype=np.float64)
+                    self._asm_sr = np.zeros(self.world.n_cells, dtype=np.float64)
+                    self._asm_sk = np.zeros(self.world.n_cells, dtype=np.float64)
+                _asm_sf, _asm_sr, _asm_sk = self._asm_sf, self._asm_sr, self._asm_sk
             _f = self._nb_table[self._flat[:P]].ravel()
             _f = _f[_f >= 0]                              # 主表极行是 -1 占位
             _pn = self._pole_nb.ravel()
@@ -3346,8 +3582,16 @@ class SphereEngine:
                 _new = _f[_stamp[_f] != _gen]
                 if _new.size:
                     _new = np.unique(_new)                # 去重（同格被多个体/多次引用）
-                    _cache[_new] = self.smell.combined(_new)
+                    if _smell_use_on:
+                        _cache[_new] = self.smell.combined(_new)
+                    if _asm_on:
+                        _asm_sf[_new] = self.smell.channel_norm(_new, "food")
+                        _asm_sr[_new] = self.smell.channel_norm(_new, "risk")
+                        _asm_sk[_new] = self.smell.channel_norm(_new, "kin")
                     _stamp[_new] = _gen
+        if _asm_on:
+            # R239 ASM：模式仲裁前置（每 tick 一次；**三条移动路径共用** ⇒ 分岔前单点更新）
+            self._asm_update_modes(P)
         if self._use_sim_core and not _d2_asym:
             moved_raw = self.rng.random(P) < move_prob
             mi = np.flatnonzero(moved_raw & (energy >= move_cost_ind))
@@ -3394,11 +3638,18 @@ class SphereEngine:
                     1 if _ifc_mg.memory_gradient == "orientation" else 0,
                     float(_ifc_mg.memory_gradient_gain),
                     # R247 HM ②：逐个体 h_norm（空数组 = 关档）+ beta；
-                    #   Rust 侧 `if hm_on { perc *= 1.0 + beta * h_norm[idx] }`（同式）。
-                    _h_norm, _hm_beta,
+                    #   🔴 ASM 仲裁档下统一传空（规格 §3.3：HM ② 让位给 `w_hunger`）。
+                    _h_norm_perc, _hm_beta,
                     # R244 §二：气味消费端（关档传 dummy 单元素数组 + 标志 0 ⇒ Rust 不索引）
                     1 if _smell_use_on else 0,
                     _smell_arr if _smell_use_on else self._smell_dummy,
+                    # R239/R258：ASM 模式仲裁（关档传标志 0 + 占位 ⇒ Rust 不索引；
+                    #   `self._mode` 恒存在（长度 = 当前容量 ≥ P）⇒ 关档也安全传）
+                    1 if _asm_on else 0,
+                    self._mode,
+                    _asm_sf if _asm_on else self._asm_dummy,
+                    _asm_sr if _asm_on else self._asm_dummy,
+                    _asm_sk if _asm_on else self._asm_dummy,
                 )
                 # 5.6) 信任学习：移动到有信号的格子后验证真假
                 target_cells = self._flat[mi]
@@ -3606,8 +3857,9 @@ class SphereEngine:
                 if _batch_ok:
                     targets = self._move_decide_batch(
                         mi, food_ratio, sig_present, densities, rand_choice, rep_w,
-                        _h_norm, _hm_beta,
-                        _smell_arr if _smell_use_on else None)
+                        _h_norm_perc, _hm_beta,
+                        _smell_arr if _smell_use_on else None,
+                        (self._mode, _asm_sf, _asm_sr, _asm_sk) if _asm_on else None)
                 # 快路径命中 ⇒ 参考循环迭代集为空（**不重排**下方 280 行参考实现）。
                 for i, idx in enumerate(() if _batch_ok else mi):
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
@@ -3637,28 +3889,45 @@ class SphereEngine:
                         targets[i] = nb[0]
                         continue
                     perc = genes[idx, Gene.PERCEPTION]
-                    if _hm_on:
+                    if _hm2_on:
                         # R247 HM ②：**只调制 perc 赋值行** ⇒ 食物/信号/记忆/解读项随 perc 同乘、
                         #   `soc × 密度` 项不受影响（"饿 ⇒ 更专注找吃的/信号，社交项相对被压"）。
                         #   ⚠️ 与 Rust / 批量路径**逐字同式**：`1.0 + beta * h_norm[idx]`。
+                        #   🔴 `_hm2_on = _hm_on ∧ ¬_asm_on`（规格 §3.3：仲裁档下 HM ② 关闭，
+                        #   由 `w_hunger` 承担 ⇒ 避免双重调制）。
                         perc = perc * (1.0 + _hm_beta * _h_norm[idx])
-                    soc = (genes[idx, Gene.SOCIABILITY] - 0.5) * 2.0
-                    # D2-3 感知噪声：食物/信号感知加高斯噪声（F-D2 修复 B′：走每引擎独立的
-                    # `_d2_rng`，种子/算法同旧全局播种 ⇒ 单引擎逐位不变、多引擎不再互相污染）
-                    fr = food_ratio[nb].copy()
-                    sp = sig_present[nb].copy()
-                    if d2_noise:
-                        fr += self._d2_rng.normal(0, ifcfg3.perception_noise, size=len(nb))
-                        sp += self._d2_rng.normal(0, ifcfg3.perception_noise, size=len(nb))
-                        fr = np.clip(fr, 0.0, 1.0)
-                        sp = np.clip(sp, 0.0, 1.0)
-                    # B1｜R2 声誉权重（1 行）：信号项在原有 trust 权重之上再按 trust 放大
-                    # （高 trust → 更重视信号）。sig_weight = trust×(0.5 + rep_w×trust)；
-                    # rep_w=0 时退化为原式 0.5×trust（与旧版逐位一致）。
-                    sig_weight = self._trust[idx] * (0.5 + rep_w * self._trust[idx])
-                    score = perc * (
-                        fr * 0.5 + sp * sig_weight
-                    ) + soc * densities[nb]
+                    if _asm_on:
+                        # ── R239/R258：ASM 模式仲裁档（规格 §三 3.3 ③；三处同式）──────────
+                        #   模式目标**整段替换**融合 score（构造期守卫已禁掉一切同开机制 ⇒
+                        #   下方"融合链"各项在本档下全部不执行：无死重量、无静默吞并）。
+                        #   explore 全 0 ⇒ 平局分支随机（批 A 取"随机"；"方向持久性"留批 B）。
+                        _md = int(self._mode[idx])
+                        if _md == 0:
+                            score = _asm_sf[nb]
+                        elif _md == 1:
+                            score = -_asm_sr[nb]
+                        elif _md == 2:
+                            score = _asm_sk[nb] + densities[nb]
+                        else:
+                            score = np.zeros(len(nb), dtype=np.float64)
+                    else:
+                        soc = (genes[idx, Gene.SOCIABILITY] - 0.5) * 2.0
+                        # D2-3 感知噪声：食物/信号感知加高斯噪声（F-D2 修复 B′：走每引擎独立的
+                        # `_d2_rng`，种子/算法同旧全局播种 ⇒ 单引擎逐位不变、多引擎不再互相污染）
+                        fr = food_ratio[nb].copy()
+                        sp = sig_present[nb].copy()
+                        if d2_noise:
+                            fr += self._d2_rng.normal(0, ifcfg3.perception_noise, size=len(nb))
+                            sp += self._d2_rng.normal(0, ifcfg3.perception_noise, size=len(nb))
+                            fr = np.clip(fr, 0.0, 1.0)
+                            sp = np.clip(sp, 0.0, 1.0)
+                        # B1｜R2 声誉权重（1 行）：信号项在原有 trust 权重之上再按 trust 放大
+                        # （高 trust → 更重视信号）。sig_weight = trust×(0.5 + rep_w×trust)；
+                        # rep_w=0 时退化为原式 0.5×trust（与旧版逐位一致）。
+                        sig_weight = self._trust[idx] * (0.5 + rep_w * self._trust[idx])
+                        score = perc * (
+                            fr * 0.5 + sp * sig_weight
+                        ) + soc * densities[nb]
                     valid_mem = self._work_memory[idx][self._work_memory[idx] >= 0]
                     if _mv2_on:
                         # S3 记忆 v2：自我参照系打分（取代 v1 全部记忆项；v2 下不再读
@@ -3678,13 +3947,16 @@ class SphereEngine:
                             if float(np.abs(g).max()) > 1e-9:
                                 self._mem_grad_trig += 1
                             score = score + mem_grad_gain * perc * g
-                    elif len(valid_mem) > 0:
+                    elif (not _asm_on) and len(valid_mem) > 0:
                         # 整数成员判断：广播比较替代 np.isin（valid_mem≤4，结果 bool
                         #   逐位一致；profile 移动段热点）。`0.3` 字面量严格不动。
+                        # 🔴 ASM 仲裁档下不执行（模式目标整段替换 ⇒ 记忆项不参与）。
                         mem_in_nb = (nb[:, None] == valid_mem[None, :]).any(axis=1)
                         score = score + 0.3 * perc * mem_in_nb.astype(np.float64)
                     nb_sigs = self.signals._marks[nb]
-                    if (nb_sigs > 0).any():
+                    if (not _asm_on) and (nb_sigs > 0).any():
+                        # 🔴 ASM 仲裁档下不执行（规格 §3.3 红线：「首批不把信号接到模式」——
+                        #   信号既不进显著度，也不进模式内目标 ⇒ 批 A 信号通移动整段断开）。
                         interp = np.array(
                             [self._interpret[idx, int(s)] if s > 0 else 0.0 for s in nb_sigs],
                             dtype=np.float64,
@@ -4552,6 +4824,12 @@ class SphereEngine:
                 [self._mem_degraded, np.zeros((K, 4), dtype=bool)])
             self._mem_food = np.concatenate(
                 [self._mem_food, np.zeros((K, 4), dtype=np.float32)])
+            # R239 ASM：子代初始模式 = explore（3）、`_mode_tick = -10^9`（首 tick 即可切换，
+            #   与 `__init__` 同式；模式**不遗传**——同"记忆不遗传"同理）
+            self._mode = np.concatenate(
+                [self._mode, np.full(K, 3, dtype=np.int8)])
+            self._mode_tick = np.concatenate(
+                [self._mode_tick, np.full(K, -10**9, dtype=np.int32)])
             born = K
             new_max = int(self._generation.max())
             if new_max > self._max_generation:
@@ -4651,6 +4929,13 @@ class SphereEngine:
             )
             self._seed_carried = np.concatenate(
                 [self._seed_carried[:P][keep], self._seed_carried[P:]]
+            )
+            # R239 ASM：随死亡压缩（**同一 `keep` 掩码**；漏掉 ⇒ 与个体错位 ⇒ 模式乱指）
+            self._mode = np.concatenate(
+                [self._mode[:P][keep], self._mode[P:]]
+            )
+            self._mode_tick = np.concatenate(
+                [self._mode_tick[:P][keep], self._mode_tick[P:]]
             )
 
         if len(self._id) == 0:
@@ -5530,6 +5815,10 @@ class SphereEngine:
         data["mem_food"] = self._mem_food[:P].copy()
         data["patch_centroid"] = self._patch_centroid.copy()
 
+        # --- 3.9 R239 ASM 两数组（按个体；实施规格 §三 3.2 —— 漏登 = 续跑丢模式状态）---
+        data["mode"] = self._mode[:P].copy()
+        data["mode_tick"] = self._mode_tick[:P].copy()
+
         # --- 4. 世界状态（资源场 + 信号场）---
         data["resource_grid"] = self.resources._grid.copy()
         data["resource_capacity"] = self.resources._capacity.copy()
@@ -5823,6 +6112,13 @@ class SphereEngine:
             else np.zeros((_P, 4), dtype=np.float32))
         if "patch_centroid" in data and data["patch_centroid"].size == engine.world.n_cells:
             engine._patch_centroid = data["patch_centroid"].copy()
+        # R239 ASM：旧快照缺键 ⇒ 回退初值（全 explore、tick=-10^9；语义 = 从未跑过仲裁）
+        engine._mode = (
+            data["mode"].copy() if "mode" in data
+            else np.full(_P, 3, dtype=np.int8))
+        engine._mode_tick = (
+            data["mode_tick"].copy() if "mode_tick" in data
+            else np.full(_P, -10**9, dtype=np.int32))
 
         # --- 8. 恢复世界状态 ---
         engine.resources._grid = data["resource_grid"].copy()   # sparse:reset（下方 rebuild_lazy）
