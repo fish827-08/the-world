@@ -118,8 +118,8 @@ KNOWN: dict[str, str] = {
     "signals.duration_ticks": DURATION,
     "organisms.repro_cooldown_gene_scale": DURATION,
     # ---- R240 T8 气味场（新机制；本线 = [云端开发·云启]）----
-    "smell.update_every": DURATION,          # 更新间隔（k tick）⇒ 时间压缩 ÷k（配 diffuse ×k ⇒ 每日扩散不变）
-    "smell.diffuse": RATE,                   # 每次更新的扩散权重 ⇒ 每日扩散 = (更新数/日)×系数 ⇒ ÷k 次配 ×k
+    "smell.update_every": DURATION,          # 更新间隔（k tick）⇒ 时间压缩 ÷k
+    "smell.diffuse": INVARIANT,              # 🔴 R267 #3 复核：**不动**（每日更新次数已不变 ⇒ 系数原样）
     "smell.decay": DECAY,                    # 「每 tick 衰减」⇒ 时间压缩 ^k
     "smell.downsample": INVARIANT,           # 空间 LOD（1/s）—— 与 tick 无关
     "smell.risk_g16_threshold": INVARIANT,   # 基因阈值（无量纲）

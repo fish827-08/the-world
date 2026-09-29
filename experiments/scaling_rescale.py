@@ -69,10 +69,14 @@ _RATE_FIELDS: list[tuple[str, str]] = [
     #   它的正确改法是 PROB 公式（`1−(1−r)^k`），该公式对 EWMA 是**精确解**而非近似。
     ("info_structure", "learning_rate"),
     ("info_structure", "alignment_rate"),
-    # 🔴 R240 T8 气味场（[云端开发·云启]）：`diffuse` 是**每次更新**的扩散权重
-    #   ⇒ 时间压缩后"每日更新次数" ÷k（见 `update_every`，DURATION 表）⇒ 系数须 ×k 才保每日扩散不变。
-    ("smell", "diffuse"),
 ]
+# ⚠️ `smell.diffuse` **不在本表**（R267 #3 复核结论，云启 2026-09-29）：
+#   它应属 **INVARIANT（不动）**，此前归 RATE(×k) 是**分类错误**（R265 越界事故的根因）。
+#   推导：每日扩散 ≈ (每日更新次数) × diffuse，而 每日更新次数 = D/update_every；
+#   `update_every` 已归 DURATION(÷k) 且世界日 D 也 ÷k ⇒ **每日更新次数不变**
+#   ⇒ 每次的系数必须**原样不改**。×k 会把**每日**扩散放大 k 倍（k=2.5 时 0.3，
+#   越五点拉普拉斯稳定域 ⇒ 触发 R265 的 clamp）。
+#   注：R265 的 clamp（≤0.25，带 `_sat` 告警）**保留为防御性兜底**——修分类后不再触发。
 # ⚠️ `organisms.move_cost`：**每格成本 / PER_EVENT**（引擎 subpos 路径 :3290 按实际步数
 #    比例计费 `move_cost × (st/subdiv)`；整数格路径每移动 1 格扣一次）⇒ 每天移动能耗 =
 #    move_cost × 每天格数，**与 k 无关**。本轮保留在 RATE（×k）仅为 A4 判据口径连续
