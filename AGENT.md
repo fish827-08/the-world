@@ -943,6 +943,21 @@ python.exe tools/run_batch.py --preset <预设名> --skip-existing
 | **⚠️ 需重建 `sim_core`（R199 环境约束）** | 本纪元**改了 Rust 基因常量名** ⇒ `validate_gene_wiring()` 按名字比对 ⇒ 未重建的环境报 `NAME_MISMATCH(rust=TRUST_GENE)=>REBUILD_SIM_CORE`；**本机已重建**（maturin release） |
 | **状态（2026-09-29，轻舟）** | ✅ **实施 + 测试落地**：加基因五步曲全走（Python enum/SEMANTICS/META/WIRED + Rust `genes.rs`/`lib.rs` + 引擎消费 + 注册表测试）；消费点 = `sphere_engine._memory_egocentric_cos`（**单点**，`:4934` 附近）；`tests/test_memory_v2_egocentric.py` S12 三例（乘子语义 0.5/1.0/0.0、开关∧¬v2 fail-loud、开档 ≠ 关档 digest）；另修一处**存量登记漂移**（g17/g18 早已消费但注册表仍标"未接线"，本次补登 `_GENE_WIRED`） |
 
+### 13.12 「行动选择模式仲裁（ASM）」纪元（2026-09-29 立；R238/R239 立项 + R258 顺延派工；`[本地开发·性能线]` 轻舟实施）
+
+| 项 | 内容 |
+|---|---|
+| **触发变更** | ① 新增 `ActionSelectionConfig`（`mode="fusion"` 默认 / `"arbitration"`）② 新增两状态数组 `_mode (n,) int8`（0=feed/1=flee/2=join/3=explore）+ `_mode_tick (n,) int32`（进入 tick = 锁定计时）⇒ `__slots__` 四处登记 + 快照 ③ 移动决策新增**前置仲裁段**（`_asm_update_modes`，每 tick 一次、**三路径共用单点** ⇒ 物理上无从分岔）：`sal_feed = w_feed·Ŝ_food(自格) + w_hunger·hunger`｜`sal_flee = w_flee·Ŝ_risk(自格)`（⚠️ 设计稿的 `×(1+fear_gene)` 乘子**留批 B**）｜`sal_join = w_join·Ŝ_kin(自格)·(2·g13−1)`｜`sal_explore = base_explore`；**WTA + 迟滞（严格 `>`）+ 最小锁定**（锁定内必不切换）④ 模式内目标**整段替换**融合 score：feed→argmax Ŝ_food(nb)｜flee→argmin Ŝ_risk(nb)｜join→argmax(Ŝ_kin+density)(nb)｜explore→随机（平局分支）⑤ 三处同式：Python 参考循环 / Rust `movement.rs`（+`lib.rs` 5 参透传）/ 向量化 `_move_decide_batch` |
+| **为什么** | R238：现状 = command fusion（信号只是 score 里一个连续小项 ⇒ **行为结构不变**）⇒ **信号"没有能改的东西"** 正是 E-019/E-023「信号无内容」的机理。仲裁 = 先选模式再行动、模式间**排他**（"逃的时候不吃"）⇒ 信号未来可切换接收者**模式** ⇒ 服务 C3（发送者获益） |
+| **默认与回滚** | 🔴 `mode="fusion"`（默认）⇒ 仲裁段整段不执行（无 RNG、无状态改变）⇒ **逐位等价**（C7 digest `(574887, 11266.746993)` 不动，自审 218 例基线未漂）；回滚点 = 该配置字段 |
+| **构造期 fail-loud（前置 + 互斥表）** | 🔴 前置：`arbitration` 需 `smell.channels ⊇ {food,risk,kin}`（salience 输入；缺则 `NotImplementedError`）。🔴 互斥（同开 ⇒ 仲裁**静默吞掉其一**，R148-1 家族 ⇒ 一律硬报错）：`info_structure.enabled ∧ (softmax_tau>0 ∨ perception_noise>0 ∨ reputation_weight>0)`、`memory_gradient="orientation"`、`memory_v2`、`l1_seek\|l1_fear`、`l2_dash`、`perception_span=2`、`cell_occupancy_cap_enabled`、`migration.enabled`、`ars.enabled`、`wound_enabled ∧ w_fear_health>0`、`smell.use_in_move` |
+| **批 A 红线（规格 §3.3）** | ① **信号不进模式**（既不进显著度、也不进模式内目标 ⇒ 批 A 信号→移动整段断开）；② **HM ② 在仲裁档下关闭**（`_hm2_on = _hm_on ∧ ¬_asm_on`）——由 `w_hunger` 承担，避免双重调制；③ `×(1+fear_gene)` 乘子与"阈值/权重走基因位（8 位）"**均留批 B** |
+| **产物可自证字段**（C9） | `switches`（a4）：`asm_mode` / `asm_base_explore` / `asm_hyst` / `asm_hold_ticks` / `asm_w_feed` / `asm_w_hunger` / `asm_w_flee` / `asm_w_join` / `smell_channels`；`result.asm`（读数块）：`sw_n` / `hold_block_n` / `mode_n` / `mode_share`（**fusion 档 ⇒ `null` = 未适用，不是 0**，R120 口径） |
+| **帧额（tick 面额）** | `hold_ticks` = **DURATION**（tick 计数 ⇒ 时间压缩 ÷k）；`hyst` / `base_explore` / `w_*` 无量纲 ⇒ INVARIANT；已登记 `tools/tick_denomination_audit.py`（关档位 `mode` 亦登记） |
+| **纪律** | 🔴 **禁跨纪元比较**（fusion vs arbitration 是构造级行为差）；🔴 **一次只开一件**（规格 §〇）：仲裁与同表机制**不得同批混跑**（同开由构造期守卫拦）；🔴 批 A 判据不得引用信号耦合类读数 |
+| **⚠️ 需重建 `sim_core`（R199 环境约束）** | `movement.rs`/`lib.rs` 有真实改动并新增 5 个 pyo3 参数 ⇒ 未重建的环境 `use_sim_core=True` 会**走旧语义/签名不符** ⇒ **必须 maturin 重编**（本机 ✅；产物不入库，教训⑰） |
+| **状态（2026-09-29，轻舟）** | ✅ **实施 + 测试落地（等验收）**（分支 `dev/qingzhou-asm`，**未合 main**）：`tests/test_action_selection.py` **34/34**（迟滞/严格边界/锁定/dithering 反例/排他性/变异检查逐通道/双路径/快路径 lockstep/快照/出生-死亡登记/fail-loud 11 例/配置四件套）；C7 自审 252 例基线未动（退出码 0）；a4 接线（8 个 `--asm-*` + `--smell-channels` + 续跑对账 + C4 读回 + `result.asm`）；配对实测（`experiments/asm_perf_probe.py --ticks 150 --reps 3 --freeze-repro`，480×960，N 2921→624/734，`[实测]`本机）：**py Δ 中位 +1.78 ms/tick**（+5.7%..+7.0%）｜**rust Δ 中位 +1.75 ms/tick**（+5.3%..+9.0%）〔Δ 含 N 轨迹差异，非纯机制税；纯前置段 `_asm_update_modes` ≈0.40 ms/tick @N≈2.9k〕｜互斥守卫 3 处 `getattr` 兜底按 **R208 §三/R213 §六** 对齐 config 默认（`config_fallback_audit` 8/8 绿） |
+
 ## 十四、🔴 云端双角色分工与实验请求流程（2026-09-22 立，fish 裁定）
 
 > **背景**：本项目进入"结构改造 + 短实验"高频迭代期（R152–R157）。为把机时与开发解耦，fish 裁定：

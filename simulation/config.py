@@ -1027,6 +1027,77 @@ class HungerModConfig:
 
 
 @dataclass
+class ActionSelectionConfig:
+    """模式仲裁（ASM，R238/R239；实施规格 `docs/设计文档/实施规格-移动决策三件-20260928.md` §三）。
+
+    机制（三处同式；默认 `"fusion"` ⇒ 与本机制加入前**逐位等价**）
+    ------------------------------------------------------------
+    现状 = **加权融合**：`score = perc·(0.5·food_ratio + sig·w) + soc·density + …`，
+    所有动机**同时**进入一个标量、彼此线性抵消（"食物近、风险更近"时可能既不敢去也不逃）。
+    仲裁档改为**先选模式、再在模式内行动**：
+
+        sal_feed    = w_feed·Ŝ_food + w_hunger·hunger     # Ŝ = 气味通道归一值（[0,1]）
+        sal_flee    = w_flee·Ŝ_risk                        # ⚠️ 设计稿的 (1+g_fear) 乘子留批 B（无空闲基因位）
+        sal_join    = w_join·Ŝ_kin·(2·g13 − 1)             # g13 = SOCIABILITY（既有基因）
+        sal_explore = base_explore
+        ② 若 tick − _mode_tick < hold_ticks            ⇒ 保持 _mode（最小锁定，防抖动）
+           否则若 max(sal) > sal[_mode] + hyst        ⇒ _mode = argmax(sal); _mode_tick = tick
+        ③ 模式内选邻居（三处同式）：
+           feed → argmax Ŝ_food(nb)｜flee → argmin Ŝ_risk(nb)
+           join → argmax (Ŝ_kin(nb) + 密度项)｜explore → 随机（平局分支 ⇒ rand_choice mod n）
+
+    🔴 首批红线（规格 §3.3/§3.5）
+    ----------------------------
+    * **信号不接模式**（否则"一喊全跑"抹平信息不对称）—— 留 S3/C3 批；
+    * **HM 的 ②（感知权重调制）在仲裁档下关闭**（由 `w_hunger` 承担，避免双重调制）；
+      HM ①（走停调制）照常生效（modulation 发生在仲裁**之前**的走停闸）；
+    * **不新增基因位**（6 个预留位已耗尽 ⇒ 扩位 = 更大纪元；设计稿"批 B 走基因位"）：
+      `w_*` / `hyst` / `hold_ticks` 本批全是**固定参数**；
+    * **不做"优先级靠人定"的排序**：模式间**只比显著度**，不写死模式优先级。
+
+    🔴 前置条件（引擎构造期 fail-loud，`sphere_engine.__init__` 的 ASM 守卫块）
+    ------------------------------------------------------------------------
+    * 仲裁需要 `Ŝ_food / Ŝ_risk / Ŝ_kin` ⇒ **`smell.channels ⊇ {food, risk, kin}`**
+      （缺则炸，不许静默降级成融合）；
+    * 仲裁档下与下列机制**互斥**（它们都改"融合 score"或选格语义，同开会静默吞掉其一）：
+      softmax / 感知噪声 / 记忆梯度 orientation / 记忆 v2 / L1 寻食-避害 / L2 dash /
+      span2 / 占位上限 / 迁徙 / ARS / 声誉权重 / 伤血恐惧 / `smell.use_in_move`。
+
+    ⚠️ 新增两状态数组（`_mode` / `_mode_tick`）⇒ 四处登记 + 快照（规格 §3.2）。
+    ⚠️ 实施纪律（规格 §〇）：HM / 气味消费端 / ASM **一次只开一件**（都改移动决策）。
+
+    🔴 参数三级标注（AGENT.md §12.10）：`mode` = 总开关（默认 fusion = 回滚点）；
+    `base_explore / hyst / hold_ticks / w_feed / w_hunger / w_flee / w_join` = **KNOB**（可独立调）。
+    """
+
+    mode: str = "fusion"        # 🔴 默认 fusion = 现状（回滚点）；"arbitration" = 仲裁档
+    base_explore: float = 0.2   # KNOB｜探索模式保底显著度（= 探索的时间占比下限倾向）
+    hyst: float = 0.15          # KNOB｜迟滞（进入阈值 − 退出阈值；越大越迟钝）
+    hold_ticks: int = 20        # KNOB｜最小锁定（防 dithering，规格 §3.4-4 头号风险）
+    w_feed: float = 1.0         # KNOB｜sal_feed 的气味项权重
+    w_hunger: float = 0.5       # KNOB｜sal_feed 的饥饿项权重（HM ② 的替代通道）
+    w_flee: float = 1.0         # KNOB｜sal_flee 权重
+    w_join: float = 0.5         # KNOB｜sal_join 权重
+
+    _KNOWN_MODES = ("fusion", "arbitration")
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.mode, str) and self.mode in self._KNOWN_MODES, (
+            f"action_selection.mode={self.mode!r} 未实现（只实现 {self._KNOWN_MODES}）"
+            f" —— 拼错的模式**必须炸**，不许静默退回 fusion")
+        assert 0.0 <= self.base_explore <= 10.0, "base_explore ∈ [0, 10]"
+        assert 0.0 <= self.hyst <= 10.0, "hyst ∈ [0, 10]（0 = 无迟滞，仅供变异测试）"
+        assert isinstance(self.hold_ticks, int) and self.hold_ticks >= 0, (
+            "hold_ticks 必须是 ≥0 的整数（0 = 无锁定，仅供变异测试）")
+        for nm in ("w_feed", "w_hunger", "w_flee", "w_join"):
+            v = float(getattr(self, nm))
+            # `v == v` 挡 NaN（config.py 不依赖 numpy ⇒ 不用 isnan）
+            assert v == v and 0.0 <= v <= 10.0, (
+                f"{nm}={v} 非法（需有限且 ∈ [0,10]；符号语义由模式内 argmax/argmin 决定，"
+                f"不许负权重制造二义）")
+
+
+@dataclass
 class MigrationConfig:
     """日历—罗盘式定向迁徙（13.8；fish 2026-09-25 批准 / 设计稿 `docs/设计文档/设计-日历罗盘式定向迁徙-20260925.md`）。
 
@@ -1337,6 +1408,10 @@ _SUBPOS_FIELDS: frozenset = frozenset(f.name for f in fields(SubposConfig))
 _HUNGER_MOD_FIELDS: frozenset = frozenset(f.name for f in fields(HungerModConfig))
 #: R240 T8 气味场配置白名单（同规格；T8 之前的存档无 `smell` 键 ⇒ 回退默认 = 全关）。
 _SMELL_FIELDS: frozenset = frozenset(f.name for f in fields(SmellConfig))
+#: R238/R239 模式仲裁白名单（同规格；ASM 之前的存档无 `action_selection` 键 ⇒ 回退 fusion）。
+_ACTION_SELECTION_FIELDS: frozenset = frozenset(
+    f.name for f in fields(ActionSelectionConfig)
+)
 
 
 @dataclass
@@ -1379,6 +1454,10 @@ class SimConfig:
     #   实施规格：`docs/设计文档/实施规格-移动决策三件-20260928.md` §一（已冻结）。
     #   挂进 SimConfig ⇒ 经 `asdict` **自动进指纹**（跨档续跑被拦，同 `subpos`）。
     hunger_mod: HungerModConfig = field(default_factory=HungerModConfig)
+    # ---- R238/R239 模式仲裁（ASM；默认 `mode="fusion"` = 现状**逐位等价**）----
+    #   实施规格：同文件 §三（已冻结）。依赖 `smell.channels` 含 food/risk/kin
+    #   （缺 ⇒ 引擎构造期 fail-loud，不许静默降级）。
+    action_selection: ActionSelectionConfig = field(default_factory=ActionSelectionConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -1531,6 +1610,15 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("smell") or {}).items()
                     if k in _SMELL_FIELDS
+                }
+            ),
+            # R238/R239 模式仲裁；旧存档缺失 ⇒ 回退默认（mode="fusion" = 现状逐位等价）。
+            #   同款字段白名单过滤（向后兼容：ASM 之前的存档无 `action_selection` 键）。
+            action_selection=ActionSelectionConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("action_selection") or {}).items()
+                    if k in _ACTION_SELECTION_FIELDS
                 }
             ),
         )

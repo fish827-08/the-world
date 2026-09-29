@@ -39,6 +39,9 @@ use crate::genes::{G_PERCEPTION, G_SOCIABILITY};
 /// - `hm_beta`: HM ② 强度（仅 `h_norm` 非空时消费）
 /// - `smell_use`: R244 §二气味场消费开关（0=关 ⇒ 不读 `smell_score`）
 /// - `smell_score`: (n_cells,) 气味综合得分（仅 `smell_use != 0` 时索引）
+/// - `asm_on`: R239 ASM 模式仲裁开关（0=关 ⇒ 全段不执行，后四者不读）
+/// - `asm_mode`: (N,) 本 tick 的个体模式（仅 `asm_on != 0` 时索引）
+/// - `asm_sf` / `asm_sr` / `asm_sk`: (n_cells,) 食物/风险/亲缘通道归一值（同前）
 #[allow(clippy::too_many_arguments)]
 pub fn step_movement(
     flat: &mut [i64],
@@ -69,6 +72,12 @@ pub fn step_movement(
     // R244 §二：气味场消费端（`smell_use=0` ⇒ 不读 `smell_score`）
     smell_use: u8,
     smell_score: &[f64],
+    // R239 ASM：模式仲裁（`asm_on=0` ⇒ 不读后四者；关档占位长度为 0/1 亦安全）
+    asm_on: u8,
+    asm_mode: &[i8],
+    asm_sf: &[f64],
+    asm_sr: &[f64],
+    asm_sk: &[f64],
 ) {
     let n = flat.len();
     if n == 0 || move_inds.is_empty() {
@@ -114,9 +123,25 @@ pub fn step_movement(
             }
             valid_nb.push(nbc as i64);
 
-            // 基础得分：感知×(食物×0.5 + 信号×0.5×信任) + 群居×密度
-            let mut s = perc * (food_ratio[nbc] * 0.5 + sig_present[nbc] * 0.5 * trust_val)
-                + soc * densities[nbc];
+            // R239 ASM：仲裁档 ⇒ 基础得分**整段替换**为模式内目标函数（与 Python
+            //   参考循环/向量化**同式**）：
+            //     feed(0)    → Ŝ_food(nb)
+            //     flee(1)    → −Ŝ_risk(nb)（即模式内 argmin Ŝ_risk）
+            //     join(2)    → Ŝ_kin(nb) + 密度项（密度项与融合档**同一数组**）
+            //     explore(3) → 0（全零 ⇒ 平局 ⇒ 随机分支，与 Python 一致）
+            //   仲裁档下记忆/信号/气味/噪声等**全部不进 score**（构造期互斥守卫已挡）
+            let mut s = if asm_on != 0 {
+                match asm_mode[idx] {
+                    0 => asm_sf[nbc],
+                    1 => -asm_sr[nbc],
+                    2 => asm_sk[nbc] + densities[nbc],
+                    _ => 0.0,
+                }
+            } else {
+                // 基础得分：感知×(食物×0.5 + 信号×0.5×信任) + 群居×密度
+                perc * (food_ratio[nbc] * 0.5 + sig_present[nbc] * 0.5 * trust_val)
+                    + soc * densities[nbc]
+            };
 
             // 工作记忆（A′，2026-09-19）：
             //   mode = 0（none）⇒ **原式**：记忆格 == 该邻居格 ⇒ +gain·perc（行为不变）
@@ -127,7 +152,7 @@ pub fn step_movement(
             //       cos 用 `(u·v)/(|u||v|)` 的**同一展开**；经度环绕用 `rem_euclid`
             //       （≡ Python 对正除数取模）⇒ 保双路径逐位一致。
             let wm_base = idx * 4;
-            if mem_grad_mode == 0 {
+            if asm_on == 0 && mem_grad_mode == 0 {
                 for w in 0..4 {
                     let mc = work_memory[wm_base + w];
                     if mc >= 0 && mc as usize == nbc {
@@ -135,7 +160,7 @@ pub fn step_movement(
                         break;
                     }
                 }
-            } else {
+            } else if asm_on == 0 {
                 let cur = flat[idx] as usize;
                 let cr = (cur / n_cols) as f64;
                 let cc = (cur % n_cols) as f64;
@@ -177,8 +202,9 @@ pub fn step_movement(
             }
 
             // 信号解读表：邻格有信号时，个体对该模式的解读影响得分
+            //   R239 ASM：仲裁档**首批不接信号**（规格 §3.3 红线）⇒ 整段跳过
             let mark = signal_marks[nbc] as usize;
-            if mark > 0 {
+            if asm_on == 0 && mark > 0 {
                 let interp_val = interpret[idx * 16 + mark];
                 s += 0.4 * perc * interp_val;
             }

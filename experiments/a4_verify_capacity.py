@@ -46,6 +46,7 @@ from simulation.config import (  # noqa: E402
     CALIBRATION_M_RANGE,
     SIGNAL_ALPHABET_IMPLEMENTED,
     SIGNAL_ALPHABET_STATES,
+    ActionSelectionConfig,
     CorpseWoundConfig,
     HungerModConfig,
     InfoStructureConfig,
@@ -419,7 +420,17 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           hunger_mod_enabled: bool = False,
           hunger_alpha: float = 0.5, hunger_beta: float = 0.5,
           hunger_h_mid: float = 0.5,
-          hunger_stay_gain: float = 0.0) -> SphereEngine:
+          hunger_stay_gain: float = 0.0,
+          # 🔴 R239/R258 ASM 模式仲裁（**默认 fusion = 现状逐位等价**）
+          #   `arbitration` 需 `smell.channels ⊇ {food,risk,kin}`（引擎构造期 fail-loud）；
+          #   与 L1/L2/HM ②/v2/迁徙/ARS/softmax/噪声/占位上限等**互斥**（同由引擎拦）。
+          asm_mode: str = "fusion",
+          asm_base_explore: float = 0.2, asm_hyst: float = 0.15,
+          asm_hold_ticks: int = 20,
+          asm_w_feed: float = 1.0, asm_w_hunger: float = 0.5,
+          asm_w_flee: float = 1.0, asm_w_join: float = 0.5,
+          # 🔴 R240 T8 气味场通道（空 = 关 ⇒ 旧行为逐位等价）
+          smell_channels: str = "") -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
@@ -488,6 +499,26 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
         h_mid=float(hunger_h_mid),
         stay_gain=float(hunger_stay_gain),
     )
+    # 🔴 R239/R258 ASM 模式仲裁 —— 默认 `fusion` ⇒ 移动段走原融合式 ⇒ 逐位等价（C7）。
+    #   `arbitration` 的**前置条件**（气味通道 food/risk/kin）与**互斥表**由引擎构造期
+    #   fail-loud 拦（本处不重复判：少一处逻辑 = 少一个不一致的机会，同 13.8 口径）。
+    #   ⚠️ 时间压缩（k）下 `hold_ticks` 是 DURATION（÷k），其余权重无量纲（tick 面额清点见
+    #   `tools/tick_denomination_audit.py`）。
+    c.action_selection = ActionSelectionConfig(
+        mode=str(asm_mode),
+        base_explore=float(asm_base_explore),
+        hyst=float(asm_hyst),
+        hold_ticks=int(asm_hold_ticks),
+        w_feed=float(asm_w_feed),
+        w_hunger=float(asm_w_hunger),
+        w_flee=float(asm_w_flee),
+        w_join=float(asm_w_join),
+    )
+    # 🔴 R240 T8 气味场（默认空元组 = 全关 ⇒ 不建场、不消费 ⇒ 逐位等价）。
+    #   仲裁档的 salience 输入 = Ŝ_food/Ŝ_risk/Ŝ_kin ⇒ 臂配置里必须显式给三通道。
+    if str(smell_channels).strip():
+        c.smell.channels = tuple(
+            s.strip() for s in str(smell_channels).split(",") if s.strip())
     # R146/R149 L1/L2（R150 B1/B2）：**默认全关 ⇒ 旧行为**（H1 逐位等价，C7 已钉死）
     c.simulation.l1_seek = bool(l1_seek)
     c.simulation.l1_fear = bool(l1_fear)
@@ -997,6 +1028,33 @@ def main() -> None:
     ap.add_argument("--hunger-stay-gain", dest="hunger_stay_gain", type=float,
                     default=0.0,
                     help="（预留：当前未接线）subpos 驻留调制 —— 仅进指纹/读回")
+    # ── 🔴 R239/R258 ASM 模式仲裁 —— 默认 fusion = 旧行为逐位等价 ──
+    #   仲裁档需 smell.channels ⊇ {food,risk,kin}（引擎构造期 fail-loud）；
+    #   与 L1/L2/HM②/v2/迁徙/ARS/softmax/噪声/占位上限/视野2/smell.use_in_move 互斥。
+    ap.add_argument("--asm-mode", dest="asm_mode", default="fusion",
+                    choices=("fusion", "arbitration"),
+                    help="模式仲裁档（规格 §三）：fusion=融合 score（默认，旧行为）；"
+                         "arbitration=WTA 仲裁（显著度 Ŝ_food/Ŝ_risk/Ŝ_kin + 滞回 + 最小锁定）")
+    ap.add_argument("--asm-base-explore", dest="asm_base_explore", type=float, default=0.2,
+                    help="explore 模式基础显著度（规格 §三；仅 arbitration 档生效）")
+    ap.add_argument("--asm-hyst", dest="asm_hyst", type=float, default=0.15,
+                    help="切换滞回阈值：best 需超当前模式显著度该值才换（严格 >）")
+    ap.add_argument("--asm-hold-ticks", dest="asm_hold_ticks", type=int, default=20,
+                    help="最小锁定 tick 数（时间量纲 ⇒ 时间压缩下 ÷k）")
+    ap.add_argument("--asm-w-feed", dest="asm_w_feed", type=float, default=1.0,
+                    help="feed 显著度权重（Ŝ_food × 该值 + w_hunger×hunger）")
+    ap.add_argument("--asm-w-hunger", dest="asm_w_hunger", type=float, default=0.5,
+                    help="饥饿项权重（HM ② 在仲裁档由本权重接管；两档不叠加）")
+    ap.add_argument("--asm-w-flee", dest="asm_w_flee", type=float, default=1.0,
+                    help="flee 显著度权重（Ŝ_risk × 该值）")
+    ap.add_argument("--asm-w-join", dest="asm_w_join", type=float, default=0.5,
+                    help="join 显著度权重（(Ŝ_kin + density) × 该值）")
+    # ── 🔴 R240 T8 气味场通道（空 = 关 ⇒ 旧行为逐位等价）──
+    ap.add_argument("--smell-channels", dest="smell_channels", default=None,
+                    help="逗号分隔的气味通道（food,signal,kin,risk；空=关）。"
+                         "ASM 仲裁档需含 food,risk,kin 三通道。"
+                         "⚠️ 默认 None（未传）≠ 空串：续跑时只有**显式传了**才与快照对账"
+                         "（distribution 同款；未传 = 沿用快照自带）")
     args = ap.parse_args()
     # ── 🔴 13.8 工具侧 fail-loud（设计稿 §3.5 的 M2 前置版）────────────────────
     # 引擎侧 M2 已拦"enabled ∧ 无季节"，但**工具侧也要拦**：否则命令行给
@@ -1057,6 +1115,26 @@ def main() -> None:
         start_tick = int(e._tick)
         resumed = start_tick > 0
     else:
+        # ── 🔴 R239/R258 ASM 工具侧 fail-loud（新建档；续跑由快照自带配置 + 上方对账表拦）──
+        #   引擎构造期本来就硬报错（互斥表/前置通道），但报错文本是引擎口径 ⇒ 运维不知道
+        #   该改哪个命令行开关。这里先拦，直接给出可执行的修法（同 13.8 M2 前置版口径）。
+        if str(args.asm_mode) == "arbitration":
+            _miss_ch = [
+                _c for _c in ("food", "risk", "kin")
+                if _c not in [s.strip() for s in
+                              str(args.smell_channels or "").split(",") if s.strip()]
+            ]
+            if _miss_ch:
+                ap.error(
+                    f"--asm-mode arbitration 需要 --smell-channels 含 {_miss_ch}："
+                    "salience 输入 = Ŝ_food/Ŝ_risk/Ŝ_kin（缺则引擎构造期硬报错）"
+                )
+            if str(args.mode) != "off":
+                ap.error(
+                    "--asm-mode arbitration 需 --mode off：仲裁的模式目标整段替换融合 "
+                    "score，而 `--mode on` 下 D2 的 softmax_tau/感知噪声（config 默认 >0）"
+                    "会与它同开互斥（引擎构造期硬报错；`--mode off` = 全感知/无噪声/argmax 档）"
+                )
         e = build(args.mode, bool(args.codebook), args.seed, args.ticks,
                   max_count=args.max_count, neutral=neutral,
                   sig_disabled=sig_disabled, oracle=oracle_on, measure=measure,
@@ -1101,6 +1179,17 @@ def main() -> None:
                   hunger_beta=float(args.hunger_beta),
                   hunger_h_mid=float(args.hunger_h_mid),
                   hunger_stay_gain=float(args.hunger_stay_gain),
+                  # 🔴 R239/R258 ASM 模式仲裁（默认 fusion ⇒ 逐位等价；前置/互斥由引擎拦）
+                  asm_mode=str(args.asm_mode),
+                  asm_base_explore=float(args.asm_base_explore),
+                  asm_hyst=float(args.asm_hyst),
+                  asm_hold_ticks=int(args.asm_hold_ticks),
+                  asm_w_feed=float(args.asm_w_feed),
+                  asm_w_hunger=float(args.asm_w_hunger),
+                  asm_w_flee=float(args.asm_w_flee),
+                  asm_w_join=float(args.asm_w_join),
+                  # 🔴 R240 T8 气味通道（空 = 关；仲裁档需含 food,risk,kin）
+                  smell_channels=str(args.smell_channels or ""),
                   stomach_cap_mass=args.stomach_cap_mass,
                   eat_threshold_frac=args.eat_threshold_frac,
                   starve_frac=args.starve_frac,
@@ -1231,11 +1320,28 @@ def main() -> None:
             # R247：饥饿调制开关同为**臂身份**（hm_on / hm_off 的唯一差别）
             ("hunger_mod_enabled", bool(args.hunger_mod_enabled),
              bool(e.config.hunger_mod.enabled)),
+            # R239/R258：ASM 模式档同为**臂身份**（asm_arb / asm_fusion 的唯一差别）。
+            #   ⚠️ 默认 "fusion" ⇒ 续跑 arbitration 档时**必须重传 --asm-mode arbitration**，
+            #   否则此处硬失败（防段二不知情降回 fusion；F-R21/C5 家族）。
+            ("action_selection.mode", str(args.asm_mode),
+             str(e.config.action_selection.mode)),
         ):
             if _cli != _snap:
                 raise SystemExit(
                     f"{_k} 冲突：命令行 {_cli} vs 快照 {_snap} —— 臂身份不得静默混用"
                     "（段二续跑必须与段一同臂）"
+                )
+        # 🔴 R240 T8：气味通道是 arbitration 档的**前置**（salience 输入 = Ŝ_food/Ŝ_risk/Ŝ_kin）
+        #   ⇒ 显式传了才与快照对账（未传 = 沿用快照自带；distribution 同款口径）。
+        #   显式传而不同 ⇒ 硬失败：否则"想换通道"的意图会被 load_snapshot(config=None) 静默吞掉。
+        if args.smell_channels is not None:
+            _cli_ch = tuple(
+                s.strip() for s in str(args.smell_channels).split(",") if s.strip())
+            _snap_ch = tuple(e.config.smell.channels)
+            if _cli_ch != _snap_ch:
+                raise SystemExit(
+                    f"smell_channels 冲突：命令行 {_cli_ch} vs 快照 {_snap_ch} —— "
+                    "气味通道是 arbitration 档的 salience 输入（前置），不得静默混用"
                 )
         if int(args.perception_span) != int(e.config.simulation.perception_span):
             raise SystemExit(
@@ -1582,6 +1688,19 @@ def main() -> None:
             "hunger_beta": float(e.config.hunger_mod.beta),
             "hunger_h_mid": float(e.config.hunger_mod.h_mid),
             "hunger_stay_gain": float(e.config.hunger_mod.stay_gain),
+            # ---- 🔴 R239/R258 ASM 模式仲裁（C4 读回；臂身份 = `action_selection.mode`）----
+            # 关档（fusion）= 旧行为 ⇒ 这些键仍是"默认值读回"，不叫"未适用"（同 HM 口径）。
+            "asm_mode": str(e.config.action_selection.mode),
+            "asm_base_explore": float(e.config.action_selection.base_explore),
+            "asm_hyst": float(e.config.action_selection.hyst),
+            "asm_hold_ticks": int(e.config.action_selection.hold_ticks),
+            "asm_w_feed": float(e.config.action_selection.w_feed),
+            "asm_w_hunger": float(e.config.action_selection.w_hunger),
+            "asm_w_flee": float(e.config.action_selection.w_flee),
+            "asm_w_join": float(e.config.action_selection.w_join),
+            # 🔴 R240 T8（2026-09-28 补接）：气味通道 = arbitration 档 salience 的**前置**
+            #    ⇒ 必须可从产物自证（C4）；缺席 ⇒ 外复核无法判"Ŝ 三通道是否真在跑"。
+            "smell_channels": [str(s) for s in e.config.smell.channels],
             # 🔴 R247：`HungerModConfig` 经 asdict 进 fingerprint ⇒ 快照/续跑配置指纹
             #    已含 HM；续跑混臂由上方 switches 冲突表拦（同 13.4 家族）。
             # 🔴 P7：基因位号必须自证（= 23）—— 位号错位是"接了却没接对"的隐形来源
@@ -1733,6 +1852,9 @@ def main() -> None:
             # 🔴 13.8：日历—罗盘式定向迁徙读数（**关档 ⇒ None = 未适用**，R120 口径）。
             #    含反退化占比 mig_flat_frac（R148-1）与量级 mig_term_abs_mean（P6）。
             "migration": e.migration_probe(),
+            # 🔴 R239/R258：模式仲裁读数（**关档 ⇒ None = 未适用**，R120 口径）。
+            #    含 sw_n/hold_block_n（dithering 红线主读数）与四模式占比。
+            "asm": e.asm_probe(),
             "bounds": e.state_bounds_check(),
             # S1 骨架（设计稿 §5.2 项 9）：尸体—食腐 + 血条读数块（**空壳**，值可为 0）
             "corpse": e.corpse_probe(),

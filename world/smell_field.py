@@ -257,6 +257,27 @@ class SmellField:
         self._ms_read += (time.perf_counter() - t0) * 1e3
         return out
 
+    def channel_norm(self, cells: "int | NDArray[np.int64]",
+                     channel: str) -> NDArray[np.float64]:
+        """**单通道**归一化读：`clip((S_ch + 插值)/S_max_ch, 0, 1)`（读路径；只算被读格）。
+
+        R239 ASM（模式仲裁）的 salience / 模式内选格用（实施规格 §三 3.3）。与
+        `combined()` **同式同序**（先 `+` 插值、再 `/= s_max`、后 clip），只是单通道、不带权重。
+        截断计数并入 `_clip_n`（`probe()["hat_clip_n"]`；不静默）。
+        """
+        ci = self._idx.get(channel)
+        assert ci is not None, (
+            f"未启用通道 {channel!r}（本档启用：{self.channels}）—— 拼错通道必须炸，不许静默")
+        t0 = time.perf_counter()
+        arr = np.asarray(cells, dtype=np.int64)
+        hat = self._S[ci][arr] + self._interp_cells(ci, arr)
+        hat /= self.s_max(channel)
+        self._clip_n += int(np.count_nonzero(hat > 1.0))
+        out = np.clip(hat, 0.0, 1.0)
+        self._reads_n += int(np.size(arr))
+        self._ms_read += (time.perf_counter() - t0) * 1e3
+        return out
+
     # ---- R244 §二：消费端读接口（解析上界归一化 + 加权组合）--------------------
 
     def s_max(self, channel: str) -> float:

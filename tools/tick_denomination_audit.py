@@ -213,6 +213,15 @@ KNOWN: dict[str, str] = {
     "hunger_mod.alpha": INVARIANT,
     "hunger_mod.beta": INVARIANT,
     "hunger_mod.h_mid": INVARIANT,
+    # ---- R239 ASM 模式仲裁（`sir`）：显著度权重/阈值无量纲；`hold_ticks` 是 tick 时长 ----
+    "action_selection.base_explore": INVARIANT,   # 探索保底显著度（无量纲，与 Ŝ∈[0,1] 同量纲）
+    "action_selection.hyst": INVARIANT,           # 迟滞阈值（显著度差，无量纲）
+    "action_selection.w_feed": INVARIANT,         # 四模式权重（固定参数，批 B 才进基因位）
+    "action_selection.w_hunger": INVARIANT,
+    "action_selection.w_flee": INVARIANT,
+    "action_selection.w_join": INVARIANT,
+    "action_selection.hold_ticks": DURATION,      # 最小锁定（tick 计数）⇒ 时间压缩 ÷k
+    "action_selection.mode": INVARIANT,           # 模式开关（字符串）
     "ars.gain": INVARIANT,
     "ars.theta": INVARIANT,
     "ars.kappa": INVARIANT,
