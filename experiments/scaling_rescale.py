@@ -316,6 +316,19 @@ def rescale_config(cfg: Any, k: float | None = None) -> dict[str, Any]:
             if getattr(sub, name) < lo:
                 setattr(sub, name, int(lo) if isinstance(getattr(sub, name), int) else float(lo))
 
+    # 🔴 R265（2026-09-29，天平）：`smell.diffuse` 属 **×k RATE** ⇒ k=2.5 时 0.12→0.3，
+    #    超出五点拉普拉斯显式格式稳定域（≤0.25，`SmellConfig.__post_init__` 断言；
+    #    >0.25 数值振荡/发散）⇒ **clamp 到 0.25**（数值稳定性优先于缩放等效性；
+    #    气味传播速率比理论等效值慢 ~17%，批 A 判读须知；**云启复核语义**）。
+    #    事故实证：smoke 续跑 `from_dict` 被断言拦截（R259 冒烟失败根因，快照
+    #    config_dict 携带缩放后越界值）。语义正解（隐式格式/自适应 dt）留批 A 前评估。
+    _smell_sub = getattr(cfg, "smell", None)
+    if _smell_sub is not None:
+        _old_d = float(getattr(_smell_sub, "diffuse", 0.0))
+        if _old_d > 0.25:
+            _smell_sub.diffuse = 0.25
+            _sat.append(f"smell.diffuse ×k={k} ⇒ {_old_d:.3f} 超拉普拉斯稳定域 ⇒ clamp 0.25（R265）")
+
     if _sat:
         print("🔴 离散化饱和告警（速率过程每 tick 概率，K·p > 0.5）：", file=sys.stderr)
         for line in _sat:
