@@ -53,6 +53,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from simulation.sphere_engine import SphereEngine
 from simulation.genes import Gene            # R275 T2：g22 记忆权重基因统计
 from experiments.steady_k_probe import make_cfg, apply_post_build
+# 🔴 R278 §三 P3：装置预设档防呆（S2/S3 单一真源）
+from tools.device_presets import add_device_arg, resolve_device
 # 复用 S2 已验证的读数函数（斑块标注 / 饱和度 / L1-L2 分化）
 from experiments.s2_depletion_probe import (
     _label_patches, patch_saturation, l2_variance_decomposition, l0_rd_state,
@@ -355,7 +357,11 @@ def main():
     ap.add_argument("--append", action="store_true",
                     help="断点续跑：追加到已存在的 --out，跳过已完成的 (seed,arm)，"
                          "并先删未完成 run 的残行（默认关 = 覆盖写，向后兼容）")
+    # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
+    add_device_arg(ap)
     a = ap.parse_args()
+    # 防呆：把 --device 决议回写进 a，并回显"实际生效装置"整行（第三人眼校验）
+    resolve_device(a, sys.argv[1:], logger=lambda m: print(m, file=sys.stderr))
 
     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
     overlap = sorted(set(seeds) & SEEDS_USED)
