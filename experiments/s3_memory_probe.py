@@ -80,28 +80,70 @@ SEEDS_USED = set(range(42, 101))
 # ---------- R275 T2：g22（记忆权重基因）活体统计 ----------
 
 def _g22_stats(eng, N: int) -> dict:
-    """取活体 `eng._genes[:N, Gene.MEMORY_WEIGHT]` 的均值/分位（R275 S3.5 预注册 §探针改造）。
+    """取活体 `eng._genes[:N, Gene.MEMORY_WEIGHT]` 的均值/分位 + 按代分层（R280 S3.5b）。
 
     为什么用活体切片：`_genes` 的容量随种群浮动 ⇒ 只有前 N 行是活体（与 `eng._flat` 同序）。
     g22 仅被 memory_v2 路径消费（`sphere_engine.py:5374`，eff = cfg_gain × 2×g22）⇒
     在 mem_on 臂上若值被选择，应看到均值/分位漂移，mem_off 臂则为其漂变对照。
 
+    R280 增补：按代分层（gen0..gen3+）+ 最新一代（max_gen），排除"老一代 g22≈0.5 稀释新生代信号"。
+    核心指标 = g22_mean_latest − g22_mean_gen0。
+
     🔴 只读，不改任何行为；N=0（灭绝）⇒ 报 NaN 而非 0，避免与"基因全 0"混淆。
+    某代无个体 ⇒ 该代均值 NaN，pop_by_gen 对应位 = 0。
     """
+    _nan_cols = ("g22_mean_gen0", "g22_mean_gen1", "g22_mean_gen2",
+                 "g22_mean_gen3p", "g22_mean_latest")
+    _zero_cols = ("pop_gen0", "pop_gen1", "pop_gen2", "pop_gen3p", "max_gen")
     if N <= 0:
-        return {"g22_mean": float("nan"), "g22_p10": float("nan"),
-                "g22_p90": float("nan")}
+        out = {"g22_mean": float("nan"), "g22_p10": float("nan"),
+               "g22_p90": float("nan")}
+        for k in _nan_cols:
+            out[k] = float("nan")
+        for k in _zero_cols:
+            out[k] = 0
+        return out
     genes = getattr(eng, "_genes", None)
     if genes is None or genes.ndim != 2 or genes.shape[0] < N \
             or genes.shape[1] <= int(Gene.MEMORY_WEIGHT):
-        return {"g22_mean": float("nan"), "g22_p10": float("nan"),
-                "g22_p90": float("nan")}
+        out = {"g22_mean": float("nan"), "g22_p10": float("nan"),
+               "g22_p90": float("nan")}
+        for k in _nan_cols:
+            out[k] = float("nan")
+        for k in _zero_cols:
+            out[k] = 0
+        return out
     g22 = np.asarray(genes[:N, int(Gene.MEMORY_WEIGHT)], dtype=float)
-    return {
+    out = {
         "g22_mean": round(float(g22.mean()), 6),
         "g22_p10": round(float(np.percentile(g22, 10)), 6),
         "g22_p90": round(float(np.percentile(g22, 90)), 6),
     }
+    # ---- R280：按代分层 ----
+    gen_arr = getattr(eng, "_generation", None)
+    if gen_arr is not None and gen_arr.shape[0] >= N:
+        gens = np.asarray(gen_arr[:N], dtype=np.int64)
+        max_gen = int(gens.max()) if N > 0 else 0
+        out["max_gen"] = max_gen
+        for gi, key in enumerate(("gen0", "gen1", "gen2")):
+            mask = gens == gi
+            cnt = int(mask.sum())
+            out[f"pop_{key}"] = cnt
+            out[f"g22_mean_{key}"] = round(float(g22[mask].mean()), 6) if cnt > 0 else float("nan")
+        # gen3+ = 第3代及以上合并
+        mask3p = gens >= 3
+        cnt3p = int(mask3p.sum())
+        out["pop_gen3p"] = cnt3p
+        out["g22_mean_gen3p"] = round(float(g22[mask3p].mean()), 6) if cnt3p > 0 else float("nan")
+        # 最新一代（max_gen）
+        mask_latest = gens == max_gen
+        out["g22_mean_latest"] = round(float(g22[mask_latest].mean()), 6) if mask_latest.sum() > 0 else float("nan")
+    else:
+        for k in _nan_cols:
+            out[k] = float("nan")
+        for k in _zero_cols:
+            out[k] = 0
+    return out
 
 
 # ---------- v2：断点续跑辅助（R264） ----------
@@ -332,7 +374,11 @@ def main():
               "l1_visited_patch_n", "l1_visited_patch_frac",
               "l0_peak_dead", "l0_peak_rest",
               # ---- R275 T2：g22 活体统计（S3.5 记忆基因演化）----
-              "g22_mean", "g22_p10", "g22_p90"]
+              "g22_mean", "g22_p10", "g22_p90",
+              # ---- R280 S3.5b：按代分层 g22（排除老一代稀释）----
+              "g22_mean_gen0", "g22_mean_gen1", "g22_mean_gen2", "g22_mean_gen3p",
+              "g22_mean_latest", "pop_gen0", "pop_gen1", "pop_gen2", "pop_gen3p",
+              "max_gen"]
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     out_json = os.path.splitext(a.out)[0] + ".summary.json"
