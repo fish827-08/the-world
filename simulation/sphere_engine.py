@@ -634,6 +634,7 @@ class SphereEngine:
          "_ars_rerand_n",      # 失望重选方向次数
          # ---- P2② 移动决策整块向量化（本线 = [本地开发·性能线] 轻舟）------------
          "_batch_move_on",     # 快路径开关（默认 True；**对拍/调试可置 False** 走参考循环）
+         "_t1b_batched_n",     # T1b：累计走批量子集处理的移动个体数（可观测性；只增）
          # ---- R230 T-C：F-D2 修复（B′）--------------------------------------
          "_d2_rng",            # D2 感知噪声/Steels 配对的**每引擎独立** legacy RandomState
          # ---- R240 T8：气味场（本线 = [云端开发·云启]）----------------------------
@@ -1315,6 +1316,8 @@ class SphereEngine:
         # 🔴 **对拍/调试用**：置 False ⇒ 强制走原逐个体参考循环（逐位等价的可比基线）。
         # 非状态量 ⇒ 不进快照（load 后恒为 True）。
         self._batch_move_on = True
+        # T1b（R294）：批量子集累计计数（对拍/读数用；非状态量 ⇒ 不进快照）
+        self._t1b_batched_n = 0
 
         self._energy = np.full(
             n, config.organisms.initial_energy, dtype=np.float64
@@ -3989,7 +3992,33 @@ class SphereEngine:
                 _c_idx: list = []
                 _c_hdo: list = []
                 _c_hdn: list = []
-                for i, idx in enumerate(() if _batch_ok else mi):
+                # ── T1b（R294）：记忆 v2 移动段批量化（[本地开发·性能线] 轻舟）────────
+                # 适用面 = v2 ∧ 无记忆噪声 ∧ 个体级可选机制**全关** ∧ 标准行（2..rows-3）。
+                # 命中 ⇒ 该子集由 `_move_decide_v2_batch` 整块算完（targets + heading +
+                # T1 收集三元组）；参考循环只遍历未入选位置（极区/边界行仍是逐个体一般
+                # 路径 ⇒ 两处 cos 实现各自逐位不变）。任一异质机制开启 ⇒ 全量参考循环
+                # （不做半接线，A1 教训）。`self._batch_move_on` 同时是 T1b 的对拍开关。
+                _t1b_ok = (
+                    _mv2_on and _b_step and self._batch_move_on
+                    and not (_hm2_on or _asm_on or d2_asym or d2_noise or d2_softmax
+                             or _l1_on or _fearh_on or _smell_use_on or _wound_on
+                             or self._mig_on or self._ars_on or _cap_on
+                             or _span2_on or _l2_on)
+                )
+                _t1b_sel = None
+                if _t1b_ok:
+                    _t1b_sel = self._move_decide_v2_batch(
+                        mi, targets, rand_choice, food_ratio, sig_present,
+                        densities, rep_w, _c_idx, _c_hdo, _c_hdn)
+                # 参考循环迭代集：vanilla 快路径 ⇒ 空；T1b 命中 ⇒ 补集；否则全量。
+                if _batch_ok:
+                    _ref_iter = ()
+                elif _t1b_sel is not None:
+                    _ref_iter = np.flatnonzero(~_t1b_sel)
+                else:
+                    _ref_iter = range(len(mi))
+                for i in _ref_iter:
+                    idx = int(mi[i])
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
                     # ⚠️ 禁用 nb[:4]：8 邻列序以 [上左,上,上右,左] 打头，取"前4个"
                     # 实际只保留"北+西" → 个体永不能向南/东移动，种群被单向驱赶至极区、
@@ -5480,6 +5509,118 @@ class SphereEngine:
         scored = gains[None, :] * cosm * expd[None, :]
         out[okd] = scored.max(axis=1)
         return out
+
+    def _memory_egocentric_cos_batch(self, idx: np.ndarray, nb: np.ndarray,
+                                     hd_now: np.ndarray) -> np.ndarray:
+        """T1b：`_memory_egocentric_cos` 的批量等价（**标准行 8 邻专用**）。
+
+        `idx` = 入选个体下标（(Ms,)）；`nb` = `_nb_table[flat[idx]]`（标准行与
+        `neighbors()` 逐位一致，原型穷举/实测已验）；`hd_now` = 当前朝向（(Ms,)）。
+        返回 (Ms, 8) 打分，**每行与标量逐位相等**（`tests/test_t1b_batch_move.py`）。
+
+        🔴 与标量同式同 dtype 链：`(gains×cosm)×expd` 逐元素同序；无效槽置 −∞ 后
+        与有效槽一起取 max（数学等价，元素级 FP 不变）；无有效槽的行 ⟺ 标量提前
+        返回全 0（此处统一置 0，不参与后续 `>1e-9` 闸）。
+        ⚠️ 只允许标准行（2..rows-3）调用：其余行的方向非常量、或 nb≠8（极区），
+        须走标量 `_memory_egocentric_cos` 一般路径（调用方 `_t1b_ok` 闸保证）。
+        """
+        az = self._mem_az[idx]                                  # (Ms,4) int8
+        ticks = self._mem_tick[idx]                             # (Ms,4)
+        valid = (az >= 0) & ((self._tick - ticks) <= self._mem_ttl)
+        dirs = self._dirs8_const                                # (8,)
+        ang = np.where(
+            hd_now[:, None] >= 0,
+            (dirs[None, :].astype(np.int64) - hd_now[:, None]) % 8,
+            dirs[None, :].astype(np.int64),
+        )
+        qs = np.where(valid, az.astype(np.int64), 0)            # 空槽占位（随后置 −∞）
+        cosm = self._ars_cos[ang[:, :, None], qs[:, None, :]]   # (Ms,8,4)
+        deg = self._mem_degraded[idx]
+        dvals = self._mem_dist[idx].astype(np.float64)
+        gains = np.where(deg, self._mem_coarse_gain, self._mem_gain)
+        if self._mem_weight_gene:
+            # 13.11：个体记忆权重乘子（同标量：精/粗同乘）
+            gains = gains * (2.0 * self._genes[idx, Gene.MEMORY_WEIGHT])[:, None]
+        expd = np.where(deg, 1.0,
+                        np.exp(-np.clip(dvals, 0.0, 1e6) / self._mem_dist_scale))
+        scored = (gains[:, None, :] * cosm) * expd[:, None, :]
+        out = np.where(valid[:, None, :], scored, -np.inf).max(axis=2)
+        no_valid = ~valid.any(axis=1)
+        if no_valid.any():
+            out[no_valid] = 0.0
+        return out
+
+    def _move_decide_v2_batch(self, mi: np.ndarray, targets: np.ndarray,
+                              rand_choice: np.ndarray, food_ratio: np.ndarray,
+                              sig_present: np.ndarray, densities: np.ndarray,
+                              rep_w: float, c_idx: list, c_hdo: list,
+                              c_hdn: list) -> "np.ndarray | None":
+        """T1b：记忆 v2 移动段的批量实现（标准行子集；R294 裁实施）。
+
+        对 `mi` 中落在标准行（2..rows-3）的位置整块完成「打分+平局+argmax+heading
+        更新+T1 收集三元组」。返回**位置掩码**（相对 `mi`，bool (Nm,)）：True = 已由
+        本函数处理 ⇒ 参考循环跳过该位置；无入选行 ⇒ None（参考循环全量）。
+
+        🔴 顺序契约（原型逐位对拍通过；`tests/test_t1b_batch_move.py` 常驻）：
+        - 零 RNG：平局用循环前预生成的 `rand_choice`（`% 8` ≡ 标量 `% len(nb)`）；
+        - 所有 cos 读在**任何** `_heading`/`_mem_*` 写之前（先算后写）；行间互斥 ⇒
+          收集三元组与参考循环的先后顺序不影响 `_mem_v2_step_batch` 逐行结果；
+        - 逐元素同式同 dtype 链（`abs().max()>1e-9` 闸、`0.4*perc*interp` 次序）。
+        """
+        cols = int(self.world.cols)
+        rows = int(self.world.rows)
+        cells_all = self._flat[mi]
+        row_all = cells_all // cols
+        sel = (row_all >= 2) & (row_all <= rows - 3)
+        if not sel.any():
+            return None
+        pos = np.flatnonzero(sel)
+        self._t1b_batched_n += int(pos.size)
+        idx = mi[pos]
+        nb = self._nb_table[cells_all[pos]]                     # (Ms,8)
+        genes = self._genes
+        hd_arr = self._heading
+        hd_now = hd_arr[idx]
+        perc = genes[idx, Gene.PERCEPTION]
+        soc = (genes[idx, Gene.SOCIABILITY] - 0.5) * 2.0
+        fr = food_ratio[nb]
+        sp = sig_present[nb]
+        sw = self._trust[idx] * (0.5 + rep_w * self._trust[idx])
+        score = (perc[:, None] * (fr * 0.5 + sp * sw[:, None])
+                 + soc[:, None] * densities[nb])
+        # 记忆 v2 项（同标量：|g|max > 1e-9 才加）
+        g = self._memory_egocentric_cos_batch(idx, nb, hd_now)
+        g_add = np.abs(g).max(axis=1) > 1e-9
+        if g_add.any():
+            score[g_add] += perc[g_add][:, None] * g[g_add]
+        # 信号解读项（同标量：0.4 × perc × interp，逐候选）
+        nb_sigs = self.signals._marks[nb]
+        has_sig = (nb_sigs > 0).any(axis=1)
+        if has_sig.any():
+            interp = np.zeros_like(score)
+            nz = nb_sigs > 0
+            interp[nz] = self._interpret[
+                np.broadcast_to(idx[:, None], nb_sigs.shape)[nz], nb_sigs[nz]]
+            score[has_sig] += 0.4 * perc[has_sig][:, None] * interp[has_sig]
+        # 平局/argmax（同标量：max−min < 1e-9 ⇒ rand_choice；否则首个 argmax）
+        tie = (score.max(axis=1) - score.min(axis=1)) < 1e-9
+        tgt = nb[np.arange(pos.size), np.argmax(score, axis=1)]
+        if tie.any():
+            tp = np.flatnonzero(tie)
+            tgt[tp] = nb[tp, rand_choice[pos[tp]] % 8]
+        targets[pos] = tgt
+        # heading 更新 + T1 收集（同标量：唯一命中才更新；`_b_step` 由闸保证恒真）
+        eq = nb == tgt[:, None]
+        uniq = eq.sum(axis=1) == 1
+        if uniq.any():
+            up = np.flatnonzero(uniq)
+            hd_new = np.argmax(eq, axis=1)
+            hd_old = hd_arr[idx[up]].copy()
+            hd_arr[idx[up]] = hd_new[up]
+            c_idx.extend(idx[up].tolist())
+            c_hdo.extend(hd_old.tolist())
+            c_hdn.extend(hd_new[up].tolist())
+        return sel
 
     # ------------------------------------------------ A′ 记忆**朝向梯度**（2026-09-19）
     def _memory_orientation_cos(self, cur: int, nb: np.ndarray,
