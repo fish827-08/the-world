@@ -177,6 +177,18 @@ class ResourceDynamics:
         # 否则 `note_tick` 与 `rotate` 分属两段时会出现"加成悬空"的中间态）
         self._demoted = np.zeros(self.n_cells, dtype=bool)
 
+        # 🔴 A2（轻舟 2026-09-30）：容量缓存 + 掩码版本号（缓存失效依据）。
+        #   `_cap_cache` 非状态量 ⇒ 不进快照；load 后由引擎调 `invalidate_capacity()` 复位。
+        #   `_mask_ver` 每次掩码写 +1（唯一失效通道：掩码变 ⇒ 容量变）。
+        self._cap_cache: Optional[np.ndarray] = None
+        self._mask_ver = 0
+        # 🔴 A2-④（轻舟）：`rotate` 子集扫描的派生索引（非状态量 ⇒ 不进快照）。
+        #   不变量：`_dead_idx == flatnonzero(_dead)`、`_rest_idx == flatnonzero(_rest_until >= 0)`，
+        #   两者**升序唯一**（force 的 stable argsort 依赖升序；重复项不可能出现）。
+        #   外部直改 `_dead`/`_rest_until`（旧档/调试/测试）后必须调 `rebuild_indexes()`。
+        self._dead_idx = np.zeros(0, dtype=np.int64)
+        self._rest_idx = np.zeros(0, dtype=np.int64)
+
         # 计数器（只增）
         self.rest_set_n = 0        # 累计"设过休耕"的 (格·次)
         self.patch_kill_n = 0      # 累计死亡事件
@@ -216,7 +228,7 @@ class ResourceDynamics:
 
     # ---- ① 再生闸 -----------------------------------------------------------
 
-    def growth_multiplier(self) -> np.ndarray:
+    def growth_multiplier(self, idx: Optional[np.ndarray] = None) -> np.ndarray:
         """本 tick 每格的**再生乘子**（0 = 不生长，1 = 照常）。
 
         🔴 R226 修复③（核心，本次灭绝根因）：原实现"休耕 或 已死 ⇒ 乘子 0"。
@@ -229,15 +241,30 @@ class ResourceDynamics:
           · **休耕格**：按 `rest_regen_mult`（默认 0.0 = 旧行为）生产；休耕语义
             由"停产"改为"减产"（轮牧的休养期不是绝收期）。
           · `enabled=False` ⇒ 全 1（调用方可无条件相乘，C7 逐位等价不变）。
+
+        idx : NDArray[int64] 或 None
+            🔴 A2（轻舟）：只算这些格（返回形状 = idx 形状）。None ⇒ 全场，
+            与旧行为逐位不变。子集版逐元素同式（dead 段 → rest 段 min 次序一致）。
         """
+        if idx is None:
+            if not self.enabled:
+                return np.ones(self.n_cells, dtype=np.float64)
+            mult = np.ones(self.n_cells, dtype=np.float64)
+            if self._dead.any():
+                mult[self._dead] = self.dead_regen_mult
+            resting = self._rest_until >= 0
+            if resting.any():
+                mult[resting] = np.minimum(mult[resting], self.rest_regen_mult)
+            return mult
         if not self.enabled:
-            return np.ones(self.n_cells, dtype=np.float64)
-        mult = np.ones(self.n_cells, dtype=np.float64)
-        if self._dead.any():
-            mult[self._dead] = self.dead_regen_mult
-        resting = self._rest_until >= 0
-        if resting.any():
-            mult[resting] = np.minimum(mult[resting], self.rest_regen_mult)
+            return np.ones(idx.size, dtype=np.float64)
+        mult = np.ones(idx.size, dtype=np.float64)
+        d = self._dead[idx]
+        if d.any():
+            mult[d] = self.dead_regen_mult
+        rest = self._rest_until[idx] >= 0
+        if rest.any():
+            mult[rest] = np.minimum(mult[rest], self.rest_regen_mult)
         return mult
 
     def capacity_multiplier(self) -> np.ndarray:
@@ -248,12 +275,22 @@ class ResourceDynamics:
         """按当前掩码重算逐格容量（= `base_capacity × 倍率`）。
 
         ⚠️ 引擎侧需要把结果写回 `ResourceField._capacity`（轮作后才生效）。
+        🔴 A2（轻舟）：结果**带缓存**（掩码版本不变 ⇒ 直接复用；掩码写处调
+        `invalidate_capacity()` 失效）。返回的是缓存本体 ⇒ **调用方不得就地修改**。
         """
-        return self._base_capacity * self.capacity_multiplier()
+        if self._cap_cache is None:
+            self._cap_cache = self._base_capacity * self.capacity_multiplier()
+        return self._cap_cache
+
+    def invalidate_capacity(self) -> None:
+        """掩码变更 ⇒ 容量缓存失效 + 版本号自增（引擎用它判"回写是否需重算"）。"""
+        self._cap_cache = None
+        self._mask_ver += 1
 
     # ---- ② 取食后：休耕 + 判死 ----------------------------------------------
 
-    def note_tick(self, intake: np.ndarray, growth: np.ndarray, tick: int) -> None:
+    def note_tick(self, intake: np.ndarray, growth: np.ndarray, tick: int,
+                  eaten_idx: Optional[np.ndarray] = None) -> None:
         """结算"这一 tick 被吃了多少"：累计损伤 + 判休耕 + 判死亡。
 
         参数
@@ -265,6 +302,9 @@ class ResourceDynamics:
             仅作 `kill_frac` 极端密度通道的分母；主通道分母 = 容量。
         tick : int
             当前时间步（休耕截止与死亡时刻按它记）。
+        eaten_idx : NDArray[int64] 或 None
+            🔴 A2（轻舟）：本 tick 被吃格索引（**契约 = `np.flatnonzero(intake)`**）。
+            引擎稀疏路径传入 ⇒ 省一次全场扫描；None ⇒ 内部自行 flatnonzero（等价）。
 
         说明（波2 修 v2，fish 批准方案 A；替代旧"intake>0 即休耕"）
         ----
@@ -281,56 +321,68 @@ class ResourceDynamics:
           ⇒ `_damage` 继续累计 ⇒ 可能推进到死亡（"被啃食的休耕地退化"）。
         * `kill_patch_only`：仅约束**补充通道**；主通道（累计损伤）全格生效 ——
           背景格重度退化同样可死，由反荒漠化闸（dead_cell_max_frac）兜底强制重生。
+
+        🔴 A2（轻舟 2026-09-30）：全链**子集化**（只结算被吃格）——逐位等价：
+        逐元素同式/同 dtype/同运算次序；死亡与休耕写点的索引升序与全场版
+        `flatnonzero` 一致（搬移循环的 RNG 消费次序因此不变）。
         """
         if not self.enabled:
             return
         intake = np.asarray(intake, dtype=np.float64)
         growth = np.asarray(growth, dtype=np.float64)
 
+        e = (np.flatnonzero(intake) if eaten_idx is None
+             else np.asarray(eaten_idx, dtype=np.int64))
+        if e.size == 0:
+            return
+
         # --- 累计损伤（主通道分母 = 当期容量；容量 > 0 恒成立）---
-        eaten = intake > 0.0
-        if eaten.any():
-            cap = self.capacity_from_base()
-            denom = np.where(cap > 0.0, cap, 1.0)
-            self._damage[eaten] += intake[eaten] / denom[eaten]
+        cap_e = self.capacity_from_base()[e]      # A2：缓存 gather（版本未变 ⇒ 零重算）
+        denom_e = np.where(cap_e > 0.0, cap_e, 1.0)
+        self._damage[e] += intake[e] / denom_e
 
         # --- 判死：主通道（累计损伤超阈，全格）+ 补充通道（单 tick 极端密度）---
-        newly = np.zeros(self.n_cells, dtype=bool)
-        if eaten.any():
-            newly |= eaten & (~self._dead) & (self._damage >= self.death_threshold)
+        dead_e = self._dead[e]                    # 读于任何 _dead 写之前（与全场版同序）
+        newly_sel = (~dead_e) & (self._damage[e] >= self.death_threshold)
         if self.kill_denom == "regrowth":
-            denom_k = growth
+            dk_e = growth[e]
         else:
-            denom_k = self._base_capacity
-        valid = (denom_k > 0.0) & (~self._dead) & (intake > 0.0)
+            dk_e = self._base_capacity[e]
+        valid_e = (dk_e > 0.0) & (~dead_e)        # 全场版另有 `intake > 0`：子集上恒真
         if self.kill_patch_only:
-            valid &= self._mask
-        if valid.any():
-            ratio = np.zeros(self.n_cells, dtype=np.float64)
-            ratio[valid] = intake[valid] / denom_k[valid]
-            newly |= valid & (ratio > self.kill_frac)
-        n_new = int(newly.sum())
+            valid_e &= self._mask[e]
+        if valid_e.any():
+            ratio_e = np.zeros(e.size, dtype=np.float64)
+            ratio_e[valid_e] = intake[e][valid_e] / dk_e[valid_e]
+            newly_sel |= valid_e & (ratio_e > self.kill_frac)
+        newly_idx = e[newly_sel]                  # 升序（e 升序 ⇒ 与全场 flatnonzero 同序）
+        n_new = int(newly_idx.size)
         if n_new:
-            self._dead |= newly
-            self._dead_since[newly] = tick
-            self._rest_until[newly] = -1
-            self._damage[newly] = 0.0          # 死亡清零（重生后从 0 累计）
+            self._dead[newly_idx] = True
+            self._dead_since[newly_idx] = tick
+            self._rest_until[newly_idx] = -1
+            self._damage[newly_idx] = 0.0          # 死亡清零（重生后从 0 累计）
             self.patch_kill_n += n_new
+            # 🔴 A2-④：派生索引维护（死亡 ⇒ 退出休耕索引 + 加入死亡索引；升序保持）
+            self._rest_idx = self._idx_drop(self._rest_idx, newly_idx)
+            self._dead_idx = self._idx_merge(self._dead_idx, newly_idx)
             # 🔴 R226 修复①（核心）：斑块格死亡 ⇒ **立刻、本 tick 内**把斑块加成搬到
             #   同行背景格（原子搬移）。旧实现把它推到**下一 tick** 的 `rotate()` 里做
             #   ⇒ 在 `bg_production_zero=True`（背景格容量=0、永久荒漠）的世界里，
             #   死格降级与加成落位**跨 tick 分离** ⇒ 延迟窗口内"生产格数"净减少
             #   （实测 tick500 mask 12805→12720、每 tick 取食 −16% ⇒ 物种灭绝）。
             #   现在降级与落位同一 tick 完成 ⇒ **每 tick 内生产格守恒**。
-            _demoted = newly & self._mask
-            if _demoted.any():
+            _demoted = newly_idx[self._mask[newly_idx]]
+            if _demoted.size:
                 if self.rotate_moves_patch and not self.bg_production_zero:
                     # 正常世界（背景格有产能）：降级 + 同 tick 原子搬移加成到新格
                     self._mask[_demoted] = False
-                    for i in np.flatnonzero(_demoted):
+                    self.invalidate_capacity()   # A2：掩码变 ⇒ 容量缓存失效
+                    for i in _demoted.tolist():
                         if not self._promote_same_row(int(i)):
                             # 无候选格 ⇒ 撤回降级（保格优先）
                             self._mask[i] = True
+                            self.invalidate_capacity()
                 # 🔴 bg_production_zero=True（斑块=唯一粮仓）⇒ **不搬移**：
                 #   死斑块格**保留斑块身份**（死而富集），原地"重生"时不丢粮仓位置。
                 #   理由见 `__init__` 的 `bg_production_zero` 注释：搬移会让粮仓
@@ -339,13 +391,51 @@ class ResourceDynamics:
                 self._demoted[:] = False
 
         # --- 休耕：损伤超阈且未休耕未死 ⇒ 进入休耕（固定时长，**不刷新**）---
+        # 🔴 读 `_dead`/`_rest_until`/`_damage` 的**更新后**值（本段在死亡写之后，与全场版同序）
         enter_rest = (
-            eaten & (~self._dead) & (self._rest_until < 0)
-            & (self._damage >= self.rest_threshold)
+            (~self._dead[e]) & (self._rest_until[e] < 0)
+            & (self._damage[e] >= self.rest_threshold)
         )
         if enter_rest.any():
-            self._rest_until[enter_rest] = tick + self.rest_ticks
-            self.rest_set_n += int(enter_rest.sum())
+            er_idx = e[enter_rest]
+            self._rest_until[er_idx] = tick + self.rest_ticks
+            self.rest_set_n += int(er_idx.size)
+            self._rest_idx = self._idx_merge(self._rest_idx, er_idx)   # A2-④
+
+    # ---- ③a 派生索引维护（A2-④：rotate 子集扫描的前置）------------------------
+
+    def rebuild_indexes(self) -> None:
+        """由状态数组重建派生索引（**外部直改 `_dead`/`_rest_until` 或 load 后必调**）。
+
+        🔴 A2-④（轻舟）：`rotate` 只扫 `_rest_idx`（休耕格）/`_dead_idx`（死格），不再
+        全场扫 460800 格。两索引是**派生量**（不进快照），不变量：
+          · `_dead_idx == flatnonzero(_dead)`（升序）
+          · `_rest_idx == flatnonzero(_rest_until >= 0)`（升序）
+        绕过 `note_tick`/`rotate` 的直接数组写（快照恢复、调试、测试桩）都必须随后
+        调用本函数，否则 rotate 会漏结算（不炸但结果不同 = 静默）。
+        """
+        self._dead_idx = np.flatnonzero(self._dead)
+        self._rest_idx = np.flatnonzero(self._rest_until >= 0)
+
+    def indexes_consistent(self) -> bool:
+        """A2-④ 不变量自检（O(n)，供测试/诊断用；热路径不调）。"""
+        return (np.array_equal(self._dead_idx, np.flatnonzero(self._dead))
+                and np.array_equal(
+                    self._rest_idx, np.flatnonzero(self._rest_until >= 0)))
+
+    @staticmethod
+    def _idx_merge(base: np.ndarray, add: np.ndarray) -> np.ndarray:
+        """升序归并（唯一化）；`add` 为空 ⇒ 原样返回（不复制）。"""
+        if add.size == 0:
+            return base
+        return np.union1d(base, add)
+
+    @staticmethod
+    def _idx_drop(base: np.ndarray, drop: np.ndarray) -> np.ndarray:
+        """从升序 `base` 中剔除 `drop`（保持升序）；任一为空 ⇒ 原样返回。"""
+        if base.size == 0 or drop.size == 0:
+            return base
+        return base[~np.isin(base, drop)]
 
     # ---- ③ 轮作：重生 + 搬加成 + 反荒漠化闸 ---------------------------------
 
@@ -368,32 +458,56 @@ class ResourceDynamics:
         # 休耕到期 ⇒ `_rest_until` 重置 -1（恢复生长）+ **累计损伤按 `damage_recovery`
         # 衰减**（文献：恢复期后损伤部分恢复）。此前只有"死亡重生 / 反荒漠化闸"
         # 重置它 ⇒ 一次被吃 = 永久休耕 ⇒ resting_cell_frac 单调冲到 ~95%。
-        expired = (self._rest_until >= 0) & (~self._dead) & (tick >= self._rest_until)
-        if expired.any():
-            self._damage[expired] *= self.damage_recovery
-            self._rest_until[expired] = -1
+        # 🔴 A2-④（轻舟）：改**子集扫描** `_rest_idx`（不变量见 `rebuild_indexes` 注释）——
+        #   逐位等价：全场版三项合成 `(rest_until≥0)∧(¬dead)∧(tick≥rest_until)` 在子集上
+        #   逐元素同式（`rest_until≥0` 由不变量恒真；陈旧项自愈剔除，防外部直改漏维护）。
+        er = self._rest_idx
+        if er.size:
+            rt = self._rest_until[er]
+            _stale = rt < 0
+            if _stale.any():                    # 自愈：陈旧项（外部直改数组/旧档遗留）
+                er = er[~_stale]
+                rt = rt[~_stale]
+                self._rest_idx = er
+            if er.size:
+                expired = (~self._dead[er]) & (tick >= rt)
+                if expired.any():
+                    ex_idx = er[expired]
+                    self._damage[ex_idx] *= self.damage_recovery
+                    self._rest_until[ex_idx] = -1
+                    self._rest_idx = er[~expired]
 
         # --- ③ 到期重生：死格 → 背景格（"重入候选池"）---
-        due = self._dead & ((tick - self._dead_since) >= self.dead_regen_ticks)
-        if due.any():
-            n_due = int(due.sum())
-            self._dead[due] = False
-            self._rest_until[due] = -1
-            self._dead_since[due] = -1
-            self.patch_reborn_n += n_due
+        # 🔴 A2-④：子集扫描 `_dead_idx`（升序 ⇒ 与全场版 `flatnonzero(_dead)` 同集同序）。
+        di = self._dead_idx
+        if di.size:
+            _live = self._dead[di]
+            if not _live.all():                 # 自愈：陈旧项（外部直改数组/旧档遗留）
+                di = di[_live]
+                self._dead_idx = di
+            if di.size:
+                due = (tick - self._dead_since[di]) >= self.dead_regen_ticks
+                if due.any():
+                    due_idx = di[due]
+                    self._dead[due_idx] = False
+                    self._rest_until[due_idx] = -1
+                    self._dead_since[due_idx] = -1
+                    self.patch_reborn_n += int(due_idx.size)
+                    self._dead_idx = di[~due]
 
         # --- ③ 反荒漠化闸：死格占比超阈 ⇒ 强制重生（从最老的开始）---
         max_dead = int(self.dead_cell_max_frac * self.n_cells)
-        n_dead = int(self._dead.sum())
+        n_dead = int(self._dead_idx.size)
         if n_dead > max_dead:
             need = n_dead - max_dead
-            cand = np.flatnonzero(self._dead)
+            cand = self._dead_idx
             order = cand[np.argsort(self._dead_since[cand], kind="stable")]
             force = order[:need]
             self._dead[force] = False
             self._dead_since[force] = -1
             self._rest_until[force] = -1
             self.forced_reborn_n += int(force.size)
+            self._dead_idx = self._idx_drop(self._dead_idx, force)
 
     # ---- ④ 修复②：回写前 diff 校验（R226 裁定②）----------------------------
 
@@ -458,6 +572,7 @@ class ResourceDynamics:
             return False
         j = int(cand[self._rng.integers(0, cand.size)])
         self._mask[j] = True
+        self.invalidate_capacity()   # A2：掩码写点（含 rotate 防御补搬路径）⇒ 缓存失效
         self.promote_n += 1
         return True
 

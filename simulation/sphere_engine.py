@@ -583,6 +583,10 @@ class SphereEngine:
         "_rd",                # ResourceDynamics 实例（收编件 world/resource_dynamics.py）
         "_rd_intake_sum",     # 本 tick 每格被吃量累计（note_tick 输入，逐 tick 重建）
         "_rd_growth_sum",     # 本 tick 每格名义再生量累计（note_tick 输入，逐 tick 重建）
+        # ---- rd-A2（轻舟 2026-09-30）：子集清零 / 回写跳过的跟踪量 ----
+        "_rd_intake_prev",    # 上 tick 被吃格（= 上 tick intake 非零集；None = 未知 ⇒ 首清全场）
+        "_rd_growth_written", # 本 tick 写过的 growth 索引列表（None = 全场回填 ⇒ 下次全清）
+        "_rd_ver_seen",       # 上回回写时的 `rd._mask_ver`（−1 = 从未 ⇒ 首 tick 必回写）
         # ---- 13.4 波 2B（T3，本线 = [云端·开发]）：F1 修复 / span / cap ----
         "_nb_len",            # 每格**实际邻居数**（F1 修复的分母；span=1 语义）
         "_nb_norm",           # densities 归一化除数（"auto"=逐格实际邻居数，数字=冻结常量）
@@ -1217,6 +1221,10 @@ class SphereEngine:
             self.signals.enable_sparse()
         self._rd_intake_sum = np.zeros(self.world.n_cells, dtype=np.float64)
         self._rd_growth_sum = np.zeros(self.world.n_cells, dtype=np.float64)
+        # 🔴 rd-A2（轻舟 2026-09-30）：子集清零 / 回写跳过的跟踪量（语义见 `__slots__` 注释）
+        self._rd_intake_prev = None
+        self._rd_growth_written = None
+        self._rd_ver_seen = -1
         # 13.4 波 2B（T3）：cap 读数计数器（关档不累加 ⇒ probe None/0 口径）
         self._cap_blocked_n = 0
         self._cap_stay_n = 0
@@ -2757,20 +2765,33 @@ class SphereEngine:
             # 13.4 波 2A（T2）：资源动态**强制 Python 路径**（H3 已拦 use_sim_core）。
             # 再生闸：休耕/死亡格再生乘子（bgzero 档默认 0.5 = 减产不停产）；其余 = 1
             # （enabled=False ⇒ 全 1 = 逐位等价）。
-            self._rd_intake_sum[:] = 0.0          # 逐 tick 重建 intake（note_tick 输入）
+            # 🔴 rd-A2（轻舟）：intake 改**子集清零**（只清上 tick 被吃格 = 上 tick 非零集）
+            #   —— 逐位等价：非零集外恒 0，清与不清同值；省一次全场 memset。
+            if self._rd_intake_prev is None:
+                self._rd_intake_sum[:] = 0.0      # 首 tick（构造/load 后）兜底全场
+            elif self._rd_intake_prev.size:
+                self._rd_intake_sum[self._rd_intake_prev] = 0.0
             if self.resources._lazy:
                 # ---- R244 v1：rd 再生子集化（只结算脏格 = `_grid < _capacity`）----
                 # 逐位等价三条：① 子集 `_regrowth_amount` ≡ 全场在其上逐位相同（R217 前提，
                 # `enable_lazy` 已逐条校验）；② 净格跳过 = 逐位 no-op（`g = 名义×闸 ≥ 0`，
                 # 闸非负由 `_rd_mults_ok` + `enable_lazy` 前提把关）；③ rd 前提 = "掩码/容量
                 # 逐 tick 恒定"（bgzero ⇒ R226 禁搬移；非 bgzero 档已在构造期 fail-loud）。
-                self._rd_growth_sum[:] = 0.0      # 逐 tick 清零（预分配数组 + 子集回填）
+                # 🔴 rd-A2：growth 同样**子集清零**（只清上 tick 写过的索引；`None` =
+                #   上 tick 走全场路径（rebind）⇒ 本节首 tick 必须全场清一次兜底）。
+                if self._rd_growth_written is None:
+                    self._rd_growth_sum[:] = 0.0
+                else:
+                    for _wg in self._rd_growth_written:
+                        self._rd_growth_sum[_wg] = 0.0
+                self._rd_growth_written = []
                 idx = np.flatnonzero(self.resources._dirty_mask)   # ~0.28 ms @460800
                 if idx.size:
                     nominal = self.resources._regrowth_amount(self._tick, idx)
                     self._rd_growth_sum[idx] = nominal    # 名义再生（未乘闸；note_tick 分母）
-                    mult = self._rd.growth_multiplier()
-                    new = self.resources._grid[idx] + nominal * mult[idx]
+                    self._rd_growth_written.append(idx)   # rd-A2：记入下 tick 清零清单
+                    mult = self._rd.growth_multiplier(idx)   # rd-A2：子集直算（不再全场 + gather）
+                    new = self.resources._grid[idx] + nominal * mult
                     cap_i = self.resources._capacity[idx]
                     np.minimum(cap_i, new, out=new)
                     self.resources._grid[idx] = new   # sparse:lazy（rd 子集结算；脏标记在下方维护）
@@ -2781,6 +2802,7 @@ class SphereEngine:
                 growth = self._rd_growth_sum * self._rd.growth_multiplier()
                 np.minimum(self.resources._capacity, self.resources._grid + growth,   # sparse:n/a（rd 全场路径）
                            out=self.resources._grid)
+                self._rd_growth_written = None   # rd-A2：全场 rebind ⇒ 下 tick 惰性首清须全场
         elif self._use_sim_core and self.resources.distribution == "uniform":
             # 3.4：资源再生长沉到 Rust（与 ResourceField.regrow 逐位等价，
             # 默认 temp_sensitivity=1.0 时严格一致；≠1 有 ≤1-ULP 差异）
@@ -2840,32 +2862,48 @@ class SphereEngine:
                 self.config.info_structure, "memory_v2", False))
             _mv2_dyn_centroid = _mv2_on_tick and bool(getattr(
                 self.config.info_structure, "memory_v2_dynamic_centroid", True))
+            # 🔴 rd-A2（轻舟 2026-09-30）⑥：**掩码未变 ⇒ 回写全跳过**（重算/校验/拷贝/质心四件全免）。
+            #   判据 = `rd._mask_ver` 是否变过（唯一掩码写点 = note_tick 死亡搬移；bgzero 档恒不触发）
+            #   ⇒ 逐位等价：掩码不变 ⇒ `capacity_from_base()` 是常数（缓存）⇒ 旧行为写的也是同值，
+            #   diff 为空、校验无新信息 ⇒ 跳过 = no-op。`_rd_ver_seen == -1`（构造/load 后首 tick）
+            #   **强制走一次完整回写** —— 与旧行为逐位一致（含 `validate_writeback` 的首次基线校验）。
+            _rd_ver_pre = self._rd._mask_ver
             _old_patch_mask = None
-            if _mv2_dyn_centroid and self.resources._patch_mask is not None:
+            if (_rd_ver_pre != self._rd_ver_seen
+                    and _mv2_dyn_centroid and self.resources._patch_mask is not None):
                 _old_patch_mask = self.resources._patch_mask.copy()
             self._rd.rotate(self._tick)
-            _cap_new = self._rd.capacity_from_base()
-            # R226 裁定②：回写前校验「生产格数」与「Σcapacity」不变量（破裂即报警）
-            self._rd.validate_writeback(_cap_new, self._rd._mask)
-            self.resources._capacity[:] = _cap_new
-            # 🔴 轮作会搬移斑块掩码 ⇒ 必须回写 `ResourceField._patch_mask`，
-            #    否则 `_regrowth_amount` 的斑块倍率 / 尸体 patch_boost 仍用旧掩码
-            #    （双掩码漂移 = I2 同族：两处规则不一致 ⇒ 归因不干净）。
-            if self.resources._patch_mask is not None:
-                self.resources._patch_mask[:] = self._rd._mask
-            # R264 质心动态化 + R273 L2 增量重算：搬移后若掩码实际变化，只重算受影响连通域。
-            # 🔴 与全量 `_build_patch_centroid` **逐位一致**（共享 `_centroid_cell_of` + 未受影响
-            #    域不动；构造性论证见 `_update_patch_centroid_incremental` docstring）。
-            # 🔴 极区（rows {0,1,rows-2,rows-1}）非对称邻接 ⇒ 该函数返回 False ⇒ 回退全量重建。
-            if _mv2_dyn_centroid and _old_patch_mask is not None:
-                _pm_changed = np.flatnonzero(_old_patch_mask != self._rd._mask)
-                if _pm_changed.size:
-                    _inc_ok = _update_patch_centroid_incremental(
-                        self.world, _old_patch_mask, self._rd._mask,
-                        self._patch_centroid, _pm_changed)
-                    if not _inc_ok:
+            if self._rd._mask_ver != self._rd_ver_seen:
+                _cap_new = self._rd.capacity_from_base()
+                # R226 裁定②：回写前校验「生产格数」与「Σcapacity」不变量（破裂即报警）
+                self._rd.validate_writeback(_cap_new, self._rd._mask)
+                self.resources._capacity[:] = _cap_new
+                # 🔴 轮作会搬移斑块掩码 ⇒ 必须回写 `ResourceField._patch_mask`，
+                #    否则 `_regrowth_amount` 的斑块倍率 / 尸体 patch_boost 仍用旧掩码
+                #    （双掩码漂移 = I2 同族：两处规则不一致 ⇒ 归因不干净）。
+                if self.resources._patch_mask is not None:
+                    self.resources._patch_mask[:] = self._rd._mask
+                # R264 质心动态化 + R273 L2 增量重算：搬移后若掩码实际变化，只重算受影响连通域。
+                # 🔴 与全量 `_build_patch_centroid` **逐位一致**（共享 `_centroid_cell_of` + 未受影响
+                #    域不动；构造性论证见 `_update_patch_centroid_incremental` docstring）。
+                # 🔴 极区（rows {0,1,rows-2,rows-1}）非对称邻接 ⇒ 该函数返回 False ⇒ 回退全量重建。
+                if _mv2_dyn_centroid and self.resources._patch_mask is not None:
+                    if _old_patch_mask is not None:
+                        _pm_changed = np.flatnonzero(_old_patch_mask != self._rd._mask)
+                        if _pm_changed.size:
+                            _inc_ok = _update_patch_centroid_incremental(
+                                self.world, _old_patch_mask, self._rd._mask,
+                                self._patch_centroid, _pm_changed)
+                            if not _inc_ok:
+                                self._patch_centroid = _build_patch_centroid(
+                                    self.world, self.resources._patch_mask)
+                    else:
+                        # 掩码变发生在本段取副本**之后**（rotate 防御补搬；需 load 遗留
+                        # `_demoted=True` 才可达）⇒ 无旧掩码副本 ⇒ 回退全量重建
+                        # （R273 已证与增量路径逐位一致）。
                         self._patch_centroid = _build_patch_centroid(
                             self.world, self.resources._patch_mask)
+                self._rd_ver_seen = self._rd._mask_ver
         # 能量封顶（R144；`7516ba9` 引入 → 2026-09-21 补开关/测试/冒烟/纪元声明）
         # 关（默认）⇒ **与 E-017~E-031/calib1 逐位一致**（旧纪元）；开 ⇒ 新纪元（禁跨比）。
         if self.config.organisms.energy_cap_enabled:
@@ -3434,6 +3472,8 @@ class SphereEngine:
                 self._out_taken[eaters] += taken
             # 13.4 波 2A（T2）：每格被吃量**质量**累计（note_tick 的 intake 输入；
             # 关档 `_rd_intake_sum` 不消费 ⇒ 零轨迹影响）。
+            # 🔴 rd-A2：清零清单 = 本 tick 结算后 `flatnonzero(intake)`（在 note_tick 段统一算）
+            #   ⇒ 此处不需要额外记账。
             if _rd_on:
                 np.add.at(self._rd_intake_sum, self._flat[eaters], taken)
             # 内评 §三 观察项 1（接收侧净能量效应）：**实测**成交落点上的摄入，并同时
@@ -3511,18 +3551,23 @@ class SphereEngine:
         #       `_rd_intake_sum` = 本 tick 每格**被吃量**（质量单位；果实+邻格取食累加，
         #       食腐写胃不入 note_tick —— 尸体不是"本格活再生"的取食压力）。
         #       🔴 与 `_rd_growth_sum`（regrow 段已存的本 tick 名义再生）配对。
+        #       🔴 rd-A2（轻舟）：`_eaten` 一处算、三处用 —— ① 分母补算候选 ② `note_tick`
+        #       的 `eaten_idx`（子集化入口）③ 存为 `_rd_intake_prev`（下 tick 子集清零清单）。
         if _rd_on:
-            if self.resources._lazy and self._rd.kill_denom == "regrowth":
+            _eaten = np.flatnonzero(self._rd_intake_sum)   # 升序唯一（= 旧版 note_tick 内部同式）
+            if _eaten.size and self.resources._lazy and self._rd.kill_denom == "regrowth":
                 # R244 v1 分母补算：regrow 段只填**脏格**名义再生 ⇒ 净格（`grid==cap`）本 tick
                 # 被吃时分母缺值 ⇒ 被 `denom_k>0` 静默滤出（极端密度通道漏杀：不炸但结果不同）。
                 # 只对被吃格补算（O(活跃)）；`_rd_growth_sum==0` 含"已结算但名义=0"格 ⇒ 重算同值，无害。
-                _eaten = np.flatnonzero(self._rd_intake_sum)
-                if _eaten.size:
-                    _miss = _eaten[self._rd_growth_sum[_eaten] == 0.0]
-                    if _miss.size:
-                        self._rd_growth_sum[_miss] = self.resources._regrowth_amount(
-                            self._tick, _miss)
-            self._rd.note_tick(self._rd_intake_sum, self._rd_growth_sum, self._tick)
+                _miss = _eaten[self._rd_growth_sum[_eaten] == 0.0]
+                if _miss.size:
+                    self._rd_growth_sum[_miss] = self.resources._regrowth_amount(
+                        self._tick, _miss)
+                    if self._rd_growth_written is not None:
+                        self._rd_growth_written.append(_miss)   # rd-A2：记入下 tick 清零清单
+            self._rd.note_tick(self._rd_intake_sum, self._rd_growth_sum, self._tick,
+                               eaten_idx=_eaten)
+            self._rd_intake_prev = _eaten
 
         # 4.4) 工作记忆写入（L5）：食物丰富的格子记入 4 槽（round-robin）
         cur_flat = self._flat[:P]
@@ -6496,6 +6541,17 @@ class SphereEngine:
                 if engine.resources._patch_mask is not None
                 else np.zeros(engine.world.n_cells, dtype=bool)
             )
+        # 🔴 rd-A2（轻舟）：上面的掩码恢复是**直拷**（不经 `invalidate_capacity()`）⇒ 显式复位：
+        #   ① 缓存失效：构造期 `_cap_total_0` 已预热 `_cap_cache` ⇒ 不复位会拿着**构造掩码**
+        #      的容量（与快照掩码不符）。
+        #   ② 回写跟踪复位：`_rd_ver_seen=-1` ⇒ load 后首 tick **强制完整回写** —— 与旧行为
+        #      逐位一致（含 `validate_writeback` 首次基线校验、质心 `_old_patch_mask` 缺失时
+        #      的全量重建回退，R273 已证与增量路径逐位一致）。
+        engine._rd.invalidate_capacity()
+        engine._rd.rebuild_indexes()   # A2-④：休耕/死亡派生索引随直拷数组重建
+        engine._rd_intake_prev = None
+        engine._rd_growth_written = None
+        engine._rd_ver_seen = -1
         engine.resources._bg_regrowth_mult = float(data["resource_bg_regrowth_mult"])
         engine.resources._patch_regrowth_mult = float(data["resource_patch_regrowth_mult"])
         engine.signals._marks = data["signal_marks"].copy()   # sparse:reset（下方 rebuild_sparse）
