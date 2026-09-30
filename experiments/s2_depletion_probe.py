@@ -38,6 +38,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 from collections import deque
 
@@ -45,6 +46,8 @@ import numpy as np
 
 from simulation.sphere_engine import SphereEngine
 from experiments.steady_k_probe import make_cfg, apply_post_build
+# 🔴 R278 §三 P3：装置预设档防呆（S2/S3 单一真源）
+from tools.device_presets import add_device_arg, resolve_device
 
 
 # S1 1.195 档基线配置（tools/s1_rgm_scan.py 的 T4 字典 + build_cmd）。
@@ -422,7 +425,11 @@ def main():
                     help="气味消费端：把通道值接进移动打分（默认 False；需同时开 --smell-channels）")
     ap.add_argument("--arms", choices=("both", "on", "off"), default="both")
     ap.add_argument("--out", default="results/s2_depletion.csv")
+    # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
+    add_device_arg(ap)
     a = ap.parse_args()
+    # 防呆：把 --device 决议回写进 a，并回显"实际生效装置"整行（第三人眼校验）
+    resolve_device(a, sys.argv[1:], logger=lambda m: print(m, file=sys.stderr))
 
     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
     smell_channels = tuple(ch.strip() for ch in a.smell_channels.split(",") if ch.strip())
@@ -453,15 +460,38 @@ def main():
               "bg_low_frac_actual", "bg_low_n", "bg_resid_frac"]
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
-    with open(a.out, "w") as f:
+    # 🔴 R278 §二/§三 P3（云归）：逐 run flush + fsync（对齐 S3 v2 的 R264 硬要求）。
+    #   动机：旧版 `with open(a.out,"w")` 的行只在块正常退出时落盘 ⇒ 进程被外部杀掉
+    #   （长批常见：清理/重启/掉电）时**本批已完成的 run 数据全丢**。改为每个 run 结束
+    #   flush+fsync + summary 每 run 原子重写 ⇒ 崩溃最多丢"当前未完成的那 1 个 run"。
+    #   ✅ 行为不变：正常跑完时 CSV / summary **逐字节等于旧版**（单测守护）。
+    summary = []
+    out_json = a.out.replace(".csv", ".summary.json")
+
+    def _write_summary_atomic():
+        out = {
+            "params": vars(a),
+            "summary": summary,
+            "criterion_2": _criterion_2(summary),
+        }
+        tmp = out_json + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as jf:
+            json.dump(out, jf, indent=2, ensure_ascii=False)
+            jf.flush()
+            os.fsync(jf.fileno())
+        os.replace(tmp, out_json)
+        return out
+
+    with open(a.out, "w", newline="", encoding="utf-8") as f:
         f.write(",".join(header) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
         print(f"# S2 探针：rows={a.rows} cols={a.cols} patches={a.patches} "
               f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} arms={arms} "
               f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
               f"sparse={a.sparse_fields} smell={list(smell_channels)} "
               f"use_in_move={a.use_in_move}")
         print(",".join(header))
-        summary = []
         for sd in seeds:
             for arm in arms:
                 t0 = time.time()
@@ -474,6 +504,9 @@ def main():
                     line = ",".join(str(r[h]) for h in header)
                     f.write(line + "\n")
                     print(line)
+                # 🔴 R278 P3：每个 run 立刻落盘（崩最多丢 1 run）
+                f.flush()
+                os.fsync(f.fileno())
                 last = rows_out[-1]
                 wall = time.time() - t0
                 var_tail = _tail_mean(rows_out, "patch_sat_init_var")
@@ -529,10 +562,26 @@ def main():
                       f"L3 in/cap={last['l3_intake_per_capita']:.1f} "
                       f"net/cap={last['l3_net_per_capita']:.1f} | "
                       f"stop={stop} wall={wall:.0f}s", flush=True)
+                # 🔴 R278 P3：summary 同样每 run 原子重写（防同类丢失）
+                _write_summary_atomic()
 
     # ---------- 判据②（修正口径）：on 臂斑块「相对初始容量」方差 是否 > off 臂 ----------
     #   用 patch_sat_init_var（被杀/耗竭斑块显著↓ ⇒ 空间结构可见）；
     #   同时保留旧相对口径 patch_sat_var 作对照。
+    out = _write_summary_atomic()
+    print("\n=== S2 summary ===")
+    for s in summary:
+        print(s)
+    print("\n=== 判据②（on > off 斑块方差）===")
+    print(json.dumps(out["criterion_2"], ensure_ascii=False, indent=2))
+
+
+def _criterion_2(summary: list) -> dict:
+    """判据②：on 臂斑块「相对初始容量」方差是否 > off 臂。
+
+    抽成函数的目的：让「每 run 原子重写 summary」能复用它（R278 P3 逐 run flush），
+    同时保证整批跑完时的结论与旧版**逐字段一致**（单测守护）。
+    """
     by_seed = {}
     for s in summary:
         by_seed.setdefault(s["seed"], {})[s["arm"]] = s
@@ -559,19 +608,7 @@ def main():
         "verdict_on_gt_off_init": (all(v["on_gt_off_init"] for v in c2.values())
                                    if c2 else None),
     }
-
-    out = {
-        "params": vars(a),
-        "summary": summary,
-        "criterion_2": {"per_seed": c2, "overall": c2_overall},
-    }
-    with open(a.out.replace(".csv", ".summary.json"), "w") as f:
-        json.dump(out, f, indent=2)
-    print("\n=== S2 summary ===")
-    for s in summary:
-        print(s)
-    print("\n=== 判据②（on > off 斑块方差）===")
-    print(json.dumps(out["criterion_2"], ensure_ascii=False, indent=2))
+    return {"per_seed": c2, "overall": c2_overall}
 
 
 if __name__ == "__main__":

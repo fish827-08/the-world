@@ -103,6 +103,15 @@ _rerun_logs/snap/smoke_*/
 _share/.locks/*.lock
 _share/.locks/_retired/
 
+# === R278 §三 P3（2026-09-30，云归）：单测基线 fixture 入库 ===
+# 背景：`*.csv` / `*.json` 通配把 `tests/fixtures/` 下的**测试基线**也吞了，
+# 而 P3 的"默认行为不变"单测需要一个**改造前版本产出**的对照基线（无法现场生成）。
+# ⇒ 只打开 `tests/fixtures/` 这一层，**不放宽** `*.csv` 全局通配。
+# ⚠️ gitignore 后写者优先 ⇒ 必须放在上面 `*.csv` / `*.json` 之后。
+!tests/fixtures/
+!tests/fixtures/*.csv
+!tests/fixtures/*.json
+
 # === 协作线：测试临时目录（pytest --basetemp；F-R10 家族下用 git clean/rm 清理）===
 _tmp_pytest_collab/
 _tmp_pytest_*/
