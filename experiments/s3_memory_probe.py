@@ -51,6 +51,7 @@ import numpy as np
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from simulation.sphere_engine import SphereEngine
+from simulation.genes import Gene            # R275 T2：g22 记忆权重基因统计
 from experiments.steady_k_probe import make_cfg, apply_post_build
 # 复用 S2 已验证的读数函数（斑块标注 / 饱和度 / L1-L2 分化）
 from experiments.s2_depletion_probe import (
@@ -74,6 +75,33 @@ S1_BASE = DEVICE
 
 # 已用种子区间（R243 S0=45-52 / S1=53-76 / 新机复现=77-100）
 SEEDS_USED = set(range(42, 101))
+
+
+# ---------- R275 T2：g22（记忆权重基因）活体统计 ----------
+
+def _g22_stats(eng, N: int) -> dict:
+    """取活体 `eng._genes[:N, Gene.MEMORY_WEIGHT]` 的均值/分位（R275 S3.5 预注册 §探针改造）。
+
+    为什么用活体切片：`_genes` 的容量随种群浮动 ⇒ 只有前 N 行是活体（与 `eng._flat` 同序）。
+    g22 仅被 memory_v2 路径消费（`sphere_engine.py:5374`，eff = cfg_gain × 2×g22）⇒
+    在 mem_on 臂上若值被选择，应看到均值/分位漂移，mem_off 臂则为其漂变对照。
+
+    🔴 只读，不改任何行为；N=0（灭绝）⇒ 报 NaN 而非 0，避免与"基因全 0"混淆。
+    """
+    if N <= 0:
+        return {"g22_mean": float("nan"), "g22_p10": float("nan"),
+                "g22_p90": float("nan")}
+    genes = getattr(eng, "_genes", None)
+    if genes is None or genes.ndim != 2 or genes.shape[0] < N \
+            or genes.shape[1] <= int(Gene.MEMORY_WEIGHT):
+        return {"g22_mean": float("nan"), "g22_p10": float("nan"),
+                "g22_p90": float("nan")}
+    g22 = np.asarray(genes[:N, int(Gene.MEMORY_WEIGHT)], dtype=float)
+    return {
+        "g22_mean": round(float(g22.mean()), 6),
+        "g22_p10": round(float(np.percentile(g22, 10)), 6),
+        "g22_p90": round(float(np.percentile(g22, 90)), 6),
+    }
 
 
 # ---------- v2：断点续跑辅助（R264） ----------
@@ -131,10 +159,12 @@ def _strip_incomplete(csv_path: str, done: set[tuple[str, str]]) -> int:
 
 
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
-            bg_low_prod_frac=0.4, bg_low_cap_mult=0.05):
+            bg_low_prod_frac=0.4, bg_low_cap_mult=0.05, weight_gene=False):
     """跑一个 S3 run（单 seed 单臂）。
 
     rd 恒开；mem_on 决定记忆 v2 开关（其余逐字段对齐 ⇒ 单变量）。
+    weight_gene（R275 T2）：在 **mem_on 臂**额外打开 `memory_weight_gene`
+    （g22 被 13.11 路径消费）⇒ S3.5 记忆基因演化。默认 False ⇒ 逐位等于旧版。
     """
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
@@ -148,9 +178,17 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
     if mem_on:
         c.info_structure.memory_v2 = True
         c.info_structure.memory_gradient = "orientation"
+        # 🔴 R275 T2：S3.5 处理臂 —— 打开 g22 消费（仅 mem_on 臂；config 会 fail-loud
+        #   拦住 "weight_gene ∧ ¬memory_v2" ⇒ 此处天然只在处理臂生效）
+        if weight_gene:
+            c.info_structure.memory_weight_gene = True
     else:
         c.info_structure.memory_v2 = False
         c.info_structure.memory_gradient = "none"
+        # 对照臂恒不消费 g22（纯漂变）⇒ weight_gene 不生效，显式断言防静默错配
+        if weight_gene:
+            print("  ⚠️ weight_gene=True 但本臂 memory_v2=False ⇒ g22 不被消费"
+                  "（= 漂变对照，符合 S3.5 设计）。", file=sys.stderr)
 
     eng = SphereEngine(c)
     apply_post_build(eng, notes)
@@ -244,6 +282,8 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
                                           if n_patch_total else 0.0),
                 "l0_peak_dead": l0.get("l0_peak_dead", 0),
                 "l0_peak_rest": l0.get("l0_peak_rest", 0),
+                # ---- R275 T2：g22 活体统计（S3.5 记忆基因演化）----
+                **_g22_stats(eng, N),
             })
             if stop == "灭绝":
                 break
@@ -266,6 +306,9 @@ def main():
     ap.add_argument("--bg-low-prod-frac", type=float, default=DEVICE["bg_low_prod_frac"])
     ap.add_argument("--bg-low-cap-mult", type=float, default=DEVICE["bg_low_cap_mult"])
     ap.add_argument("--arms", choices=("both", "on", "off"), default="both")
+    ap.add_argument("--weight-gene", action="store_true",
+                    help="R275 T2 / S3.5：处理臂打开 `memory_weight_gene`（g22 被消费）；"
+                         "默认关 = 逐位等于旧版 S3（固定权重批）")
     ap.add_argument("--out", default="results/s3_memory.csv")
     ap.add_argument("--append", action="store_true",
                     help="断点续跑：追加到已存在的 --out，跳过已完成的 (seed,arm)，"
@@ -287,7 +330,9 @@ def main():
               "l2_between_share",
               "never_visited_patch_cell_frac", "bg_resid_frac",
               "l1_visited_patch_n", "l1_visited_patch_frac",
-              "l0_peak_dead", "l0_peak_rest"]
+              "l0_peak_dead", "l0_peak_rest",
+              # ---- R275 T2：g22 活体统计（S3.5 记忆基因演化）----
+              "g22_mean", "g22_p10", "g22_p90"]
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     out_json = os.path.splitext(a.out)[0] + ".summary.json"
@@ -296,7 +341,7 @@ def main():
           f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} "
           f"arms={['on' if m else 'off' for m in arms]} "
           f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
-          f"append={a.append}")
+          f"weight_gene={a.weight_gene} append={a.append}")
 
     # ---- v2：断点续跑准备（R264）----
     done = set()
@@ -339,7 +384,8 @@ def main():
                 t0 = time.time()
                 rows_out, stop = run_one(
                     sd, a.rows, a.cols, a.pop, a.patches, a.ticks, a.sample,
-                    a.rgm, mem_on, a.bg_low_prod_frac, a.bg_low_cap_mult)
+                    a.rgm, mem_on, a.bg_low_prod_frac, a.bg_low_cap_mult,
+                    a.weight_gene)
                 for r in rows_out:
                     w.writerow({h: r[h] for h in header})
                 # 🔴 逐 run flush + fsync（R264 硬要求）：崩最多丢 1 run

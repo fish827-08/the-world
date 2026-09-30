@@ -230,7 +230,8 @@ def patch_saturation(world, eng, labels: np.ndarray,
 # ---------- 单 run ----------
 
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
-            bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, sparse_fields=False):
+            bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, sparse_fields=False,
+            smell_channels=(), use_in_move=False):
     # 🔴 对齐 S1：subpos=on + S1_BASE 的 k/gain/subdiv/speed_max/max_count
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
@@ -241,6 +242,16 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
     c.simulation.use_sim_core = False          # 两臂统一 Python 路径（= S1 基线）
     c.simulation.sparse_fields = bool(sparse_fields)  # R244 v1：逐位等价加速（默认 False）
     c.resource_dynamics.enabled = bool(rd_on)  # 处理臂开局部可耗竭
+    # ---- 🔴 R275 T1：气味场透传（默认全关 ⇒ 逐位等于旧版；场关时引擎不构造该模块）----
+    #   参照 `experiments/smell_perf_probe.py` 的口径：channels=(...) 决定场本体，
+    #   use_in_move 决定消费端（打分）。`SmellConfig.use_in_move=True ∧ channels=()`
+    #   会被 config 的 fail-loud 拦下 ⇒ 这里不额外兜底，让它炸（禁静默空跑）。
+    _ch = tuple(smell_channels or ())
+    c.smell.channels = _ch
+    if _ch:
+        c.smell.use_in_move = bool(use_in_move)
+    else:
+        c.smell.use_in_move = False            # 场关 ⇒ 消费端不可能是有效配置
     eng = SphereEngine(c)
     apply_post_build(eng, notes)
 
@@ -403,11 +414,22 @@ def main():
                     help="背景低产能格的容量/再生倍率（0=零产能=现行为）")
     ap.add_argument("--sparse-fields", action="store_true",
                     help="R244 v1：稀疏字段加速（rd+bgzero 档逐位等价，默认 False=旧行为）")
+    # ---- 🔴 R275 T1：气味场（默认空 = 全关 ⇒ 逐位等于旧版）----
+    ap.add_argument("--smell-channels", default="",
+                    help="气味通道逗号分隔（子集 of food,prey,risk,kin；空=全关=旧行为）。"
+                         "R275 批 A 用 food,prey")
+    ap.add_argument("--use-in-move", action="store_true",
+                    help="气味消费端：把通道值接进移动打分（默认 False；需同时开 --smell-channels）")
     ap.add_argument("--arms", choices=("both", "on", "off"), default="both")
     ap.add_argument("--out", default="results/s2_depletion.csv")
     a = ap.parse_args()
 
     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
+    smell_channels = tuple(ch.strip() for ch in a.smell_channels.split(",") if ch.strip())
+    if a.use_in_move and not smell_channels:
+        print("🔴 --use-in-move 但 --smell-channels 为空 ⇒ 消费端会静默 no-op；"
+              "请先启用至少一个通道（B3 家族）。中止。", file=sys.stderr)
+        sys.exit(2)
     arms = (["off", "on"] if a.arms == "both" else [a.arms])
     header = ["seed", "arm", "tick", "pop", "global_sat",
               "abs_food", "abs_cap", "cap_lost_frac",
@@ -436,7 +458,8 @@ def main():
         print(f"# S2 探针：rows={a.rows} cols={a.cols} patches={a.patches} "
               f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} arms={arms} "
               f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
-              f"sparse={a.sparse_fields}")
+              f"sparse={a.sparse_fields} smell={list(smell_channels)} "
+              f"use_in_move={a.use_in_move}")
         print(",".join(header))
         summary = []
         for sd in seeds:
@@ -445,7 +468,8 @@ def main():
                 rows_out, stop = run_one(sd, a.rows, a.cols, a.pop, a.patches,
                                          a.ticks, a.sample, a.rgm, arm == "on",
                                          a.bg_low_prod_frac, a.bg_low_cap_mult,
-                                         a.sparse_fields)
+                                         a.sparse_fields,
+                                         smell_channels, a.use_in_move)
                 for r in rows_out:
                     line = ",".join(str(r[h]) for h in header)
                     f.write(line + "\n")
