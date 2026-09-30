@@ -19,6 +19,9 @@ cos 打分语义 / 快照 roundtrip / 变异敏感性"写成常驻断言。
     S9 打分 cos 语义：对准 ≈ +1、背向 ≈ −1；精记忆带 exp(−d/scale) 衰减、粗记忆不带
     S10 快照 roundtrip：save → load ⇒ 5 数组逐位一致；繁殖/死亡后长度一致
     S11 **DEL-8 变异敏感性**：v2 开 ≠ 关 digest（机制真生效，不是字段存在）
+    S12 质心动态化（R264）：rd 搬移后质心表与当前掩码重算一致
+    S13 质心增量重算（R273）：优化 vs 全量逐位一致（函数级边界 + 引擎级每 tick）
+        + 门控（关档零质心工作 / 开档走增量；**极区接触 ⇒ 回退全量**见函数级专测）
 """
 
 from __future__ import annotations
@@ -316,6 +319,153 @@ def test_s11_v2_changes_digest_in_patchy_world():
     off = _digest(_engine(v2=False, patchy=True, max_count=3000), ticks=40)
     on = _digest(_engine(v2=True, patchy=True, max_count=3000), ticks=40)
     assert on != off, "v2 开档必须改变轨迹（否则 = 静默 no-op）"
+
+
+# ---------------------------------------------------------------- S13 R273 质心优化
+
+def test_s13_incremental_matches_full_every_tick():
+    """R273 L2：增量重算表与全量重算**逐位一致**（每 tick 对拍；装置 = rd+on 臂）。"""
+    from simulation.sphere_engine import _build_patch_centroid
+    e = _engine(v2=True, patchy=True, bgzero=False, rd_enabled=True,
+                max_count=2000)
+    n_chg = 0
+    for _ in range(150):
+        if e.extinct:
+            break
+        prev = e.resources._patch_mask.copy()
+        e.step()
+        cur = e.resources._patch_mask
+        n_chg += int(not np.array_equal(prev, cur))
+        expected = _build_patch_centroid(e.world, cur)
+        assert np.array_equal(e._patch_centroid, expected), (
+            f"tick {e.tick} 增量表 ≠ 全量表")
+    assert n_chg > 0, "本测试未覆盖任何掩码变化 ⇒ 对拍空洞（须修装置）"
+
+
+def test_s13_off_arm_skips_centroid_work_on_arm_uses_incremental(monkeypatch):
+    """R273 L1/L2 门控：关档 ⇒ 零质心工作；开档 ⇒ 走增量（构造期 1 次全量；
+    极区接触时增量返回 False ⇒ 引擎回退全量 ⇒ 计数可 >1，见 §S13 回退专测）。"""
+    import simulation.sphere_engine as se
+    cnt = {"full": 0, "inc": 0}
+    orig_f = se._build_patch_centroid
+    orig_i = se._update_patch_centroid_incremental
+
+    def _cf(*a, **k):
+        cnt["full"] += 1
+        return orig_f(*a, **k)
+
+    def _ci(*a, **k):
+        cnt["inc"] += 1
+        return orig_i(*a, **k)
+
+    monkeypatch.setattr(se, "_build_patch_centroid", _cf)
+    monkeypatch.setattr(se, "_update_patch_centroid_incremental", _ci)
+    # 关档臂：rd 开、掩码会变，但不得出现任何质心工作（表无人消费）
+    e_off = _engine(v2=False, patchy=True, bgzero=False, rd_enabled=True,
+                    max_count=2000)
+    n_chg = 0
+    prev = e_off.resources._patch_mask.copy()
+    for _ in range(300):
+        if e_off.extinct:
+            break
+        e_off.step()
+        cur = e_off.resources._patch_mask
+        n_chg += int(not np.array_equal(prev, cur))
+        prev = cur.copy()
+    assert n_chg > 0, "装置未发生掩码变化 ⇒ 门控断言空洞"
+    assert cnt == {"full": 0, "inc": 0}, f"关档臂不应有质心工作：{cnt}"
+    assert bool((e_off._patch_centroid == -1).all()), "关档表应保持初值 -1"
+    # 开档臂：构造期恰好 1 次全量；运行期走增量
+    cnt["full"] = cnt["inc"] = 0
+    e_on = _engine(v2=True, patchy=True, bgzero=False, rd_enabled=True,
+                   max_count=2000)
+    assert cnt["full"] == 1, "构造期应恰好全量建表一次"
+    for _ in range(300):
+        if e_on.extinct:
+            break
+        e_on.step()
+    assert cnt["inc"] > 0, f"开档臂应走增量重算：{cnt}"
+    # 运行期全量调用只允许来自极区回退（增量返回 False 时）——非回退路径不得调全量
+    assert cnt["full"] >= 1, f"开档臂应至少构造期全量建表一次：{cnt}"
+    assert np.array_equal(
+        e_on._patch_centroid,
+        orig_f(e_on.world, e_on.resources._patch_mask)), "终态增量表 ≠ 全量表"
+
+
+def test_s13_incremental_edges_split_merge_seam():
+    """分裂 / 合并 / 跨经度接缝 / 孤立域删除 / 多格组合 —— 逐例与全量对拍。
+
+    装置全部落在对称区（rows=8 ⇒ 极区行 {0,1,6,7} 之外的行 2..5）。
+    """
+    from simulation.sphere_engine import (
+        _build_patch_centroid, _update_patch_centroid_incremental)
+    from world.sphere_world import SphereWorld
+    w = SphereWorld(rows=8, cols=16)
+    mask = np.zeros(w.n_cells, dtype=bool)
+    mask[[62, 63, 48, 49]] = True      # 跨 0 列接缝链（r3c14→c15→[环]→c0→c1）
+    mask[[64, 65, 66]] = True          # 孤立横线（分裂源）
+    mask[[85, 87]] = True              # 待桥接对
+    mask[42] = True                    # 孤立单格（供删除）
+    out = _build_patch_centroid(w, mask)
+
+    def _apply(new_mask: np.ndarray) -> None:
+        nonlocal mask
+        changed = np.flatnonzero(mask != new_mask)
+        if changed.size:
+            ok = _update_patch_centroid_incremental(w, mask, new_mask, out, changed)
+            assert ok is True, "对称区步骤不应触发极区回退"
+        mask = new_mask
+        assert np.array_equal(out, _build_patch_centroid(w, mask)), (
+            "增量 ≠ 全量（步骤退化）")
+
+    n = mask.copy(); n[63] = False; _apply(n)          # 接缝链分裂：{62} ∥ {48,49}
+    n = mask.copy(); n[65] = False; _apply(n)          # 横线分裂：{64} ∥ {66}
+    n = mask.copy(); n[86] = True; _apply(n)           # 合并：86 桥接 {85} 与 {87}
+    n = mask.copy(); n[49] = False; _apply(n)          # 链端收缩
+    n = mask.copy(); n[42] = False; _apply(n)          # 删除孤立单格
+    n = mask.copy(); n[[48, 85]] = False
+    n[[95, 80]] = True; _apply(n)                      # 多格组合（移除 + 跨接缝新增对）
+    n = mask.copy(); n[[95, 80, 86]] = False; _apply(n)  # 纯多格移除
+
+
+def test_s13_pole_zone_falls_back_and_leaves_out_untouched():
+    """极区（非对称邻接）接触 ⇒ 返回 False 且不改 out（由调用方回退全量重建）。"""
+    from simulation.sphere_engine import (
+        _build_patch_centroid, _update_patch_centroid_incremental)
+    from world.sphere_world import SphereWorld
+    w = SphereWorld(rows=8, cols=16)   # 极区行 = {0,1,6,7}
+    mask = np.zeros(w.n_cells, dtype=bool)
+    mask[[5, 19, 69]] = True           # 极行(r0c5) / 邻行(r1c3) / 内部(r4c5)
+    out = _build_patch_centroid(w, mask)
+
+    # 内部变更（对称区）⇒ 走增量、返回 True
+    n = mask.copy(); n[69] = False
+    ok = _update_patch_centroid_incremental(
+        w, mask, n, out, np.flatnonzero(mask != n))
+    assert ok is True
+    assert np.array_equal(out, _build_patch_centroid(w, n))
+    mask = n
+    base = out.copy()
+
+    # 邻行（row1）变更/新增 ⇒ 回退信号 + out 不动
+    n = mask.copy(); n[19] = False
+    ok = _update_patch_centroid_incremental(
+        w, mask, n, out, np.flatnonzero(mask != n))
+    assert ok is False, "邻行（row1）变更必须触发极区回退"
+    assert np.array_equal(out, base), "回退时不得改动 out"
+
+    n = mask.copy(); n[26] = True
+    ok = _update_patch_centroid_incremental(
+        w, mask, n, out, np.flatnonzero(mask != n))
+    assert ok is False, "邻行（row1）新增必须触发极区回退"
+    assert np.array_equal(out, base)
+
+    # 极行（row0）变更 ⇒ 回退
+    n = mask.copy(); n[5] = False
+    ok = _update_patch_centroid_incremental(
+        w, mask, n, out, np.flatnonzero(mask != n))
+    assert ok is False, "极行（row0）变更必须触发极区回退"
+    assert np.array_equal(out, base)
 
 
 if __name__ == "__main__":

@@ -241,26 +241,117 @@ def _build_patch_centroid(world, patch_mask: np.ndarray) -> NDArray[np.int64]:
                     q.append(nb)
     for lab in range(nxt):
         cells = np.flatnonzero(labels == lab)
-        rs = cells // cols
-        cs = cells % cols
-        ang = 2.0 * np.pi * cs.astype(np.float64) / float(cols)
-        mc = int(round(
-            (np.arctan2(np.mean(np.sin(ang)), np.mean(np.cos(ang)))
-             % (2.0 * np.pi)) / (2.0 * np.pi) * float(cols))) % cols
-        mr = int(round(float(rs.mean())))
-        best = int(cells[0])
-        best_d = float("inf")
-        for c in cells:
-            cr = int(c) // cols
-            cc = int(c) % cols
-            dr = float(abs(cr - mr))
-            dcol = float(min(abs(cc - mc), cols - abs(cc - mc)))
-            d = dr * dr + dcol * dcol
-            if d < best_d:
-                best_d = d
-                best = int(c)
-        out[cells] = best
+        out[cells] = _centroid_cell_of(cells, cols)
     return out
+
+
+def _centroid_cell_of(cells: NDArray[np.int64], cols: int) -> int:
+    """单连通域的质心格（`cells` = 该域全网格、**升序**；与旧内联式逐字一致）。
+
+    🔴 R273 L2 抽出的共享式：全量建表与增量重算**调用同一函数** ⇒ 逐位一致是结构性保证。
+    """
+    rs = cells // cols
+    cs = cells % cols
+    ang = 2.0 * np.pi * cs.astype(np.float64) / float(cols)
+    mc = int(round(
+        (np.arctan2(np.mean(np.sin(ang)), np.mean(np.cos(ang)))
+         % (2.0 * np.pi)) / (2.0 * np.pi) * float(cols))) % cols
+    mr = int(round(float(rs.mean())))
+    best = int(cells[0])
+    best_d = float("inf")
+    for c in cells:
+        cr = int(c) // cols
+        cc = int(c) % cols
+        dr = float(abs(cr - mr))
+        dcol = float(min(abs(cc - mc), cols - abs(cc - mc)))
+        d = dr * dr + dcol * dcol
+        if d < best_d:
+            best_d = d
+            best = int(c)
+    return best
+
+
+def _update_patch_centroid_incremental(
+    world, old_mask: np.ndarray, new_mask: np.ndarray,
+    out: NDArray[np.int64], changed: NDArray[np.int64],
+) -> bool:
+    """R273 L2：掩码变化后**只重算受影响连通域**（就地更新 `out`；与全量版逐位一致）。
+
+    `changed` = `np.flatnonzero(old_mask != new_mask)`（调用方已算好；空数组 = 天然 no-op）。
+
+    受影响连通域（其余域网格集合不变 ⇒ 质心是"格集合的确定性函数"⇒ 保持旧值即可，
+    归纳：构造期全量建表 ⇒ 每步"不改者不动、改者按同式重算"）：
+      · 含**被移除格**（1→0）的旧连通域 —— 收缩 / 分裂 / 消失；
+      · 与**新增格**（0→1）相邻的旧连通域 —— 扩张 / 合并（新增格自身也在区内）。
+
+    🔴 极区非对称邻接 ⇒ **不可局部补齐**（R273 实证：seed 104 首 tick 即 2055 格漂移）：
+      极点行（0 / rows-1）邻接 = 相邻整行（"一跳达任意经度"），但反向入边仅
+      `(pole, 0)` 一格 ⇒ 有向图在极区不可逆：极行格（除 (pole,0)）**入边为空**
+      ⇒ 其 BFS 认领成组的集合不可由区内 BFS 到达、且认领序依赖全局种子序；
+      邻行格（1 / rows-2）**入边 = 整个极行** ⇒ 极行种子的成组集合可被邻行任意
+      变更改写。两者都超出"局部重算"能力 ⇒ 触及即**回退全量重建**（旧版同式）。
+      ⇒ 判据：region ∪ 新增格 触及 rows {0, 1, rows-2, rows-1} ⇒ 返回 False（**不改 out**）。
+      非极区（对称邻接）⇒ 跨边界连接必过新增格（已入区）⇒ 区外域网格集合不变
+      （逐格论证见 R273 交付帖；discipline：分裂/合并边界由单测 + 引擎级每 tick 对拍双层覆盖）。
+
+    Returns
+    -------
+    bool : True = `out` 已就地更新为与全量版逐位一致；False = 未改动，需回退全量重建。
+    """
+    n = world.n_cells
+    cols = world.cols
+    rows = world.rows
+    rem = changed[old_mask[changed]]
+    add = changed[~old_mask[changed]]
+    region = np.zeros(n, dtype=bool)
+    # ① 旧掩码上收集受影响连通域的**完整**成员（须完整：分裂/合并的正确性依赖全域）
+    seeds: list[int] = [int(c) for c in rem]
+    for x in add:
+        for nb in world.neighbors(int(x)):
+            nb = int(nb)
+            if old_mask[nb]:
+                seeds.append(nb)
+    for s in seeds:
+        if region[s]:
+            continue
+        q = [s]
+        region[s] = True
+        while q:
+            c = q.pop()
+            for nb in world.neighbors(c):
+                nb = int(nb)
+                if old_mask[nb] and not region[nb]:
+                    region[nb] = True
+                    q.append(nb)
+    for x in add:
+        region[int(x)] = True
+    # 🔴 极区接触检测（见 docstring）：触及即回退（out 不动）
+    _rr = np.flatnonzero(region) // cols
+    if bool(((_rr == 0) | (_rr == 1) | (_rr == rows - 2)
+             | (_rr == rows - 1)).any()):
+        return False
+    # ② 新掩码上重标注（从区内种子起 BFS；按性质不会逸出区 ⇒ 区外不动）
+    vis = np.zeros(n, dtype=bool)
+    for s in np.flatnonzero(region):
+        s = int(s)
+        if vis[s] or not new_mask[s]:
+            continue
+        comp: list[int] = []
+        q = [s]
+        vis[s] = True
+        while q:
+            c = q.pop()
+            comp.append(c)
+            for nb in world.neighbors(c):
+                nb = int(nb)
+                if new_mask[nb] and not vis[nb]:
+                    vis[nb] = True
+                    q.append(nb)
+        cells = np.sort(np.asarray(comp, dtype=np.int64))
+        out[cells] = _centroid_cell_of(cells, cols)
+    # ③ 区内退出掩码的格（= 被移除格）⇒ -1（与全量版一致）
+    out[region & ~vis] = -1
+    return True
 
 
 def _asm_wta_select(
@@ -2724,7 +2815,11 @@ class SphereEngine:
         #    不再消费引擎 RNG（rd 改用自有 `_rng`）；回写前做 **diff 校验**（fail-loud 兜底）。
         if _rd_on:
             # R264 质心动态化：v2 动态模式下保存旧掩码用于搬移检测（仅 copy 引用，rotate 前快照）
-            _mv2_dyn_centroid = bool(getattr(
+            # 🔴 R273 L1：门控补 `memory_v2` 条件 —— 关档臂无人查表（唯一消费点 = `_mem_v2_write`）
+            #   ⇒ 跳过 copy+对比+重算（旧版照常每 tick 全量 BFS ⇒ 出走型世界 off 臂 3–4s/tick）。
+            _mv2_on_tick = bool(getattr(
+                self.config.info_structure, "memory_v2", False))
+            _mv2_dyn_centroid = _mv2_on_tick and bool(getattr(
                 self.config.info_structure, "memory_v2_dynamic_centroid", True))
             _old_patch_mask = None
             if _mv2_dyn_centroid and self.resources._patch_mask is not None:
@@ -2739,12 +2834,19 @@ class SphereEngine:
             #    （双掩码漂移 = I2 同族：两处规则不一致 ⇒ 归因不干净）。
             if self.resources._patch_mask is not None:
                 self.resources._patch_mask[:] = self._rd._mask
-            # R264 质心动态化：搬移后若掩码实际变化，重算质心表（v2 查表用）。
-            # 仅当旧掩码存在且与新掩码不同时才重算（多数 tick 无搬移 ⇒ 跳过 BFS，性能友好）。
+            # R264 质心动态化 + R273 L2 增量重算：搬移后若掩码实际变化，只重算受影响连通域。
+            # 🔴 与全量 `_build_patch_centroid` **逐位一致**（共享 `_centroid_cell_of` + 未受影响
+            #    域不动；构造性论证见 `_update_patch_centroid_incremental` docstring）。
+            # 🔴 极区（rows {0,1,rows-2,rows-1}）非对称邻接 ⇒ 该函数返回 False ⇒ 回退全量重建。
             if _mv2_dyn_centroid and _old_patch_mask is not None:
-                if not np.array_equal(_old_patch_mask, self._rd._mask):
-                    self._patch_centroid = _build_patch_centroid(
-                        self.world, self.resources._patch_mask)
+                _pm_changed = np.flatnonzero(_old_patch_mask != self._rd._mask)
+                if _pm_changed.size:
+                    _inc_ok = _update_patch_centroid_incremental(
+                        self.world, _old_patch_mask, self._rd._mask,
+                        self._patch_centroid, _pm_changed)
+                    if not _inc_ok:
+                        self._patch_centroid = _build_patch_centroid(
+                            self.world, self.resources._patch_mask)
         # 能量封顶（R144；`7516ba9` 引入 → 2026-09-21 补开关/测试/冒烟/纪元声明）
         # 关（默认）⇒ **与 E-017~E-031/calib1 逐位一致**（旧纪元）；开 ⇒ 新纪元（禁跨比）。
         if self.config.organisms.energy_cap_enabled:
