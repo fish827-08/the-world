@@ -437,8 +437,14 @@ def _last_sample_tick(csv_path: str, key: tuple[str, str]) -> int:
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             bg_low_prod_frac=0.4, bg_low_cap_mult=0.05, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
-            prior_rows=None, out_path=None):
+            prior_rows=None, out_path=None, on_row=None):
     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
+
+    🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
+      默认 None ⇒ 行为逐字节等于旧版（行在 run 结束后才由 main 写出）；
+      传入回调 ⇒ **每采一个样点就立刻写一行并 fsync**（行与快照同节拍）。
+      背景：行原本只在 `run_one` 返回后写出 ⇒ run 中途被杀（沙盒 ~74min 清理
+      周期）⇒ **已跑的所有采样行永久丢失**，续跑也拿不回来（下一段仍要跑完才写）。
 
     rd 恒开；mem_on 决定记忆 v2 开关（其余逐字段对齐 ⇒ 单变量）。
     weight_gene（R275 T2）：在 **mem_on 臂**额外打开 `memory_weight_gene`
@@ -505,7 +511,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
     return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
                       labels, n_patch_total, init_cap_full, init_patch_cap,
                       init_cap_sum, visited_mask, patch_ever_visited, first_visit,
-                      save_every, snapshot_dir, tag)
+                      save_every, snapshot_dir, tag, on_row=on_row)
 
 
 def _fail_save_every(save_every, sample, snapshot_dir):
@@ -616,8 +622,14 @@ def _loop(seed, mem_on, rows_out, start_tick, ticks, sample, labels,
 def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                n_patch_total, init_cap_full, init_patch_cap, init_cap_sum,
                visited_mask, patch_ever_visited, first_visit,
-               save_every, snapshot_dir, tag):
-    """采样主循环（首跑 / 续跑共用）——见 `_loop` 的落盘顺序说明。"""
+               save_every, snapshot_dir, tag, on_row=None):
+    """采样主循环（首跑 / 续跑共用）——见 `_loop` 的落盘顺序说明。
+
+    🔴 R303：`on_row` 非 None ⇒ **每个采样点生成后立刻回调落盘**（行节拍 == 快照节拍），
+      使"run 中途被杀"只损失**当前未采样的那一段**，已采样行全部保住。
+      顺序刻意放在**存快照之前**：行先落盘、快照后存 ⇒ 若崩在两者之间，
+      续跑会从上一快照点重跑该采样点 ⇒ 重复行由 `_strip_rows_after` 清除（幂等）。
+    """
     t_slice = time.perf_counter()
     last = start_tick
     stop = "ticks"
@@ -680,6 +692,10 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                 # ---- R275 T2：g22 活体统计（S3.5 记忆基因演化）----
                 **_g22_stats(eng, N),
             })
+            # 🔴 R303：sample 级行落盘（回调由 main 提供：writerow+flush+fsync）。
+            #   `rows_out` 仍保留（summary 需要末行、续跑清行需要行集合）。
+            if on_row is not None:
+                on_row(rows_out[-1])
             if stop == "灭绝":
                 break
 
@@ -865,6 +881,12 @@ def main():
             w.writeheader()
             fout.flush()
             os.fsync(fout.fileno())
+        # 🔴 R303：sample 级行落盘回调（原来攒到 run 末才写 ⇒ 中途被杀 = 行全丢）
+        def _emit(r):
+            w.writerow({h: r[h] for h in header})
+            fout.flush()
+            os.fsync(fout.fileno())
+
         for sd in seeds:
             for mem_on in arms:
                 arm = "mem_on" if mem_on else "mem_off"
@@ -882,14 +904,11 @@ def main():
                     a.rgm, mem_on, a.bg_low_prod_frac, a.bg_low_cap_mult,
                     a.weight_gene,
                     save_every=a.save_every, snapshot_dir=a.snapshot_dir,
-                    resume_sample=_res, prior_rows=None, out_path=a.out)
-                for r in rows_out:
-                    w.writerow({h: r[h] for h in header})
-                    # 🔴 v3：**逐行 flush + fsync**（原来只在 run 末 flush）——
-                    #    这是"sample 级"的另一半：行与快照同节拍落盘，
-                    #    否则崩在 run 中途仍然是"行全丢、快照白存"。
-                    fout.flush()
-                    os.fsync(fout.fileno())
+                    resume_sample=_res, prior_rows=None, out_path=a.out,
+                    on_row=_emit)
+                # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
+                fout.flush()
+                os.fsync(fout.fileno())
                 print(f"# flushed seed={sd} arm={arm} rows={len(rows_out)}"
                       f"{' (接续自快照)' if _res else ''}", file=sys.stderr)
 
