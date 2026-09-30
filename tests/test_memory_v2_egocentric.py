@@ -22,6 +22,9 @@ cos 打分语义 / 快照 roundtrip / 变异敏感性"写成常驻断言。
     S12 质心动态化（R264）：rd 搬移后质心表与当前掩码重算一致
     S13 质心增量重算（R273）：优化 vs 全量逐位一致（函数级边界 + 引擎级每 tick）
         + 门控（关档零质心工作 / 开档走增量；**极区接触 ⇒ 回退全量**见函数级专测）
+    S14 T1 方向量化快路径/向量化：常量==逐格标量（标准行全列）、向量化 pair 量化
+        ==标量（含极区/边界行 + 随机长程）、cos 快路径==一般路径（含门控事实）、
+        批量步进==逐个体 + 噪声档禁入、写路径==旧标量参考
 """
 
 from __future__ import annotations
@@ -466,6 +469,158 @@ def test_s13_pole_zone_falls_back_and_leaves_out_untouched():
         w, mask, n, out, np.flatnonzero(mask != n))
     assert ok is False, "极行（row0）变更必须触发极区回退"
     assert np.array_equal(out, base)
+
+
+# ---------------------------------------------------------------- S14 T1 方向量化快路径/向量化
+
+def test_s14_dirs_const_and_vec_pairs_match_scalar():
+    """T1：标准行方向常量 == 逐格标量；向量化 pair 量化 == 标量（含极区/边界行）。"""
+    e = _engine(v2=True, patchy=True, max_count=3000)
+    rows, cols = int(e.world.rows), int(e.world.cols)
+    assert np.array_equal(e._dirs8_const, np.arange(8, dtype=np.int64))
+    assert np.array_equal(e._dirs4_const, np.array([1, 3, 4, 6], dtype=np.int64))
+    # 标准行（2..rows-3）**全列**：8 邻 / VN 4 邻 == 常量
+    for r in (2, rows // 2, rows - 3):
+        for c in range(cols):
+            cell = r * cols + c
+            nb8 = np.asarray(e.world.neighbors(cell), dtype=np.int64)
+            d8 = np.array([e._cell_dir_slot(cell, int(x)) for x in nb8])
+            assert np.array_equal(d8, e._dirs8_const), f"row {r} col {c} 8邻≠常量"
+            nb4 = np.asarray(e.world.neighbors_von_neumann(cell), dtype=np.int64)
+            d4 = np.array([e._cell_dir_slot(cell, int(x)) for x in nb4])
+            assert np.array_equal(d4, e._dirs4_const), f"row {r} col {c} 4邻≠常量"
+    # 向量化 pair 量化 vs 标量：边界行/极行（回退路径；极行 nb=整行）
+    for r in (0, 1, rows - 2, rows - 1):
+        for c in (0, cols // 2, cols - 1):
+            cell = r * cols + c
+            nb = np.asarray(e.world.neighbors(cell), dtype=np.int64)
+            ref = np.array([e._cell_dir_slot(cell, int(x)) for x in nb])
+            got = e._cell_dir_slot_pairs(np.full(nb.size, cell), nb)
+            assert np.array_equal(got, ref), f"cell {cell} pair 量化≠标量"
+    # 随机长程 pair（写路径几何；含跨 0/cols 环绕）
+    rr = np.random.default_rng(7)
+    cur = rr.integers(0, rows * cols, 4000).astype(np.int64)
+    tar = rr.integers(0, rows * cols, 4000).astype(np.int64)
+    ref = np.array([e._cell_dir_slot(int(a), int(b)) for a, b in zip(cur, tar)])
+    assert np.array_equal(e._cell_dir_slot_pairs(cur, tar), ref), "随机 pair ≠ 标量"
+    # 同格/退化 ⇒ -1
+    assert e._cell_dir_slot_pairs(
+        np.array([5, 7]), np.array([5, 7])).tolist() == [-1, -1]
+
+
+def test_s14_cos_fast_path_equals_general(monkeypatch):
+    """快路径（常量查表）与一般路径（向量化）在 cos 打分上**逐位一致**；
+    并证明门控事实：标准行不调用 `_cell_dir_slot_pairs`，span2 非 None 必调用。"""
+    e = _engine(v2=True, patchy=True, max_count=3000)
+    idx = 0
+    e._mem_az[idx] = [2, 5, -1, -1]
+    e._mem_tick[idx] = [e.tick, e.tick, -1, -1]
+    e._mem_dist[idx] = [3.0, 25.0, 0.0, 0.0]
+    e._mem_degraded[idx] = [False, True, False, False]
+    cols = int(e.world.cols)
+    for row in (2, 10, int(e.world.rows) - 3):
+        cell = row * cols + 5
+        nb = np.asarray(e.world.neighbors(cell), dtype=np.int64)
+        for hd in (3, -1):
+            g_fast = e._memory_egocentric_cos(idx, cell, nb, hd)
+            e._span_table = np.zeros((e.world.n_cells, 1), dtype=np.int64)
+            g_gen = e._memory_egocentric_cos(idx, cell, nb, hd)
+            e._span_table = None
+            assert np.array_equal(g_fast, g_gen), f"row {row} hd {hd} 快/一般不一致"
+    assert float(np.abs(g_fast).max()) > 0.0, "装置空洞：打分全 0"
+    # 门控事实：标准行走常量快路径（不调用向量化一般路径）
+    calls: list = []
+    orig = e._cell_dir_slot_pairs
+    monkeypatch.setattr(type(e), "_cell_dir_slot_pairs",
+                        lambda self, a, b: (calls.append(1), orig(a, b))[1])
+    cell = 10 * cols + 5
+    nb = np.asarray(e.world.neighbors(cell), dtype=np.int64)
+    e._memory_egocentric_cos(idx, cell, nb, 3)
+    assert calls == [], "标准行应走常量快路径"
+    e._span_table = np.zeros((e.world.n_cells, 1), dtype=np.int64)
+    e._memory_egocentric_cos(idx, cell, nb, 3)
+    e._span_table = None
+    assert len(calls) == 1, "span2 非 None ⇒ 必须走一般路径"
+
+
+def test_s14_step_batch_matches_scalar_and_noise_guard():
+    """批量步进 vs 逐个体：三数组逐位一致；噪声档禁入（独立 rng 顺序契约）。"""
+    e = _engine(v2=True, patchy=True, max_count=3000)
+    e._mem_az[:6] = [[3, -1, 5, -1], [0, 7, -1, -1], [-1, -1, -1, -1],
+                     [4, 1, 6, 2], [7, -1, 0, -1], [1, 2, 3, 4]]
+    e._mem_tick[:6] = [[0, -1, 5, -1], [0, 0, -1, -1], [-1, -1, -1, -1],
+                       [0, 0, 0, 0], [0, -1, 2, -1], [0, 1, 2, 3]]
+    e._mem_dist[:6] = [[0.0, 0.0, 7.0, 0.0], [19.0, 0.0, 0.0, 0.0],
+                       [0.0, 0.0, 0.0, 0.0], [25.0, 1.0, 0.5, 30.0],
+                       [0.0, 0.0, 10.0, 0.0], [3.0, 3.0, 3.0, 3.0]]
+    e._mem_degraded[:6] = [[False, False, True, False], [False, False, False, False],
+                           [False, False, False, False], [False, True, False, False],
+                           [False, False, False, False], [False, False, False, False]]
+    triples = [(0, 2, 5), (1, -1, 6), (2, 3, 3), (3, 7, 0), (4, 0, -1), (5, 5, 6)]
+    snap = (e._mem_az[:6].copy(), e._mem_dist[:6].copy(), e._mem_degraded[:6].copy())
+    e._mem_v2_step_batch([t[0] for t in triples], [t[1] for t in triples],
+                         [t[2] for t in triples], 1.0)
+    got = (e._mem_az[:6].copy(), e._mem_dist[:6].copy(), e._mem_degraded[:6].copy())
+    # 非空洞守卫：至少一个数组确有变化
+    assert not (np.array_equal(snap[0], got[0]) and np.array_equal(snap[1], got[1]))
+    # 还原 → 逐个体标量参考
+    e._mem_az[:6], e._mem_dist[:6], e._mem_degraded[:6] = (
+        s.copy() for s in snap)
+    for (i, ho, hn) in triples:
+        e._mem_v2_step_one(i, ho, hn, 1.0)
+    for name, a, b in zip(("az", "dist", "degraded"), got,
+                          (e._mem_az[:6], e._mem_dist[:6], e._mem_degraded[:6])):
+        assert np.array_equal(a, b), f"批量步进 ≠ 逐个体（{name}）"
+    # 噪声档禁入（rng 消费顺序契约）
+    e2 = _engine(v2=True, patchy=True, max_count=1000, noise=True)
+    assert bool(e2._mem_noise) is True
+    with pytest.raises(AssertionError):
+        e2._mem_v2_step_batch([0], [0], [1], 1.0)
+
+
+def test_s14_write_vectorized_matches_scalar_reference():
+    """写路径向量化 vs 旧标量循环（测试内联 T1 前参考语义，五数组逐位一致）。"""
+    e = _engine(v2=True, patchy=True, max_count=3000)
+    idx_arr = np.flatnonzero(np.ones(len(e._flat), dtype=bool))
+    cur_flat = e._flat.copy()
+    e._heading[:] = 0
+    e._heading[::3] = -1
+    keys = ("_mem_az", "_mem_dist", "_mem_tick", "_mem_degraded", "_mem_food")
+    snap = {k: getattr(e, k).copy() for k in keys}
+    tick = int(e.tick) + 1
+    e._mem_v2_write(idx_arr, cur_flat, tick)
+    got = {k: getattr(e, k).copy() for k in keys}
+    assert int((got["_mem_az"] >= 0).sum()) > 0, "装置空洞：没有任何写入"
+    # 还原 → 旧标量参考（T1 前 `_mem_v2_write` 主体）
+    for k, v in snap.items():
+        setattr(e, k, v.copy())
+    ccell = e._patch_centroid[cur_flat[idx_arr]]
+    ok = ccell >= 0
+    assert ok.any()
+    ridx = idx_arr[ok]
+    cc = ccell[ok]
+    hd = e._heading[ridx]
+    slots = np.argmin(e._mem_tick[ridx], axis=1)
+    az = np.full(ridx.size, -1, dtype=np.int64)
+    for i in range(ridx.size):
+        s = e._cell_dir_slot(int(cur_flat[ridx[i]]), int(cc[i]))
+        if s < 0 or hd[i] < 0:
+            continue
+        az[i] = (s - int(hd[i])) % 8
+    m = az >= 0
+    assert m.any()
+    ri = ridx[m]
+    si = slots[m]
+    ai = az[m]
+    e._mem_az[ri, si] = ai.astype(np.int8)
+    e._mem_dist[ri, si] = 0.0
+    e._mem_tick[ri, si] = tick
+    e._mem_degraded[ri, si] = False
+    cap = np.maximum(e.resources._capacity[cur_flat[ri]], 1e-12)
+    e._mem_food[ri, si] = (
+        (e.resources._grid[cur_flat[ri]] / cap).astype(np.float32))
+    for k in keys:
+        assert np.array_equal(got[k], getattr(e, k)), f"写路径 ≠ 标量参考（{k}）"
 
 
 if __name__ == "__main__":

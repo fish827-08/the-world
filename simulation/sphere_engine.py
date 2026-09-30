@@ -206,6 +206,10 @@ EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
 DUEL_KEYS = ("skip_no_energy", "skip_no_prey", "skip_already_eaten",
              "real_attempts", "wounds", "kills")
 
+# T1：共享空数组（`_mv2_on` 档下 `valid_mem` 多数分支不消费 ⇒ 免每个体切片开销）。
+# 只读不写（下游仅 `len()` / 广播比较）⇒ 安全复用。
+_EMPTY_I64 = np.empty(0, dtype=np.int64)
+
 
 def _build_patch_centroid(world, patch_mask: np.ndarray) -> NDArray[np.int64]:
     """S3 记忆 v2：斑块连通域标注 + 每斑块质心格（构造期一次性；零 RNG ⇒ C7 无关）。
@@ -655,6 +659,9 @@ class SphereEngine:
          "_asm_sw_n",          # 读数：模式切换总次数（Σ 个体）
          "_asm_hold_block_n",  # 读数：因最小锁定被挡下的"本应切换"次数
          "_asm_mode_n",        # 读数：(4,) 每 tick 模式计数**累计**（时间占比分布用）
+         # ---- T1：memv2 写入热点优化（本线 = [本地开发·性能线] 轻舟）------------
+         "_dirs8_const",       # (8,) 标准行（2..rows-3）8 邻方向常量（参考格标量构造）
+         "_dirs4_const",       # (4,) 标准行 VN-4 方向常量（= _dirs8_const[VN_IDX]）
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -1279,6 +1286,15 @@ class SphereEngine:
         self._ars_cos = (_unit @ _unit.T).astype(np.float64)  # (8,8)
         # S3 记忆 v2：保留槽位单位向量（任意方向 → 最接近 Moore 槽位，内积 argmax）
         self._ars_unit = np.asarray(_unit, dtype=np.float64)   # (8,2)
+        # T1（[本地开发·性能线] 轻舟）：标准行（2..rows-3）的 8/4 邻方向常量。
+        # 由**参考格标量调用**构造（构造即逐位）⇒ 快路径查表 = 与逐格量化同值。
+        # 穷举验证（_t1_dirs_verify.py：460,800 格零 mismatch）：标准行全列同值；
+        # 极区/边界行（0/1/rows-2/rows-1）不适用 ⇒ 回退 `_cell_dir_slot_pairs`。
+        _d8 = np.asarray(
+            [self._cell_dir_slot(_ref, int(x)) for x in _nb_ref], dtype=np.int64)
+        assert (_d8 >= 0).all(), "标准行方向常量构造失败（参考格邻域退化）"
+        self._dirs8_const = _d8
+        self._dirs4_const = _d8[list(self.world._VON_NEUMANN_IDX)]
         # 个体状态数组（关档仍建 ⇒ 少一个特例 = 少一个坑；关档不消费 ⇒ 零轨迹影响）
         self._out_taken = np.zeros(n, dtype=np.float64)
         self._feed_fast = np.zeros(n, dtype=np.float64)
@@ -3956,6 +3972,9 @@ class SphereEngine:
                     and self.world.rows >= 3
                     and self.world.cols >= 2
                 )
+                # T1：v2 档下 `valid_mem` 唯一消费点是 (softmax ∧ measure) 探针 ⇒
+                #   其余情况免每-个体切片（`_work_memory` 在 v2 下不写不读）。
+                _v1_need = (not _mv2_on) or (d2_softmax and self._measure_resp)
                 if _batch_ok:
                     targets = self._move_decide_batch(
                         mi, food_ratio, sig_present, densities, rand_choice, rep_w,
@@ -3963,6 +3982,13 @@ class SphereEngine:
                         _smell_arr if _smell_use_on else None,
                         (self._mode, _asm_sf, _asm_sr, _asm_sk) if _asm_on else None)
                 # 快路径命中 ⇒ 参考循环迭代集为空（**不重排**下方 280 行参考实现）。
+                # T1：v2 步进批量化 —— 无噪声档循环内只收集三元组，循环后一次冲刷
+                #   （所有 cos 读都在任何 v2 写之前 ⇒ 状态等价；噪声档保持逐个体调用
+                #   ⇒ 独立 rng 消费顺序不变）。`_sub_on` 段在冲刷之后，读序不变。
+                _b_step = _mv2_on and not self._mem_noise
+                _c_idx: list = []
+                _c_hdo: list = []
+                _c_hdn: list = []
                 for i, idx in enumerate(() if _batch_ok else mi):
                     # D2-3 信息不对称：感知半径4 = Von Neumann（上/左/右/下），各向同性。
                     # ⚠️ 禁用 nb[:4]：8 邻列序以 [上左,上,上右,左] 打头，取"前4个"
@@ -4030,7 +4056,9 @@ class SphereEngine:
                         score = perc * (
                             fr * 0.5 + sp * sig_weight
                         ) + soc * densities[nb]
-                    valid_mem = self._work_memory[idx][self._work_memory[idx] >= 0]
+                    valid_mem = (
+                        self._work_memory[idx][self._work_memory[idx] >= 0]
+                        if _v1_need else _EMPTY_I64)
                     if _mv2_on:
                         # S3 记忆 v2：自我参照系打分（取代 v1 全部记忆项；v2 下不再读
                         #   `_work_memory`）。gain（精/粗）已在函数内应用 ⇒ 这里只乘 perc。
@@ -4260,12 +4288,15 @@ class SphereEngine:
                     # S3 记忆 v2：`_mv2_on` 时 **ARS 关档也强制维护** heading（v2 的自我参照
                     #    系需要持续朝向基准），并同步做记忆旋转/距离更新（`_mem_v2_step_one`）。
                     if (_ars_on or _mv2_on) and len(nb) in (4, 8):
-                        _same = np.flatnonzero(nb == targets[i])
-                        if len(_same) == 1:
+                        # T1：`flatnonzero + len==1` → `sum + argmax`（首个命中位置同值、
+                        #   重复命中两式都跳过；省一次索引数组分配）
+                        _eq = (nb == targets[i])
+                        if int(_eq.sum()) == 1:
+                            _pos = int(np.argmax(_eq))
                             _hd_new = (
-                                int(_same[0])
+                                _pos
                                 if len(nb) == 8
-                                else int(self.world._VON_NEUMANN_IDX[int(_same[0])])
+                                else int(self.world._VON_NEUMANN_IDX[_pos])
                             )
                             if _mv2_on:
                                 _hd_old = int(self._heading[idx])
@@ -4273,7 +4304,12 @@ class SphereEngine:
                                 # 距离步长：本 tick 换格 1（subpos 亚格位移由 4.6 段
                                 #    `steps` 变量给实际格数；此处取保守 1.0 即可满足
                                 #   "只增不减 + 降级"语义 —— 换格即消耗，见规格 §二）。
-                                self._mem_v2_step_one(idx, _hd_old, _hd_new, 1.0)
+                                if _b_step:
+                                    _c_idx.append(idx)
+                                    _c_hdo.append(_hd_old)
+                                    _c_hdn.append(_hd_new)
+                                else:
+                                    self._mem_v2_step_one(idx, _hd_old, _hd_new, 1.0)
                             elif _ars_on:
                                 self._heading[idx] = _hd_new
                     # ── R146/R149 L2 第二段：冲刺者改走 2 格（**盲选**）─────────────
@@ -4291,6 +4327,9 @@ class SphereEngine:
                         _fl = int(self._far_len[_c])
                         targets[i] = int(self._far_cells[
                             int(self._far_off[_c]) + int(rand_choice[i] // 100) % _fl])
+                # T1：v2 批量冲刷（在所有 cos 读之后、亚格位移段之前；RNG 零消费）
+                if _c_idx:
+                    self._mem_v2_step_batch(_c_idx, _c_hdo, _c_hdn, 1.0)
                 if _sub_on:
                     # ── 亚格位移：方向沿用 score 选出的方向，步长由 g18×年龄**确定性**给出 ──
                     # 🔴 速度必须确定性（I3）：每 tick 抽取数与关档一致。`rand_choice` 已被 L2
@@ -5258,6 +5297,34 @@ class SphereEngine:
         u = np.array([dr / ln, dcc / ln], dtype=np.float64)
         return int(np.argmax(self._ars_unit @ u))
 
+    def _cell_dir_slot_pairs(self, cur_arr: np.ndarray,
+                             tar_arr: np.ndarray) -> np.ndarray:
+        """`_cell_dir_slot` 的整批向量化等价（槽位级一致；同式，只去解释器循环）。
+
+        🔴 T1 验收依据（`_trash_local/_t1_vec_validate.py`）：全 (dr,dcc) 箱穷举
+        920,640 pair **槽位零 mismatch** + 真实写路径样本零 mismatch。注意
+        `ln ** 0.5`（CPython pow）vs `np.sqrt` 在本机有 46/73,168 个 1-ULP 差
+        （pow 不保证正确舍入）——但**不翻转任何 argmax**（穷举证明）⇒ 槽位
+        （= 写入 `_mem_az` 的唯一整数）逐位一致。语义同标量版：
+        `cur == target` 或退化距离 ⇒ -1。
+        """
+        cur_arr = np.asarray(cur_arr, dtype=np.int64)
+        tar_arr = np.asarray(tar_arr, dtype=np.int64)
+        cols = int(self.world.cols)
+        cr, cc = np.divmod(cur_arr, cols)
+        tr, tc = np.divmod(tar_arr, cols)
+        dr = (tr - cr).astype(np.float64)
+        dcc = ((tc - cc).astype(np.float64) + cols / 2.0) % cols - cols / 2.0
+        ln2 = dr * dr + dcc * dcc
+        out = np.full(cur_arr.shape, -1, dtype=np.int64)
+        ok = (cur_arr != tar_arr) & (ln2 >= 1e-12)
+        if not ok.any():
+            return out
+        ln = np.sqrt(ln2[ok])
+        u = np.stack([dr[ok] / ln, dcc[ok] / ln])          # (2, m)
+        out[ok] = np.argmax(self._ars_unit @ u, axis=0)    # (8, m) → 每列 argmax
+        return out
+
     def _mem_v2_write(self, idx_arr: np.ndarray, cur_flat: np.ndarray,
                       tick: int) -> None:
         """富食格写入（v2 分支；取代 v1 `_work_memory` 写入）。
@@ -5274,12 +5341,10 @@ class SphereEngine:
         cc = ccell[ok]
         hd = self._heading[ridx]
         slots = np.argmin(self._mem_tick[ridx], axis=1)
-        az = np.full(ridx.size, -1, dtype=np.int64)
-        for i in range(ridx.size):
-            s = self._cell_dir_slot(int(cur_flat[ridx[i]]), int(cc[i]))
-            if s < 0 or hd[i] < 0:
-                continue
-            az[i] = (s - int(hd[i])) % 8
+        # T1：方向量化整批向量化（原逐行 `_cell_dir_slot` 循环 = 本段热点；
+        #   槽位级逐位等价证明见 `_cell_dir_slot_pairs` 文档）
+        s = self._cell_dir_slot_pairs(cur_flat[ridx], cc)
+        az = np.where((s >= 0) & (hd >= 0), (s - hd) % 8, -1)
         m = az >= 0
         if not m.any():
             return
@@ -5333,6 +5398,37 @@ class SphereEngine:
                 self._mem_dist[idx] > self._mem_degrade_thr)
             self._mem_degraded[idx, over] = True
 
+    def _mem_v2_step_batch(self, idx_list: list, hd_old_list: list,
+                           hd_new_list: list, steps: float) -> None:
+        """T1：`_mem_v2_step_one` 的批量等价（**无噪声档专用**；调用点 steps 恒 1.0）。
+
+        🔴 只做 ① 旋转 ③④ 距离/降级；② 噪声抽取按个体顺序消费独立 rng ⇒
+        有噪声档必须保留逐个体调用（调用方保证：`_mem_noise=True` 不进本函数）。
+        逐位等价：每行与标量同式、同 dtype 链（int64 中间量 / float32 回存）。
+        """
+        assert not self._mem_noise, "批量步进仅限无噪声档（独立 rng 消费顺序契约）"
+        idx = np.asarray(idx_list, dtype=np.int64)
+        hd_old = np.asarray(hd_old_list, dtype=np.int64)
+        hd_new = np.asarray(hd_new_list, dtype=np.int64)
+        az = self._mem_az[idx]                          # (n,4) 副本
+        # ① 旋转（同条件：两端朝向均已知且不同；只动非空槽）
+        rot = (hd_old >= 0) & (hd_new >= 0) & (hd_old != hd_new)
+        if rot.any():
+            delta = (hd_new - hd_old) % 8
+            m = (az >= 0) & rot[:, None]
+            if m.any():
+                self._mem_az[idx] = np.where(
+                    m, (az.astype(np.int64) + delta[:, None]) % 8, az
+                ).astype(np.int8)
+        # ③④ 距离累加 + 永久降级（同标量：min(dist+steps, 1e18)，只增不减）
+        act = self._mem_tick[idx] >= 0
+        if act.any():
+            d_new = np.minimum(self._mem_dist[idx] + steps, 1e18)
+            self._mem_dist[idx] = np.where(act, d_new, self._mem_dist[idx])
+            over = act & ~self._mem_degraded[idx] & (d_new > self._mem_degrade_thr)
+            if over.any():
+                self._mem_degraded[idx] = self._mem_degraded[idx] | over
+
     def _memory_egocentric_cos(self, idx: int, cur: int, nb: np.ndarray,
                                heading_now: int) -> np.ndarray:
         """打分（v2）：候选邻居 c 的**相对朝向** vs 记忆方位 q 的 `max cos`。
@@ -5355,13 +5451,20 @@ class SphereEngine:
         valid = (az >= 0) & ((self._tick - ticks) <= self._mem_ttl)
         if not valid.any():
             return out
-        # 候选 c → 世界槽位（逐格量化；nb ≤ 8 小数组，循环开销可忽略）
-        dirs = np.full(n_cand, -1, dtype=np.int64)
-        for j in range(n_cand):
-            dirs[j] = self._cell_dir_slot(cur, int(nb[j]))
-        okd = dirs >= 0
-        if not okd.any():
-            return out
+        # 候选 c → 世界槽位。T1 快路径：标准行（2..rows-3）的 8/4 邻方向是常量
+        #   （穷举 460,800 格零 mismatch）⇒ 查表；其余（极区/边界行/span2/异形 nb）
+        #   走整批向量化一般路径 `_cell_dir_slot_pairs`（槽位级逐位等价，同文档证明）。
+        if ((n_cand == 8 or n_cand == 4) and self._span_table is None
+                and 2 <= cur // int(self.world.cols) <= int(self.world.rows) - 3):
+            dirs = self._dirs8_const if n_cand == 8 else self._dirs4_const
+            okd = slice(None)
+        else:
+            dirs = self._cell_dir_slot_pairs(
+                np.full(n_cand, cur, dtype=np.int64),
+                np.asarray(nb, dtype=np.int64))
+            okd = dirs >= 0
+            if not okd.any():
+                return out
         ang = (dirs[okd].astype(np.int64) - int(heading_now)) % 8 \
             if heading_now >= 0 else dirs[okd].astype(np.int64)
         qs = az[valid].astype(np.int64)
