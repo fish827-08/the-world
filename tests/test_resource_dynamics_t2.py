@@ -233,6 +233,7 @@ def test_rotation_reborn_and_promote():
     rd._rest_until[patch_cell] = -1
     rd._mask[patch_cell] = False
     rd._demoted[patch_cell] = True
+    rd.rebuild_indexes()   # A2-④：绕过 note_tick 直改数组 ⇒ 重建派生索引（外部写方契约）
     # rotate：先搬走 `_demoted` 的加成（promote_n ≥ 1），再处理到期重生（tick 3000 ≥ 2000）
     rd.rotate(3000)
     assert rd.promote_n >= 1, "死格斑块加成应被搬移（promote）"
@@ -270,6 +271,7 @@ def test_dead_cell_max_frac_gate():
     kill_frac_cells = int(0.6 * n)
     rd._dead[:kill_frac_cells] = True
     rd._dead_since[:kill_frac_cells] = 0
+    rd.rebuild_indexes()   # A2-④：绕过 note_tick 直改数组 ⇒ 重建派生索引（外部写方契约）
     n_patch = int(rd._mask.sum())
     rd.rotate(100)
     assert rd.forced_reborn_n > 0, "超阈应触发强制重生（反荒漠化闸）"
