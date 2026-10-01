@@ -123,6 +123,131 @@ SEEDS_USED = set(range(42, 101))
 
 # ---------- R275 T2：g22（记忆权重基因）活体统计 ----------
 
+# ---- R308：个体活动范围累计量（落实 R307 派工；青梧方案 A 的探针层实现）----
+_HR_COLS = ["hr_n", "hr_max_dist_median", "hr_max_dist_p90", "hr_max_dist_gini",
+            "hr_hist_0_5", "hr_hist_5_10", "hr_hist_10_20", "hr_hist_20_50",
+            "hr_hist_50p", "hr_patch_median", "hr_patch_p90",
+            "hr_move_median", "hr_move_p90", "hr_away_median", "hr_away_p90",
+            # g22 的 10 桶直方图（[0,0.1)..[0.9,1.0]）⇒ **判"是否两极分化"看形状**
+            "g22_hist_0", "g22_hist_1", "g22_hist_2", "g22_hist_3", "g22_hist_4",
+            "g22_hist_5", "g22_hist_6", "g22_hist_7", "g22_hist_8", "g22_hist_9"]
+
+
+def _gini_of(x) -> float:
+    """基尼系数（0=完全均等，越大越不均）；空或全零 ⇒ NaN。"""
+    a = np.sort(np.asarray(x, dtype=float))
+    n = a.size
+    s = float(a.sum())
+    if n == 0 or s <= 0:
+        return float("nan")
+    idx = np.arange(1, n + 1, dtype=float)
+    return float((2.0 * idx - n - 1.0).dot(a) / (n * s))
+
+
+class _HomeRangeTracker:
+    """个体活动范围累计量（R308；落实 R307 派工）。
+
+    🔴 **只读**引擎状态（`_id/_flat`）⇒ C7 安全；**默认关**（不实例化 ⇒ 列与行都不变
+       ⇒ 逐字节等于旧版）。
+    口径（每 sample tick 采一次；**只统计当前存活个体**，死亡即丢记录以省内存）：
+      · `hr_max_dist` = 首次被采到的格（≈出生位置）到当前位置的**大圆距离**（格）；
+      · `hr_move`     = 相邻采样点之间的**直线**距离累计（低估真实路径长度）；
+      · `hr_patch`    = 采到过的**不同斑块数**（背景格不计）；
+      · `hr_away`     = 采样点落在**背景**（`labels < 0`）的比例。
+    用途：判「同世界内留守型/出走型分化」（双峰）——判据见 R307/R308（预注册）。
+    """
+    def __init__(self, world=None):
+        self.w = world
+        self.nr = int(world.rows) if world is not None else None
+        self.nc = int(world.cols) if world is not None else None
+        self.reg = {}  # id -> [birth_r, birth_c, prev_r, prev_c, maxd, move, away_n, seen_n, {patches}]
+        self.g22h = None  # g22 活体 10 桶直方图（每次 update 重算）
+
+    def _dist(self, r1, c1, r2, c2) -> float:
+        """大圆距离，半径以「行」为单位（nr 行 = 180°）。"""
+        lat1 = (r1 + 0.5) * math.pi / self.nr - math.pi / 2.0
+        lat2 = (r2 + 0.5) * math.pi / self.nr - math.pi / 2.0
+        dlon = (c1 - c2) * (2.0 * math.pi / self.nc)
+        x = (math.sin(lat1) * math.sin(lat2)
+             + math.cos(lat1) * math.cos(lat2) * math.cos(dlon))
+        return math.acos(max(-1.0, min(1.0, x))) * (self.nr / math.pi)
+
+    def update(self, eng, labels) -> None:
+        if self.w is None:  # 惰性绑定世界（main 侧先于引擎构造）
+            self.w = eng.world
+            self.nr = int(eng.world.rows)
+            self.nc = int(eng.world.cols)
+        ids = np.asarray(eng._id)
+        if ids.size == 0:
+            return
+        flat = np.asarray(eng._flat)
+        rows, cols = self.w.flat_to_rc(flat)
+        lab = np.asarray(labels)[flat]
+        reg = self.reg
+        alive = set()
+        for k_i, r_i, c_i, l_i in zip(ids.tolist(), rows.tolist(),
+                                      cols.tolist(), lab.tolist()):
+            alive.add(k_i)
+            e = reg.get(k_i)
+            r = float(r_i)
+            c = float(c_i)
+            if e is None:
+                reg[k_i] = [r, c, r, c, 0.0, 0.0,
+                            1 if l_i < 0 else 0, 1,
+                            {int(l_i)} if l_i >= 0 else set()]
+            else:
+                d_birth = self._dist(r, c, e[0], e[1])
+                if d_birth > e[4]:
+                    e[4] = d_birth
+                e[5] += self._dist(r, c, e[2], e[3])
+                e[2] = r
+                e[3] = c
+                if l_i < 0:
+                    e[6] += 1
+                e[7] += 1
+                if l_i >= 0:
+                    e[8].add(int(l_i))
+        # 只留活体（输出只统计当前存活个体 ⇒ 死者的历史无意义）
+        if len(reg) > len(alive):
+            self.reg = {k: v for k, v in reg.items() if k in alive}
+        # g22 活体分布（10 桶直方图；口径同 `_g22_stats`）
+        _g = np.asarray(eng._genes[: ids.size, Gene.MEMORY_WEIGHT], dtype=float)
+        self.g22h = np.histogram(_g, bins=10, range=(0.0, 1.0))[0] / max(ids.size, 1)
+
+    def stats(self) -> dict:
+        vs = list(self.reg.values())
+        if not vs:
+            out = {c: float("nan") for c in _HR_COLS}
+            out["hr_n"] = 0
+            return out
+        md = np.array([v[4] for v in vs], dtype=float)
+        mv = np.array([v[5] for v in vs], dtype=float)
+        pn = np.array([len(v[8]) for v in vs], dtype=float)
+        aw = np.array([v[6] / max(v[7], 1) for v in vs], dtype=float)
+        out = {
+            "hr_n": len(vs),
+            "hr_max_dist_median": float(np.median(md)),
+            "hr_max_dist_p90": float(np.percentile(md, 90)),
+            "hr_max_dist_gini": _gini_of(md),
+            "hr_hist_0_5": float((md < 5).mean()),
+            "hr_hist_5_10": float(((md >= 5) & (md < 10)).mean()),
+            "hr_hist_10_20": float(((md >= 10) & (md < 20)).mean()),
+            "hr_hist_20_50": float(((md >= 20) & (md < 50)).mean()),
+            "hr_hist_50p": float((md >= 50).mean()),
+            "hr_patch_median": float(np.median(pn)),
+            "hr_patch_p90": float(np.percentile(pn, 90)),
+            "hr_move_median": float(np.median(mv)),
+            "hr_move_p90": float(np.percentile(mv, 90)),
+            "hr_away_median": float(np.median(aw)),
+            "hr_away_p90": float(np.percentile(aw, 90)),
+        }
+        # g22 直方图（10 桶）：形状判"是否两极" ⇒ 双峰 = 两端桶高、中间低
+        _h = self.g22h if self.g22h is not None else np.full(10, float("nan"))
+        for _i, _v in enumerate(_h):
+            out[f"g22_hist_{_i}"] = float(_v)
+        return out
+
+
 def _g22_stats(eng, N: int) -> dict:
     """取活体 `eng._genes[:N, Gene.MEMORY_WEIGHT]` 的均值/分位 + 按代分层（R280 S3.5b）。
 
@@ -437,7 +562,7 @@ def _last_sample_tick(csv_path: str, key: tuple[str, str]) -> int:
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             bg_low_prod_frac=0.4, bg_low_cap_mult=0.05, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
-            prior_rows=None, out_path=None, on_row=None):
+            prior_rows=None, out_path=None, on_row=None, hr_tracker=None):
     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
 
     🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
@@ -511,7 +636,8 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
     return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
                       labels, n_patch_total, init_cap_full, init_patch_cap,
                       init_cap_sum, visited_mask, patch_ever_visited, first_visit,
-                      save_every, snapshot_dir, tag, on_row=on_row)
+                      save_every, snapshot_dir, tag, on_row=on_row,
+                      hr_tracker=hr_tracker)
 
 
 def _fail_save_every(save_every, sample, snapshot_dir):
@@ -622,7 +748,7 @@ def _loop(seed, mem_on, rows_out, start_tick, ticks, sample, labels,
 def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                n_patch_total, init_cap_full, init_patch_cap, init_cap_sum,
                visited_mask, patch_ever_visited, first_visit,
-               save_every, snapshot_dir, tag, on_row=None):
+               save_every, snapshot_dir, tag, on_row=None, hr_tracker=None):
     """采样主循环（首跑 / 续跑共用）——见 `_loop` 的落盘顺序说明。
 
     🔴 R303：`on_row` 非 None ⇒ **每个采样点生成后立刻回调落盘**（行节拍 == 快照节拍），
@@ -667,6 +793,11 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                                         / max(1, int((labels >= 0).sum())))
             # ③ 留守型撤离时机：以背景停留占比 bg_resid_frac 的轨迹体现（见判读）
             bg_resid = float(visited_mask[labels < 0].sum()) / max(1, int((labels < 0).sum()))
+            # 🔴 R308：个体活动范围累计（默认关 ⇒ `_hr` 为空 ⇒ 行内容逐字节不变）
+            _hr = {}
+            if hr_tracker is not None:
+                hr_tracker.update(eng, labels)
+                _hr = hr_tracker.stats()
             rows_out.append({
                 "seed": seed, "arm": "mem_on" if mem_on else "mem_off", "tick": t,
                 "pop": N, "global_sat": sat,
@@ -691,6 +822,7 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                 "l0_peak_rest": l0.get("l0_peak_rest", 0),
                 # ---- R275 T2：g22 活体统计（S3.5 记忆基因演化）----
                 **_g22_stats(eng, N),
+                **_hr,
             })
             # 🔴 R303：sample 级行落盘（回调由 main 提供：writerow+flush+fsync）。
             #   `rows_out` 仍保留（summary 需要末行、续跑清行需要行集合）。
@@ -757,6 +889,11 @@ def main():
     ap.add_argument("--keep-ckpt", action="store_true",
                     help="run 正常收尾后**保留**快照（默认收尾即清，防过期快照把下次"
                          "跑偏进“接续”分支）。**测试/演练断点场景时用它**")
+    # ---- 🔴 R308：个体活动范围（默认关 ⇒ 列与行都逐字节等于旧版）----
+    ap.add_argument("--home-range", action="store_true",
+                    help="每采样点输出个体活动范围分布（hr_* 15 列：最大位移/累计移动/"
+                         "访问斑块数/背景占比 的中位·p90·基尼 + 5 档直方图）。"
+                         "**只读引擎状态，默认关**；配合 `--keep-ckpt` 可留终态快照")
     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
     add_device_arg(ap)
     a = ap.parse_args()
@@ -797,6 +934,8 @@ def main():
               "g22_mean_gen0", "g22_mean_gen1", "g22_mean_gen2", "g22_mean_gen3p",
               "g22_mean_latest", "pop_gen0", "pop_gen1", "pop_gen2", "pop_gen3p",
               "max_gen"]
+    if a.home_range:      # 🔴 R308：仅在开启时追加个体活动范围列（默认关 ⇒ 表头不变）
+        header = header + _HR_COLS
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     out_json = os.path.splitext(a.out)[0] + ".summary.json"
@@ -898,6 +1037,7 @@ def main():
                 # v3：续跑时"本段新行"从空开始，旧行留在 CSV 里（已在上面的
                 # 清行段处理过）。**不能用 --append 的 prior_rows 合并**：
                 # 那会把旧行读进来再重写一遍 ⇒ 浮点 repr 往返抖精度。
+                _hr = _HomeRangeTracker() if a.home_range else None   # R308：每 run 新建
                 t0 = time.time()
                 rows_out, stop = run_one(
                     sd, a.rows, a.cols, a.pop, a.patches, a.ticks, a.sample,
@@ -905,7 +1045,7 @@ def main():
                     a.weight_gene,
                     save_every=a.save_every, snapshot_dir=a.snapshot_dir,
                     resume_sample=_res, prior_rows=None, out_path=a.out,
-                    on_row=_emit)
+                    on_row=_emit, hr_tracker=_hr)
                 # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
                 fout.flush()
                 os.fsync(fout.fileno())
