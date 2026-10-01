@@ -18,9 +18,10 @@ R275/批 A 出过一次事故：探针忘了传 `--rows/--cols/--patches/...` �
 
 预设档口径
 ----------
-`s2` = 批 A / S2 装置（R278 §三 指定）：
+`s2` = 批 A / S2 装置（R278 §三 指定；**R320 起撤绿洲带**）：
     rows=480 cols=960 patches=1700 pop=10000 rgm=1.195
-    bg_low_prod_frac=0.4 bg_low_cap_mult=0.05
+    bg_low_prod_frac=0.0 bg_low_cap_mult=0.0   ← 纯零背景
+    ⚠️ 旧值 0.4/0.05 已废：它触发 `from_field` 的抽奖缺陷（详见下方 DEVICE_PRESETS 注释）
 `s3` = S3 记忆探针默认装置（与本模块 `s2` 的装置字段相同，但 ticks/sample 不同族）；
     这里**只列装置字段**，`ticks/sample` 属"实验设计"而非"装置"，不纳入预设，
     以免把两个概念混在一起（改了 ticks 不等于换了装置）。
@@ -30,9 +31,20 @@ from __future__ import annotations
 # 只含"装置"字段（空间尺度 + 能量 + 背景带），不含 ticks/sample/seed 等实验设计字段。
 # 值 = 与探针内 DEVICE/S1_BASE 逐位一致（改这里必须同步核实探针默认，见单测）。
 DEVICE_PRESETS: dict[str, dict] = {
+    # 🔴 R320（2026-10-01，fish 拍板）：**撤绿洲带、回到纯零背景产能**。
+    #   旧值 0.4/0.05 会触发 `ResourceDynamics.from_field` 的**抽奖缺陷**：
+    #   `bg_production_zero` 由 `cap[~m][0]`（背景的**第 0 个格**）反推 ⇒ 该格恰好是
+    #   低产能格的概率 ≈ 40% ⇒ 世界被判成"背景有产能" ⇒ 退化回"全图可产"（B 支）。
+    #   `[实测]` 12 个 world：旧档 **3/12** 判成 B 支，且**恰好是 167/170/172**
+    #     （与 60k 实测的 B 支完全一致）⇒ 根因确认；
+    #   `bg_low_prod_frac=0` ⇒ 背景格容量恒 0 ⇒ `cap[~m][0]` 恒 0 ⇒ 判据恒 True
+    #     ⇒ **抽奖从参数上消失**（`[实测]` 复测 0/12，6 秒）。
+    #   ⚠️ **装置级变更**（进 SimConfig 指纹）⇒ 旧数据（含 60k 旗舰批）标"旧装置"；
+    #      代码层健壮性修复（`from_field` 直接读显式字段）另立项，
+    #      防将来重开绿洲带时抽奖复活。回归守卫见 `tools/check_bg_lottery.py`。
     "s2": dict(
         rows=480, cols=960, patches=1700, pop=10000, rgm=1.195,
-        bg_low_prod_frac=0.4, bg_low_cap_mult=0.05,
+        bg_low_prod_frac=0.0, bg_low_cap_mult=0.0,
     ),
 }
 
