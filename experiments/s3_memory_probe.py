@@ -756,7 +756,8 @@ def _last_sample_tick(csv_path: str, key: tuple[str, str]) -> int:
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             bg_low_prod_frac=0.4, bg_low_cap_mult=0.05, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
-            prior_rows=None, out_path=None, on_row=None, hr_tracker=None):
+            prior_rows=None, out_path=None, on_row=None, hr_tracker=None,
+            g22_init=None):
     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
 
     🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
@@ -826,7 +827,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
          visited_mask, patch_ever_visited, first_visit,
          rows_out), eng = _build_fresh_run(
             seed, rows, cols, pop, patches, rgm, mem_on,
-            bg_low_prod_frac, bg_low_cap_mult, weight_gene)
+            bg_low_prod_frac, bg_low_cap_mult, weight_gene, g22_init)
     return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
                       labels, n_patch_total, init_cap_full, init_patch_cap,
                       init_cap_sum, visited_mask, patch_ever_visited, first_visit,
@@ -860,7 +861,8 @@ def _peek_start_tick(snapshot_dir, tag) -> int:
 
 
 def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
-                     bg_low_prod_frac, bg_low_cap_mult, weight_gene):
+                     bg_low_prod_frac, bg_low_cap_mult, weight_gene,
+                     g22_init=None):
     """首跑：建引擎 + 探针初始累积量（与旧版 `run_one` 逐行等价）。"""
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
@@ -888,6 +890,17 @@ def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
 
     eng = SphereEngine(c)
     apply_post_build(eng, notes)
+
+    # 🔴 R320：**初始 g22 扰动**（fish 2026-10-01："让记忆演化，它应该有个最合适的值"）
+    #   只在**构造后钉一次**；子代照常按父代继承 + 变异 ⇒ 之后**完全自由演化**。
+    #   `None`（默认）⇒ 一个字都不改 ⇒ 与旧版逐位等价。
+    if g22_init is not None:
+        eng._genes[:, Gene.MEMORY_WEIGHT] = float(g22_init)
+        try:  # 让 t=0 基因组摘要同步（该摘要只是"地基凭证"，不影响动力学）
+            from simulation.sphere_engine import _genome_summary
+            eng._genome_t0 = _genome_summary(eng._genes)
+        except Exception:  # noqa: BLE001 — 诊断字段，取不到就不管
+            pass
 
     init_cap_full = eng.resources._capacity.copy()
     labels = _label_patches(eng.world, eng.resources._patch_mask)
@@ -1112,6 +1125,11 @@ def main():
                     help="每多少 tick 干预一次（0 = 关）")
     ap.add_argument("--perturb-frac", type=float, default=0.5,
                     help="每次移除「出走型候选」的比例（默认 0.5）；`rand` 模式移除同数量")
+    # ---- 🔴 R320：初始 g22 扰动（测"记忆基因的最优值"）----
+    ap.add_argument("--g22-init", type=float, default=None,
+                    help="把**初始** g22（记忆权重基因）钉到该值，之后**自由演化**。"
+                         "默认 None = 不改（逐位等价）。用于双端扰动实验：从 0.1 / 0.9 两端出发，"
+                         "看是否收敛回同一个最优值（稳定化选择）")
     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
     add_device_arg(ap)
     a = ap.parse_args()
@@ -1279,7 +1297,7 @@ def main():
                     a.weight_gene,
                     save_every=a.save_every, snapshot_dir=a.snapshot_dir,
                     resume_sample=_res, prior_rows=None, out_path=a.out,
-                    on_row=_emit, hr_tracker=_hr)
+                    on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init)
                 # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
                 fout.flush()
                 os.fsync(fout.fileno())
