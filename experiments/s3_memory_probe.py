@@ -130,7 +130,13 @@ _HR_COLS = ["hr_n", "hr_max_dist_median", "hr_max_dist_p90", "hr_max_dist_gini",
             "hr_move_median", "hr_move_p90", "hr_away_median", "hr_away_p90",
             # g22 的 10 桶直方图（[0,0.1)..[0.9,1.0]）⇒ **判"是否两极分化"看形状**
             "g22_hist_0", "g22_hist_1", "g22_hist_2", "g22_hist_3", "g22_hist_4",
-            "g22_hist_5", "g22_hist_6", "g22_hist_7", "g22_hist_8", "g22_hist_9"]
+            "g22_hist_5", "g22_hist_6", "g22_hist_7", "g22_hist_8", "g22_hist_9",
+            # 🔴 R312：**最新一代**的直方图（fish 2026-10-01：不该"一锅端"——
+            #   老一代是历史遗留，会把新一代的选择信号稀释掉；`g22_mean_latest` 同理）
+            "g22_hist_latest_0", "g22_hist_latest_1", "g22_hist_latest_2",
+            "g22_hist_latest_3", "g22_hist_latest_4", "g22_hist_latest_5",
+            "g22_hist_latest_6", "g22_hist_latest_7", "g22_hist_latest_8",
+            "g22_hist_latest_9", "g22_latest_n"]
 
 
 def _gini_of(x) -> float:
@@ -162,6 +168,8 @@ class _HomeRangeTracker:
         self.nc = int(world.cols) if world is not None else None
         self.reg = {}  # id -> [birth_r, birth_c, prev_r, prev_c, maxd, move, away_n, seen_n, {patches}]
         self.g22h = None  # g22 活体 10 桶直方图（每次 update 重算）
+        self.g22h_latest = None  # 🔴 R312：最新一代（max_gen）的 10 桶直方图
+        self.g22n_latest = 0
 
     def _dist(self, r1, c1, r2, c2) -> float:
         """大圆距离，半径以「行」为单位（nr 行 = 180°）。"""
@@ -213,6 +221,18 @@ class _HomeRangeTracker:
         # g22 活体分布（10 桶直方图；口径同 `_g22_stats`）
         _g = np.asarray(eng._genes[: ids.size, Gene.MEMORY_WEIGHT], dtype=float)
         self.g22h = np.histogram(_g, bins=10, range=(0.0, 1.0))[0] / max(ids.size, 1)
+        # 🔴 R312：**最新一代**（max_gen）单独的直方图 + 该代个体数
+        #   （老一代是历史遗留 ⇒ 只算最新几代才看得到"当下正在被选择的方向"）
+        _gen = np.asarray(eng._generation[: ids.size])
+        if _gen.size:
+            _gmax = int(_gen.max())
+            _gl = _g[_gen == _gmax]
+            self.g22n_latest = int(_gl.size)
+            self.g22h_latest = (np.histogram(_gl, bins=10, range=(0.0, 1.0))[0]
+                                / _gl.size)
+        else:
+            self.g22n_latest = 0
+            self.g22h_latest = np.full(10, float("nan"))
 
     def stats(self) -> dict:
         vs = list(self.reg.values())
@@ -245,6 +265,12 @@ class _HomeRangeTracker:
         _h = self.g22h if self.g22h is not None else np.full(10, float("nan"))
         for _i, _v in enumerate(_h):
             out[f"g22_hist_{_i}"] = float(_v)
+        # 🔴 R312：最新一代直方图（避开老一代稀释）
+        _hl = (self.g22h_latest if self.g22h_latest is not None
+               else np.full(10, float("nan")))
+        for _i, _v in enumerate(_hl):
+            out[f"g22_hist_latest_{_i}"] = float(_v)
+        out["g22_latest_n"] = int(self.g22n_latest or 0)
         return out
 
 
