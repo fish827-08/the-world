@@ -361,6 +361,11 @@ class _HomeRangeTracker:
                 "max_dist": float(v[4]), "move": float(v[5]),
                 "away_frac": float(v[6]) / max(int(v[7]), 1),
                 "n_patch": int(len(v[8])), "seen": int(v[7]),
+                # 🔴 R317：位置列 —— 亲子"同处一地"是设计 1 的**致命混淆**
+                #   （子代出生在亲代所在格；实测 88–98% 的亲子距离 <5 格）
+                #   ⇒ 必须能构造"**同格/邻近的非亲缘对照对**"才能把遗传与环境分开。
+                "birth_r": int(v[0]), "birth_c": int(v[1]),
+                "cur_r": int(v[2]), "cur_c": int(v[3]),
             })
         return rows
 
@@ -375,7 +380,8 @@ def _dump_pairs(hr, path: str, seed, arm) -> int:
     if not rows:
         return 0
     _fields = ["seed", "arm", "id", "parent", "gen", "g22", "age",
-               "max_dist", "move", "away_frac", "n_patch", "seen"]
+               "max_dist", "move", "away_frac", "n_patch", "seen",
+               "birth_r", "birth_c", "cur_r", "cur_c"]
     _new = not os.path.exists(path)
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=_fields)
