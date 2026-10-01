@@ -123,6 +123,18 @@ SEEDS_USED = set(range(42, 101))
 
 # ---------- R275 T2：g22（记忆权重基因）活体统计 ----------
 
+# ---- R316 设计 2：队列消失率（把"消失"当死亡率）----
+#   口径：上一次采样在场、这一次不在场 ⇒ **期间死亡**。依据：引擎**无剔除机制** ——
+#   种群撞上限是 **限制出生**（`sphere_engine.py:4829`：K = min(repro, max_count-P)），
+#   减员只有 `dead = starved | expired | predation_mask`（`:4767`）⇒ 消失只可能是死亡。
+#   `hr_dr_*` = 累计死亡数 / 累计人·区间数（pooled 死亡率，**分母是"人·区间"**）。
+#   `_m` 后缀 = 只看**成熟个体**（age ≥ `_HR_MATURE_AGE`），排除"新生儿天然易死"的混淆。
+_HR_MATURE_AGE = 500
+_HR_DEATH_COLS = ["hr_died_n",
+                  "hr_dr_in", "hr_dr_out", "hr_dr_stay", "hr_dr_go",
+                  "hr_dr_out_m", "hr_dr_stay_m",
+                  "hr_out_n", "hr_go_n"]
+
 # ---- R308：个体活动范围累计量（落实 R307 派工；青梧方案 A 的探针层实现）----
 _HR_COLS = ["hr_n", "hr_max_dist_median", "hr_max_dist_p90", "hr_max_dist_gini",
             "hr_hist_0_5", "hr_hist_5_10", "hr_hist_10_20", "hr_hist_20_50",
@@ -136,7 +148,7 @@ _HR_COLS = ["hr_n", "hr_max_dist_median", "hr_max_dist_p90", "hr_max_dist_gini",
             "g22_hist_latest_0", "g22_hist_latest_1", "g22_hist_latest_2",
             "g22_hist_latest_3", "g22_hist_latest_4", "g22_hist_latest_5",
             "g22_hist_latest_6", "g22_hist_latest_7", "g22_hist_latest_8",
-            "g22_hist_latest_9", "g22_latest_n"]
+            "g22_hist_latest_9", "g22_latest_n"] + _HR_DEATH_COLS
 
 
 def _gini_of(x) -> float:
@@ -166,10 +178,18 @@ class _HomeRangeTracker:
         self.w = world
         self.nr = int(world.rows) if world is not None else None
         self.nc = int(world.cols) if world is not None else None
-        self.reg = {}  # id -> [birth_r, birth_c, prev_r, prev_c, maxd, move, away_n, seen_n, {patches}]
+        # id -> [birth_r, birth_c, prev_r, prev_c, maxd, move, away_n, seen_n,
+        #        {patches}, parent, gen, g22, age_at_last_seen]  （R316 扩到 13 项）
+        self.reg = {}
         self.g22h = None  # g22 活体 10 桶直方图（每次 update 重算）
         self.g22h_latest = None  # 🔴 R312：最新一代（max_gen）的 10 桶直方图
         self.g22n_latest = 0
+        # ---- 🔴 R316 设计 2：队列消失率（上次在场 ∩ 本次不在场 ⇒ 期间死亡）----
+        self.prev_ids: set = set()   # 上一次采样的存活 id 集合
+        self.prev_grp: dict = {}     # id -> (is_out, is_go, is_mature)（上一次的状态）
+        self.died_n = 0
+        self.dcnt = {k: 0 for k in ("in", "out", "stay", "go", "out_m", "stay_m")}
+        self.dden = {k: 0 for k in ("in", "out", "stay", "go", "out_m", "stay_m")}
 
     def _dist(self, r1, c1, r2, c2) -> float:
         """大圆距离，半径以「行」为单位（nr 行 = 180°）。"""
@@ -191,18 +211,36 @@ class _HomeRangeTracker:
         flat = np.asarray(eng._flat)
         rows, cols = self.w.flat_to_rc(flat)
         lab = np.asarray(labels)[flat]
+        # 🔴 R316：登记个体身份（设计 1 亲子对 / 设计 2 成熟度判定）——只读切片
+        ages = np.asarray(eng._age)[: ids.size]
+        gens = np.asarray(eng._generation)[: ids.size]
+        pars = np.asarray(eng._parent)[: ids.size]
+        g22v = np.asarray(eng._genes)[: ids.size, Gene.MEMORY_WEIGHT]
         reg = self.reg
+
+        # ---- 🔴 R316 设计 2：先把"上一采样的各组人数"记进分母（单位 = 人·区间）----
+        if self.prev_grp:
+            _den = self.dden
+            for _o, _g, _m in self.prev_grp.values():
+                _den["out" if _o else "in"] += 1
+                _den["go" if _g else "stay"] += 1
+                if _m:
+                    _den["out_m" if _o else "stay_m"] += 1
+
         alive = set()
-        for k_i, r_i, c_i, l_i in zip(ids.tolist(), rows.tolist(),
-                                      cols.tolist(), lab.tolist()):
+        grp: dict = {}
+        for k_i, r_i, c_i, l_i, a_i, gen_i, par_i, v_i in zip(
+                ids.tolist(), rows.tolist(), cols.tolist(), lab.tolist(),
+                ages.tolist(), gens.tolist(), pars.tolist(), g22v.tolist()):
             alive.add(k_i)
             e = reg.get(k_i)
             r = float(r_i)
             c = float(c_i)
             if e is None:
-                reg[k_i] = [r, c, r, c, 0.0, 0.0,
-                            1 if l_i < 0 else 0, 1,
-                            {int(l_i)} if l_i >= 0 else set()]
+                e = reg[k_i] = [r, c, r, c, 0.0, 0.0,
+                                1 if l_i < 0 else 0, 1,
+                                {int(l_i)} if l_i >= 0 else set(),
+                                int(par_i), int(gen_i), float(v_i), int(a_i)]
             else:
                 d_birth = self._dist(r, c, e[0], e[1])
                 if d_birth > e[4]:
@@ -215,6 +253,25 @@ class _HomeRangeTracker:
                 e[7] += 1
                 if l_i >= 0:
                     e[8].add(int(l_i))
+                e[12] = int(a_i)
+            grp[k_i] = (l_i < 0, e[4] >= 5.0, a_i >= _HR_MATURE_AGE)
+
+        # ---- 🔴 R316 设计 2：本次区间死亡 = 上次在场 ∩ 本次不在场 ----
+        if self.prev_ids:
+            _cnt = self.dcnt
+            for k_i in self.prev_ids - alive:
+                _v = self.prev_grp.get(k_i)
+                if _v is None:
+                    continue
+                _o, _g, _m = _v
+                self.died_n += 1
+                _cnt["out" if _o else "in"] += 1
+                _cnt["go" if _g else "stay"] += 1
+                if _m:
+                    _cnt["out_m" if _o else "stay_m"] += 1
+        self.prev_ids = alive
+        self.prev_grp = grp
+
         # 只留活体（输出只统计当前存活个体 ⇒ 死者的历史无意义）
         if len(reg) > len(alive):
             self.reg = {k: v for k, v in reg.items() if k in alive}
@@ -239,6 +296,9 @@ class _HomeRangeTracker:
         if not vs:
             out = {c: float("nan") for c in _HR_COLS}
             out["hr_n"] = 0
+            out["hr_died_n"] = float(self.died_n)
+            out["hr_out_n"] = float(self.dden["out"])
+            out["hr_go_n"] = float(self.dden["go"])
             return out
         md = np.array([v[4] for v in vs], dtype=float)
         mv = np.array([v[5] for v in vs], dtype=float)
@@ -271,7 +331,59 @@ class _HomeRangeTracker:
         for _i, _v in enumerate(_hl):
             out[f"g22_hist_latest_{_i}"] = float(_v)
         out["g22_latest_n"] = int(self.g22n_latest or 0)
+        # 🔴 R316 设计 2：pooled 死亡率 = 累计死亡 / 累计人·区间（0 分母 ⇒ NaN）
+        def _rate(_n, _d):
+            return float(_d) / float(_n) if _n > 0 else float("nan")
+        out.update({
+            "hr_died_n": float(self.died_n),
+            "hr_dr_in": _rate(self.dden["in"], self.dcnt["in"]),
+            "hr_dr_out": _rate(self.dden["out"], self.dcnt["out"]),
+            "hr_dr_stay": _rate(self.dden["stay"], self.dcnt["stay"]),
+            "hr_dr_go": _rate(self.dden["go"], self.dcnt["go"]),
+            "hr_dr_out_m": _rate(self.dden["out_m"], self.dcnt["out_m"]),
+            "hr_dr_stay_m": _rate(self.dden["stay_m"], self.dcnt["stay_m"]),
+            "hr_out_n": float(self.dden["out"]),
+            "hr_go_n": float(self.dden["go"]),
+        })
         return out
+
+    def pair_rows(self) -> list:
+        """🔴 R316 设计 1：导出**当前存活个体**的活动量与父代 id（离线算亲子相关）。
+
+        只含"活着的人" ⇒ 只有"亲代与子代同时在世"的对能被配对，这是本口径的
+        固有局限（高周转种群配对样本有限）——离线分析**必须报告实际配对数**。
+        """
+        rows = []
+        for k, v in self.reg.items():
+            rows.append({
+                "id": int(k), "parent": int(v[9]), "gen": int(v[10]),
+                "g22": float(v[11]), "age": int(v[12]),
+                "max_dist": float(v[4]), "move": float(v[5]),
+                "away_frac": float(v[6]) / max(int(v[7]), 1),
+                "n_patch": int(len(v[8])), "seen": int(v[7]),
+            })
+        return rows
+
+
+def _dump_pairs(hr, path: str, seed, arm) -> int:
+    """🔴 R316 设计 1：把 `hr` 的存活个体活动量追加到 `path`（每 run 一段）。
+
+    一次批量写（**不做逐行 fsync** —— 2 万行逐行 fsync 会拖慢收尾且无必要，
+    该文件是"可选分析物"，丢了重跑即可，不像主 CSV 那样是交付物）。
+    """
+    rows = hr.pair_rows()
+    if not rows:
+        return 0
+    _fields = ["seed", "arm", "id", "parent", "gen", "g22", "age",
+               "max_dist", "move", "away_frac", "n_patch", "seen"]
+    _new = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=_fields)
+        if _new:
+            w.writeheader()
+        for r in rows:
+            w.writerow({"seed": seed, "arm": arm, **r})
+    return len(rows)
 
 
 def _g22_stats(eng, N: int) -> dict:
@@ -917,9 +1029,14 @@ def main():
                          "跑偏进“接续”分支）。**测试/演练断点场景时用它**")
     # ---- 🔴 R308：个体活动范围（默认关 ⇒ 列与行都逐字节等于旧版）----
     ap.add_argument("--home-range", action="store_true",
-                    help="每采样点输出个体活动范围分布（hr_* 15 列：最大位移/累计移动/"
-                         "访问斑块数/背景占比 的中位·p90·基尼 + 5 档直方图）。"
+                    help="每采样点输出个体活动范围分布（hr_* 列：最大位移/累计移动/"
+                         "访问斑块数/背景占比 的中位·p90·基尼 + 5 档直方图）"
+                         "**和队列消失率列**（R316：hr_dr_* = 按死前状态分组的死亡率）。"
                          "**只读引擎状态，默认关**；配合 `--keep-ckpt` 可留终态快照")
+    ap.add_argument("--hr-pairs", action="store_true",
+                    help="🔴 R316 设计 1：收尾时把**存活个体**的活动量+父代 id 导出到"
+                         "`<out 去扩展名>.pairs.csv`（供离线算亲子相关 = 行为可遗传性）。"
+                         "**须与 `--home-range` 同用**；默认关")
     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
     add_device_arg(ap)
     a = ap.parse_args()
@@ -1077,6 +1194,12 @@ def main():
                 os.fsync(fout.fileno())
                 print(f"# flushed seed={sd} arm={arm} rows={len(rows_out)}"
                       f"{' (接续自快照)' if _res else ''}", file=sys.stderr)
+                # 🔴 R316 设计 1：亲子对导出（可选分析物；收尾一次批量写）
+                if a.hr_pairs and _hr is not None and rows_out:
+                    _pp = os.path.splitext(a.out)[0] + ".pairs.csv"
+                    _npr = _dump_pairs(_hr, _pp, sd, arm)
+                    print(f"# pairs dumped seed={sd} arm={arm} n={_npr} -> {_pp}",
+                          file=sys.stderr)
 
                 if not rows_out:
                     print(f"  ⚠️ seed={sd} arm={arm} 本段无可落盘行 ⇒ 跳过 summary",
