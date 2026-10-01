@@ -190,6 +190,17 @@ class _HomeRangeTracker:
         self.died_n = 0
         self.dcnt = {k: 0 for k in ("in", "out", "stay", "go", "out_m", "stay_m")}
         self.dden = {k: 0 for k in ("in", "out", "stay", "go", "out_m", "stay_m")}
+        # ---- 🔴 R318 设计 4：扰动干预（"共存 vs 竞争"）----
+        #   `ptb_mode`：none（默认，逐位等价）| go（移除"出走型"）| rand（**等量随机对照**）
+        #   `ptb_every`：每多少 tick 干预一次（0 = 关）；`ptb_frac`：每次移除候选的几分之几。
+        #   ⚙️ 两种模式**移除同样多的个体**，唯一差别是"挑谁" ⇒ 对照干净。
+        self.ptb_mode = "none"
+        self.ptb_every = 0
+        self.ptb_frac = 0.5
+        self.ptb_calls = 0
+        self.ptb_cand_last = 0
+        self.ptb_killed_total = 0
+        self._ptb_rng = np.random.default_rng(20261001)
 
     def _dist(self, r1, c1, r2, c2) -> float:
         """大圆距离，半径以「行」为单位（nr 行 = 180°）。"""
@@ -368,6 +379,45 @@ class _HomeRangeTracker:
                 "cur_r": int(v[2]), "cur_c": int(v[3]),
             })
         return rows
+
+    def perturb(self, eng) -> tuple:
+        """🔴 R318 设计 4：扰动干预 —— 按「累计活动量」分组做移除（**探针层，不改引擎**）。
+
+        做法：把选中个体的 `energy` / `stomach` 归零 ⇒ 引擎**自己的饿死逻辑**
+        （`sphere_engine.py:4765` `energy<=0`，或 `:4761` `energy<starve_frac 且胃空`）
+        会在后续 die 判定里杀掉它们。**不直接增删数组元素、不碰任何引擎不变量**
+        ⇒ 只借引擎既有机制，风险最低。
+
+        模式（**两种模式移除同样多的人**，唯一差别是"挑谁"）：
+          · `go`   —— 候选 = 累计位移 ≥ 5 格的个体（"出走型"）
+          · `rand` —— 候选 = 全体存活个体（**等量随机对照**，扣除"少了一批人"的资源释放）
+        返回 `(候选人数, 实际移除数)`。
+        """
+        if self.ptb_mode in ("", "none") or not self.reg:
+            return (0, 0)
+        ids = np.asarray(eng._id)
+        if ids.size == 0:
+            return (0, 0)
+        _go = [k for k, v in self.reg.items() if v[4] >= 5.0]
+        self.ptb_cand_last = len(_go)
+        _n = int(round(len(_go) * float(self.ptb_frac)))
+        if _n <= 0:
+            return (len(_go), 0)
+        pool = _go if self.ptb_mode == "go" else list(self.reg.keys())
+        _n = min(_n, len(pool))
+        if _n <= 0:
+            return (len(_go), 0)
+        sel = self._ptb_rng.choice(np.asarray(pool, dtype=np.int64),
+                                   size=_n, replace=False)
+        idx = {int(k): i for i, k in enumerate(ids.tolist())}
+        ii = np.fromiter((idx[int(k)] for k in sel.tolist() if int(k) in idx),
+                         dtype=np.int64, count=-1)
+        if ii.size:
+            eng._energy[ii] = 0.0
+            eng._stomach[ii] = 0.0
+        self.ptb_calls += 1
+        self.ptb_killed_total += int(ii.size)
+        return (len(_go), int(ii.size))
 
 
 def _dump_pairs(hr, path: str, seed, arm) -> int:
@@ -941,6 +991,15 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
             _hr = {}
             if hr_tracker is not None:
                 hr_tracker.update(eng, labels)
+                # 🔴 R318 设计 4：扰动干预 —— 必须放在 `update` **之后**（名单刚刷新、
+                #   全是活人）。放在 update 之前会用上一次采样的名单，其中大半已死
+                #   ⇒ 实际移除数远小于设定（实测 2/10），且两模式不等量 ⇒ 对照失效。
+                if hr_tracker.ptb_every and t % hr_tracker.ptb_every == 0:
+                    _pc, _pk = hr_tracker.perturb(eng)
+                    if _pc:
+                        print("# [ptb] t=%d mode=%s 候选=%d 移除=%d 累计移除=%d"
+                              % (t, hr_tracker.ptb_mode, _pc, _pk,
+                                 hr_tracker.ptb_killed_total), file=sys.stderr)
                 _hr = hr_tracker.stats()
             rows_out.append({
                 "seed": seed, "arm": "mem_on" if mem_on else "mem_off", "tick": t,
@@ -1043,6 +1102,16 @@ def main():
                     help="🔴 R316 设计 1：收尾时把**存活个体**的活动量+父代 id 导出到"
                          "`<out 去扩展名>.pairs.csv`（供离线算亲子相关 = 行为可遗传性）。"
                          "**须与 `--home-range` 同用**；默认关")
+    # ---- 🔴 R318 设计 4：扰动干预（判「共存 vs 竞争」）----
+    ap.add_argument("--perturb", choices=["none", "go", "rand"], default="none",
+                    help="🔴 R318 设计 4 扰动模式：`go` = 周期性移除「累计位移≥5格」的"
+                         "个体；`rand` = **移除同样多**的随机个体（等量对照）；`none`=关"
+                         "（默认，逐位等价）。**须与 `--home-range` 同用**。机制 = 把选中"
+                         "个体的 energy/stomach 归零，走引擎自带饿死逻辑（不碰数组结构）")
+    ap.add_argument("--perturb-every", type=int, default=0,
+                    help="每多少 tick 干预一次（0 = 关）")
+    ap.add_argument("--perturb-frac", type=float, default=0.5,
+                    help="每次移除「出走型候选」的比例（默认 0.5）；`rand` 模式移除同数量")
     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
     add_device_arg(ap)
     a = ap.parse_args()
@@ -1067,6 +1136,18 @@ def main():
         print(f"🔴 种子 {overlap} 与已用区间 42–100 重叠 ⇒ 违反 R255「另定错开」。中止。",
               file=sys.stderr)
         sys.exit(2)
+
+    # 🔴 R318 设计 4：扰动开关的**防呆**（不自检就会静默跑成"没干预"）
+    if a.perturb != "none":
+        if not a.home_range:
+            print("🔴 --perturb 依赖活动量跟踪器 ⇒ 必须与 --home-range 同用。中止。",
+                  file=sys.stderr)
+            sys.exit(2)
+        if a.perturb_every <= 0 or a.perturb_every % a.sample != 0:
+            print("🔴 --perturb-every 必须是 --sample 的**正整数倍**"
+                  "（干预点必须与采样点重合，否则用的是过期名单）。中止。",
+                  file=sys.stderr)
+            sys.exit(2)
 
     arms = ([True, False] if a.arms == "both" else [a.arms == "on"])
     header = ["seed", "arm", "tick", "pop", "global_sat",
@@ -1187,6 +1268,10 @@ def main():
                 # 清行段处理过）。**不能用 --append 的 prior_rows 合并**：
                 # 那会把旧行读进来再重写一遍 ⇒ 浮点 repr 往返抖精度。
                 _hr = _HomeRangeTracker() if a.home_range else None   # R308：每 run 新建
+                if _hr is not None:      # 🔴 R318 设计 4：扰动参数挂到跟踪器上
+                    _hr.ptb_mode = a.perturb
+                    _hr.ptb_every = int(a.perturb_every)
+                    _hr.ptb_frac = float(a.perturb_frac)
                 t0 = time.time()
                 rows_out, stop = run_one(
                     sd, a.rows, a.cols, a.pop, a.patches, a.ticks, a.sample,
