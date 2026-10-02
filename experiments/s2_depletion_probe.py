@@ -393,7 +393,19 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
     return rows_out, stop
 
 
-def _tail_mean(rows_out, key, n=3):
+def _tail_mean(rows_out, key, n=20):
+    """末段 n 行均值（判据取值口径）。
+
+    🔴 R330（2026-10-02，fish 批准）：**n 由 3 改为 20**。
+    依据 = `_trash_local/_judge2_snr_probe.py` 对历史 40k 批的信噪比诊断：
+      - 判据量 `patch_sat_init_var` 的 on−off 均值差只有组内 SD 的 **0.01–0.67 倍**
+        （同一 run 随 tick 的抖动 ≥ on/off 之间的差）⇒ 单点/短窗读数无判别力；
+      - 末段窗口加长可显著降噪（同一 t=40k 下：末段 3/10/20 行 ⇒ 2/3 票；
+        **末段 40 行 ⇒ 3/3 票**）；
+      - n=20（40k / sample 250 ⇒ 覆盖**最后 5 000 tick**）在降噪（√(20/3)≈2.6×）
+        与"贴近稳态末端"之间取平衡。
+    短批（行数 < n）自动退化取全部行，行为安全。
+    """
     tail = rows_out[-n:]
     if not tail:
         return 0.0
@@ -503,8 +515,13 @@ def main():
                 for r in rows_out:
                     line = ",".join(str(r[h]) for h in header)
                     f.write(line + "\n")
+                    # 🔴 R330（2026-10-02）：由**逐 run** 改为**逐行** flush + fsync，
+                    #   与 s3 探针 R303 对齐。动机：正式批跑 5–6 h，逐 run 落盘
+                    #   ⇒ 中途 CSV 只有表头 ⇒ **无法看进度、无法巡检、无法估 ETA**。
+                    f.flush()
+                    os.fsync(f.fileno())
                     print(line)
-                # 🔴 R278 P3：每个 run 立刻落盘（崩最多丢 1 run）
+                # 行已逐条落盘；此处保留一次 fsync 以兼容"rows_out 为空"的边界
                 f.flush()
                 os.fsync(f.fileno())
                 last = rows_out[-1]
