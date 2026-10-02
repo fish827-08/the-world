@@ -19,10 +19,10 @@ from simulation.sphere_engine import SphereEngine
 from world.resource_field import ResourceField
 
 
-def _mk(**kw):
+def _mk(seed: int = 42, **kw):
     """构造一个 480×960 patchy 引擎（走 Python 路径），便于取内部数组。"""
     from experiments.steady_k_probe import make_cfg, apply_post_build
-    c, notes = make_cfg(42, 480, 960, 2000, 1700, True, 0.125, 0.125, 80, 2.5, 30000, 1.195)
+    c, notes = make_cfg(seed, 480, 960, 2000, 1700, True, 0.125, 0.125, 80, 2.5, 30000, 1.195)
     c.simulation.use_sim_core = False
     c.resource_dynamics.enabled = False
     for k, v in kw.items():
@@ -141,3 +141,45 @@ def test_guard_frac_without_bg_zero_raises():
     c.resources.bg_cap_mult = 0.05
     with pytest.raises(ValueError):
         SphereEngine(c)
+
+
+# ---------------- 4) 🔴 R328 甲：from_field 直读显式 bg_production_zero（抽奖消除） ----------------
+
+@pytest.mark.parametrize("seed,first_bg_in_band", [(42, True), (43, True), (44, False)])
+def test_from_field_no_lottery_band_world(seed, first_bg_in_band):
+    """🔴 R328 甲：带低产能带（旧档 0.4/0.05）下 rd 判据必须**确定性**为 A（零背景）。
+
+    42/43 = R300 复现中"背景第 0 格恰在带内"的 seed（旧单格推断 ⇒ b_mult=0.05 ⇒ B 支）；
+    44 = 第 0 格在荒漠（旧推断 ⇒ 偶合 A 支）。修复后三者**一律** A 支 —— 不再 per-seed 抽奖。
+    """
+    from world.resource_dynamics import ResourceDynamics
+    eng = _mk(seed, bg_low_prod_frac=0.4, bg_cap_mult=0.05)
+    rf = eng.resources
+    assert rf.bg_production_zero is True, "field 侧显式真值：带搭在零背景之上"
+    m = np.asarray(rf._patch_mask, dtype=bool)
+    bg0 = int(np.flatnonzero(~m)[0])
+    area = np.asarray(eng.world.cell_area(np.arange(eng.world.n_cells)), dtype=np.float64)
+    base = float(rf.capacity_per_area) * area
+    old_inferred = float(rf._capacity[bg0] / base[bg0])
+    # 反证前置：旧单格推断在本 seed 上给出的支别（band-first ⇒ 0.05 ⇒ 旧代码必现抽奖）
+    assert (old_inferred > 0.0) is first_bg_in_band, "R300 复现前置不成立——请更新 seed 表"
+    rd = ResourceDynamics.from_field(eng.config.resource_dynamics, rf, eng.world)
+    # 修复后：显式 True ⇒ 确定性"纯斑块"（不再看首格）
+    assert rd.bg_capacity_mult == 0.0
+    assert rd.bg_production_zero is True
+
+
+def test_from_field_legacy_uniform_bg_keeps_inferred_mult():
+    """旧路径逐位兼容：背景未归零（bg_production_zero=False 均匀档）⇒ 仍用单格推断。"""
+    from world.resource_dynamics import ResourceDynamics
+    eng = _mk(bg_production_zero=False)          # 目标 patchy 档：背景守恒摊均产能
+    rf = eng.resources
+    assert rf.bg_production_zero is False
+    rd = ResourceDynamics.from_field(eng.config.resource_dynamics, rf, eng.world)
+    m = np.asarray(rf._patch_mask, dtype=bool)
+    area = np.asarray(eng.world.cell_area(np.arange(eng.world.n_cells)), dtype=np.float64)
+    base = float(rf.capacity_per_area) * area
+    expect_b = float(rf._capacity[~m][0] / base[~m][0])
+    assert expect_b > 0.0
+    assert rd.bg_capacity_mult == expect_b
+    assert rd.bg_production_zero is False

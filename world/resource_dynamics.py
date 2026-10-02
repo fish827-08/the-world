@@ -208,6 +208,14 @@ class ResourceDynamics:
 
         ⚠️ 需要 `ResourceField` 的三个内部量：`_patch_mask` / `_capacity` / `distribution`。
         它们本身就是构造期只读量（`_capacity` 只在轮作时由本模块**经引擎**重算）。
+
+        🔴 R328 甲（轻舟 2026-10-02）：**背景产能是否为零改读显式真值**
+        `rfield.bg_production_zero`，不再用 `cap[~mask][0]`（背景第 0 格）反推 ——
+        带低产能带（`bg_low_prod_frac > 0`）时第 0 格偶发落在带内（容量 > 0）
+        ⇒ 全局倍率被误判为 0.05 ⇒ 整个背景（含荒漠）被判成有产能 = **"抽奖"**
+        （R300 缺陷：per-seed 随机分成 A 支"纯斑块"/B 支"全图可产"两支）。
+        显式 True ⇒ 确定性 `b_mult = 0.0`（纯斑块语义）；显式 False（均匀背景档）
+        ⇒ 保留原单格推断（背景均匀时首格即精确值，逐位兼容）。
         """
         n = int(world.n_cells)
         mask = getattr(rfield, "_patch_mask", None)
@@ -219,7 +227,10 @@ class ResourceDynamics:
         else:
             m = np.asarray(mask, dtype=bool)
             p_mult = float(cap[m][0] / base[m][0])
-            b_mult = float(cap[~m][0] / base[~m][0])
+            if bool(getattr(rfield, "bg_production_zero", False)):
+                b_mult = 0.0
+            else:
+                b_mult = float(cap[~m][0] / base[~m][0])
         return cls(
             n, cfg, patch_mask=mask, cols=int(world.cols),
             base_capacity=base, patch_capacity_mult=p_mult, bg_capacity_mult=b_mult,

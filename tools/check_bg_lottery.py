@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """🔴 R320 回归守卫：**背景产能抽奖**自检（R300 缺陷的快速判据）。
 
-**缺陷**（`world/resource_dynamics.py:161` + `:222`）：`ResourceDynamics` 判断"背景产能是否
-为零"时**不读配置里的显式字段**，而是从 `cap[~patch_mask][0]`（背景的**第 0 个格**）反推
-`bg_capacity_mult`。若装置带低产能带（`bg_low_prod_frac > 0`），那 40% 被抽中的背景格
-会让这个"第 0 格"偶发变成低产能格 ⇒ `bg_production_zero` 被误判成 False ⇒
-**整个世界从"纯斑块"退化成"全图可产"**（= A/B 支随机分化）。
+**缺陷**（`world/resource_dynamics.py:161` + `:222`，**已在 R328 甲案修复**）：
+`ResourceDynamics` 判断"背景产能是否为零"时曾**不读配置里的显式字段**，而是从
+`cap[~patch_mask][0]`（背景的**第 0 个格**）反推 `bg_capacity_mult`。若装置带低产能带
+（`bg_low_prod_frac > 0`），那 40% 被抽中的背景格会让这个"第 0 格"偶发变成低产能格
+⇒ `bg_production_zero` 被误判成 False ⇒ **整个世界从"纯斑块"退化成"全图可产"**
+（= A/B 支随机分化）。
+
+**R328 甲修复**：`from_field` 直读显式真值 `rfield.bg_production_zero`（True ⇒
+`b_mult = 0.0` 确定性"纯斑块"）⇒ 带低产能带的档**也不再抽奖**。
 
 **本脚本**：只**构造世界**（不跑模拟，秒级），对一组 seed 逐个报
 `ResourceDynamics.bg_production_zero`，从而直接回答"抽奖还在不在"。
@@ -13,10 +17,12 @@
 用法：
     python.exe tools\\check_bg_lottery.py                 # 默认装置（0.0 档）应 0 例
     python.exe tools\\check_bg_lottery.py --seeds 165-172,189-192
-    python.exe tools\\check_bg_lottery.py --bg-low-prod-frac 0.4   # 复现旧档抽奖（应约 40%）
+    python.exe tools\\check_bg_lottery.py --bg-low-prod-frac 0.4
+        # 旧档参数：**修复前**约 40% 判成 B 支（R300 复现口径）；
+        # **R328 甲修复后恒 0 例**（确定性 A 支）⇒ 本模式 = 甲修复的回归门。
 
-判据：**默认装置下必须 0 例被判成"全图可产"**；出现任何一例 ⇒ 装置档被改回带绿洲带的值，
-或代码层修复被回退。
+判据：**任何装置档下都必须 0 例被判成"全图可产"**（含非零档——甲修复后带档
+也已是确定性"纯斑块"）；出现任何一例 ⇒ 装置档被改回、甲修复被回退、或出现新抽奖路径。
 """
 from __future__ import annotations
 
@@ -86,13 +92,15 @@ def main() -> int:
 
     print(f"\n⇒ {len(bad)}/{len(seeds)} 个 world 被判成『全图可产』"
           f"{'（seed ' + str(bad) + '）' if bad else ''}")
+    if bad:
+        print("❌ **抽奖回来了** —— 装置档或代码被改动，请立即排查。"
+              "（R328 甲修复后：无论是否带低产能带，bg_production_zero 均须直读显式真值。）")
+        return 1
     if frac == 0.0:
-        if bad:
-            print("❌ **抽奖回来了** —— 装置档或代码被改动，请立即排查。")
-            return 1
         print("✅ 抽奖已消除（背景格全零 ⇒ 判据恒为 True）。")
     else:
-        print("（非零档：出现若干例是**预期**的——正说明该档有抽奖缺陷）")
+        print("✅ 甲修复（R328）生效：带低产能带的档也为确定性『零背景』（A 支）——"
+              "单格抽奖已消失。")
     return 0
 
 
