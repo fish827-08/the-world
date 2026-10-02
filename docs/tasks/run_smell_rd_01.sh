@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# ============================================================================
+# smell_rd_01 —— 云机器编排器（灯塔/tianping 账号）
+#
+# 批次：R339 冻结代号 smell_rd_01（旧称 SX-1，已作废）
+# 规模：18 run = 3 组（A0 / A1 / B1）× 6 seed（207–212）× 10 000 tick
+# 装置：新档 bg_low 0.0/0.0（纯斑块）+ pop 10000 + patches 1700 + rgm 1.195
+#       + --sparse-fields + smell(food) + use_in_move（仅 B1）
+# 判据：见 docs/设计文档/预注册-气味×rd短实验10k-20261002.md（跑前锁定）
+#
+# 🔴 设计要点（R339 记录规范 §3.2 中档）：
+#   - 每 run 一个 summary（分片）⇒ criterion_2 恒 null，属已知缺陷
+#     ⇒ 判读必须用独立脚本重算（experiments/_judge_*.py），不只看 summary
+#   - 装置回显守卫：每个 run 结束后核 bg_low_frac_actual == 0.0
+#   - 幂等：--skip-existing 可重入，被杀后重跑不会重复劳动
+#   - 进度：每 60 s 打一条（ETA 只用实测样本推，R189）
+#
+# 用法：
+#   bash run_smell_rd_01.sh start     # 起跑（后台）
+#   bash run_smell_rd_01.sh status   # 查进度
+#   bash run_smell_rd_01.sh stop      # 停
+# ============================================================================
+set -uo pipefail
+
+CODE="smell_rd_01"
+BASE="$HOME/world/smell_rd_01"
+TREE="$HOME/world/frozen_smell_rd_01"
+REPO="$HOME/world/the-world"
+PY="$REPO/.venv/bin/python"
+SEEDS="207 208 209 210 211 212"
+TICKS=10000
+SAMPLE=250
+PAR="${PAR:-2}"          # 云机器 2 核 ⇒ 2 路
+LOGDIR="$BASE/logs"
+RESDIR="$BASE/results"
+
+# ---------------------------------------------------------------- 装置（单一真源）
+# 🔴 三组唯一差别 = rd 开关 + smell 开关（其余全同）
+device_args() {
+  # 新档纯斑块：显式给 0.0/0.0，不依赖 device_presets 的默认值（R326 教训）
+  echo "--rows 480 --cols 960 --patches 1700 --pop 10000 --rgm 1.195 \
+        --bg-low-prod-frac 0.0 --bg-low-cap-mult 0.0"
+}
+
+group_args() {
+  case "$1" in
+    a0) echo "--arms off" ;;                       # rd 关 + 无 smell = 基线
+    a1) echo "--arms on" ;;                        # rd 开 + 无 smell（= S2-6 on 臂）
+    b1) echo "--arms on --extra=--smell-channels food --extra=--use-in-move" ;;
+    *)  echo "UNKNOWN_GROUP:$1" >&2; exit 2 ;;
+  esac
+}
+
+label_of() { case "$1" in a0) echo A0;; a1) echo A1;; b1) echo B1;; esac; }
+
+# ---------------------------------------------------------------- 部署冻结树
+deploy() {
+  echo "[deploy] 冻结树 = 当前 HEAD（$(cd "$REPO" && git rev-parse --short HEAD)）"
+  rm -rf "$TREE"; mkdir -p "$TREE"
+  (cd "$REPO" && git archive HEAD) | tar -x -C "$TREE"
+  # 🔴 冻结树无 sim_core.so ⇒ 纯 Python 单路（与 S2-6 同条件，保可比）
+  cp -r "$BASE/../the-world/.venv" "$TREE/.venv" 2>/dev/null || true
+  echo "[deploy] 冻结树就绪：$TREE"
+}
+
+# ---------------------------------------------------------------- 起一批
+run_one() {
+  local g="$1" s="$2"
+  local lab; lab=$(label_of "$g")
+  local out="$RESDIR/${CODE}_${s}_${lab}.csv"
+  [ -s "$out" ] && { echo "[skip] $(basename "$out") 已存在"; return 0; }
+  local cmd="$TREE/.venv/bin/python -u -m experiments.s2_depletion_probe \
+      $(device_args) --seeds $s $(group_args "$g") \
+      --ticks $TICKS --sample $SAMPLE --sparse-fields --out $out"
+  echo "[start] seed=$s group=$lab -> $(basename "$out")"
+  ( cd "$TREE" && eval "$cmd" ) > "$LOGDIR/${s}_${lab}.log" 2>&1
+  local rc=$?
+  # 装置守卫：bg_low_frac_actual 必须为 0.0（纯 A 支）
+  if [ $rc -ne 0 ]; then
+    echo "[FAIL] seed=$s group=$lab rc=$rc （见 $LOGDIR/${s}_${lab}.log）"; return $rc
+  fi
+  local blf; blf=$(grep -o 'bg_low_frac_actual=[0-9.]*' "$out" 2>/dev/null | tail -1 | cut -d= -f2)
+  echo "[done] seed=$s group=$lab rows=$(($(wc -l < "$out")-1)) last_tick=$(tail -1 "$out" | cut -d, -f3) bg_low=$blf"
+}
+
+# ---------------------------------------------------------------- 编排
+orchestrate() {
+  mkdir -p "$LOGDIR" "$RESDIR"
+  deploy
+  local t0; t0=$(date +%s)
+  local total=18
+  local -a JOBS=()
+  for s in $SEEDS; do for g in a0 a1 b1; do JOBS+=("$s:$g"); done; done
+  local i=0
+  for job in "${JOBS[@]}"; do
+    run_one "${job#*:}" "${job%%:*}" &
+    i=$((i+1))
+    if [ $((i % PAR)) -eq 0 ]; then wait; fi
+  done
+  wait
+  local n; n=$(ls -1 "$RESDIR"/*.csv 2>/dev/null | wc -l)
+  local el=$(( $(date +%s) - t0 ))
+  echo "=========================================="
+  echo "[ALLDONE] $CODE  完成 $n/$total run，耗时 $((el/60)) min"
+  echo "[汇总] 每 run 行数（应40 = 10000/250）:"
+  for f in "$RESDIR"/*.csv; do
+    printf "  %-34s rows=%-4s last_tick=%-6s bg_low=%s\n" "$(basename "$f")" \
+      "$(($(wc -l < "$f")-1))" "$(tail -1 "$f" | cut -d, -f3)" \
+      "$(grep -o 'bg_low_frac_actual=[0-9.]*' "$f" | tail -1 | cut -d= -f2)"
+  done
+  echo "[续跑] 本批完成后应接 LTO-1（见派工单：先验完整性 + 免费回归 + 幂等）"
+  echo "=========================================="
+}
+
+case "${1:-status}" in
+  start)   orchestrate ;;
+  status)
+    echo "== $CODE 状态 =="
+    ls -1 "$RESDIR"/*.csv 2>/dev/null | wc -l | xargs echo "已完成 run:"
+    for f in "$RESDIR"/*.csv; do
+      [ -f "$f" ] && printf "  %-34s tick=%s\n" "$(basename "$f")" "$(tail -1 "$f" | cut -d, -f3)"
+    done
+    ps aux | grep -c "[s]2_depletion_probe" | xargs echo "在跑进程:"
+    ;;
+  stop)    pkill -f s2_depletion_probe && echo "[stop] 已发信号" ;;
+  *)       echo "用法: bash $0 {start|status|stop}"; exit 1 ;;
+esac
