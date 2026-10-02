@@ -234,7 +234,7 @@ def patch_saturation(world, eng, labels: np.ndarray,
 
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
             bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, sparse_fields=False,
-            smell_channels=(), use_in_move=False):
+            smell_channels=(), use_in_move=False, on_row=None):
     # 🔴 对齐 S1：subpos=on + S1_BASE 的 k/gain/subdiv/speed_max/max_count
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
@@ -388,6 +388,12 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, rd_on,
                 "l0_any_dead": l0_any["dead"], "l0_any_rest": l0_any["rest"],
                 "l0_any_demoted": l0_any["demoted"],
             })
+            # 🔴 R330：**每采样点即时回调** ⇒ 实现真正的"逐行落盘"（原为逐 run）。
+            #   动机：正式批跑 3–4 h，逐 run 落盘 ⇒ 中途 CSV 只有表头，
+            #   无法看进度 / 估 ETA / 巡检。回调排在 append 之后、`break` 之前，
+            #   与 s3 探针 R303 的"行先于收尾"同序。
+            if on_row is not None:
+                on_row(rows_out[-1])
             if stop == "灭绝":
                 break
     return rows_out, stop
@@ -504,6 +510,15 @@ def main():
               f"sparse={a.sparse_fields} smell={list(smell_channels)} "
               f"use_in_move={a.use_in_move}")
         print(",".join(header))
+        # 🔴 R330：**逐行落盘**闭包 —— 采样点一生成就写盘 + flush + fsync + 回显。
+        #   原实现是"run 结束才批量写"（R278 P3 的逐 run flush）⇒ 长批中途看不到任何进度。
+        def _emit(r):
+            line = ",".join(str(r[h]) for h in header)
+            f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+            print(line)
+
         for sd in seeds:
             for arm in arms:
                 t0 = time.time()
@@ -511,17 +526,10 @@ def main():
                                          a.ticks, a.sample, a.rgm, arm == "on",
                                          a.bg_low_prod_frac, a.bg_low_cap_mult,
                                          a.sparse_fields,
-                                         smell_channels, a.use_in_move)
-                for r in rows_out:
-                    line = ",".join(str(r[h]) for h in header)
-                    f.write(line + "\n")
-                    # 🔴 R330（2026-10-02）：由**逐 run** 改为**逐行** flush + fsync，
-                    #   与 s3 探针 R303 对齐。动机：正式批跑 5–6 h，逐 run 落盘
-                    #   ⇒ 中途 CSV 只有表头 ⇒ **无法看进度、无法巡检、无法估 ETA**。
-                    f.flush()
-                    os.fsync(f.fileno())
-                    print(line)
-                # 行已逐条落盘；此处保留一次 fsync 以兼容"rows_out 为空"的边界
+                                         smell_channels, a.use_in_move,
+                                         on_row=_emit)
+                # 行已由 `_emit` 逐条落盘；此处再 fsync 一次以兼容
+                # `rows_out` 为空（0 tick / 立即灭绝）的边界。
                 f.flush()
                 os.fsync(f.fileno())
                 last = rows_out[-1]
