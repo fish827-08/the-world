@@ -26,7 +26,14 @@ CODE="smell_rd_01"
 BASE="$HOME/world/smell_rd_01"
 TREE="$HOME/world/frozen_smell_rd_01"
 REPO="$HOME/world/the-world"
-PY="$REPO/.venv/bin/python"
+# ---------------------------------------------------------------- 解释器
+# 🔴 云机实测（2026-10-02 23:30，天平/灯塔）：
+#   `tianping` 自建venv 的 numpy **装不上** —— LTO-1（ubuntu 账号）占 1.36 GB / 1.97 GB 内存，
+#   pip 下载 16.7 MB wheel 长时间卡住（available 仅 146 MB）。
+#   而 `/home/ubuntu/world/the-world/.venv`（ubuntu 账号，**只读可执行**）已有 numpy 2.5.3
+#   ⇒ **直接复用其解释器**，不复制 venv（省内存 + 省时间）。
+#   ⚠️ 若日后 LTO-1 停掉且内存释放，可改回"$REPO/.venv/bin/python"（自建 venv）。
+PY="/home/ubuntu/world/the-world/.venv/bin/python"
 SEEDS="207 208 209 210 211 212"
 TICKS=10000
 SAMPLE=250
@@ -59,7 +66,6 @@ deploy() {
   rm -rf "$TREE"; mkdir -p "$TREE"
   (cd "$REPO" && git archive HEAD) | tar -x -C "$TREE"
   # 🔴 冻结树无 sim_core.so ⇒ 纯 Python 单路（与 S2-6 同条件，保可比）
-  cp -r "$BASE/../the-world/.venv" "$TREE/.venv" 2>/dev/null || true
   echo "[deploy] 冻结树就绪：$TREE"
 }
 
@@ -69,7 +75,7 @@ run_one() {
   local lab; lab=$(label_of "$g")
   local out="$RESDIR/${CODE}_${s}_${lab}.csv"
   [ -s "$out" ] && { echo "[skip] $(basename "$out") 已存在"; return 0; }
-  local cmd="$TREE/.venv/bin/python -u -m experiments.s2_depletion_probe \
+  local cmd="$PY -u -m experiments.s2_depletion_probe \
       $(device_args) --seeds $s $(group_args "$g") \
       --ticks $TICKS --sample $SAMPLE --sparse-fields --out $out"
   echo "[start] seed=$s group=$lab -> $(basename "$out")"
@@ -91,9 +97,13 @@ orchestrate() {
   local total=18
   local -a JOBS=()
   for s in $SEEDS; do for g in a0 a1 b1; do JOBS+=("$s:$g"); done; done
+  # 🔴 R218/配对纪律：**同 seed 的三臂必须串行**（共享同 world 与 RNG 序）
+  #    并行只跨 seed 展开 => 任何时刻最多 PAR 个不同 seed 在跑
   local i=0
-  for job in "${JOBS[@]}"; do
-    run_one "${job#*:}" "${job%%:*}" &
+  for s in $SEEDS; do
+    (
+      for g in a0 a1 b1; do run_one "$g" "$s"; done
+    ) &
     i=$((i+1))
     if [ $((i % PAR)) -eq 0 ]; then wait; fi
   done
