@@ -104,7 +104,7 @@ from experiments.s2_depletion_probe import (
 
 # S3 装置口径（= S0/S1/S2 逐字段同源；见板上 S0 预注册原文）
 #   rows=480 cols=960 patches=1700 pop=10000 ticks=2000 sample=250
-#   bg_low_prod_frac=0.4 bg_low_cap_mult=0.05（不挂 sparse）
+#   bg_low_prod_frac=0.0 bg_low_cap_mult=0.0（R326 撤绿洲带；不挂 sparse）
 #   subpos-family：speed_max/gain/subdiv/k/max_count 与 S1_BASE 对齐
 #   （s2_depletion_probe.run_one 亦如此 → subpos=on + 这组参数）
 # 唯一变量 = memory_v2 两臂；rd 两臂均开。
@@ -112,7 +112,12 @@ DEVICE = dict(
     rows=480, cols=960, patches=1700, pop=10000,
     speed_max=0.125, gain=0.125, subdiv=80, k=2.5, max_count=30000,
     ticks=2000, sample=250, rgm=1.195,
-    bg_low_prod_frac=0.4, bg_low_cap_mult=0.05,
+    # 🔴 R326（2026-10-02）：**撤绿洲带落到实处**——R321 只改了 tools/device_presets.py
+    #   的预设档，而**探针自带默认仍是 0.4/0.05**，且 `--device` 只有显式传参才介入
+    #   ⇒ 不传 `--device` 的运行**仍是旧装置**（冒烟实测 `bg_low_frac=0.4` 才发现）。
+    #   此处同步为 0.0/0.0，使「默认 = 当前装置」，消除 R278 §三 要消灭的
+    #   「忘传 --device ⇒ 静默回落旧装置」坑。
+    bg_low_prod_frac=0.0, bg_low_cap_mult=0.0,
 )
 # 兼容别名（旧脚本引用 S1_BASE 的 subpos 家族参数）
 S1_BASE = DEVICE
@@ -754,7 +759,7 @@ def _last_sample_tick(csv_path: str, key: tuple[str, str]) -> int:
 
 
 def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
-            bg_low_prod_frac=0.4, bg_low_cap_mult=0.05, weight_gene=False,
+            bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
             prior_rows=None, out_path=None, on_row=None, hr_tracker=None,
             g22_init=None):

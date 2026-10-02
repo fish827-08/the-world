@@ -29,7 +29,7 @@ from experiments.steady_k_probe import make_cfg, apply_post_build
 DEVICE = dict(
     rows=480, cols=960, patches=1700, pop=10000,
     speed_max=0.125, gain=0.125, subdiv=80, k=2.5, max_count=30000,
-    rgm=1.195, bg_low_prod_frac=0.4, bg_low_cap_mult=0.05,
+    rgm=1.195, bg_low_prod_frac=0.0, bg_low_cap_mult=0.0,   # R326：撤绿洲带
 )
 
 

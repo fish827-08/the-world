@@ -38,7 +38,7 @@ TICKS = 10
 
 # 预设档口径（R278 §三② 逐字）
 PRESET_S2 = {"rows": 480, "cols": 960, "patches": 1700, "pop": 10000,
-             "rgm": 1.195, "bg_low_prod_frac": 0.4, "bg_low_cap_mult": 0.05}
+             "rgm": 1.195, "bg_low_prod_frac": 0.0, "bg_low_cap_mult": 0.0}
 
 
 def _run(probe: str, args: list[str], out: Path, seed: str = "165") -> subprocess.CompletedProcess:
@@ -193,12 +193,12 @@ def test_T3c_override_detection_recognizes_underscore_form():
     assert mk(["--device", "s2", "--bg_low_prod_frac", "0.9"]).bg_low_prod_frac == 0.9
     # 带等号写法
     assert mk(["--device", "s2", "--bg-low-prod-frac=0.9"]).bg_low_prod_frac == 0.9
-    # 都未显式传 ⇒ 取预设 0.4
+    # 都未显式传 ⇒ 取预设 0.0（R326 撤绿洲带后）
     ns = argparse.Namespace(device="s2", rows=480, cols=960, patches=1700,
                             pop=10000, rgm=1.195, bg_low_prod_frac=0.0,
                             bg_low_cap_mult=0.05)
     resolve_device(ns, ["--device", "s2"], logger=lambda m: None)
-    assert ns.bg_low_prod_frac == 0.4
+    assert ns.bg_low_prod_frac == 0.0
 
 
 # ---------------------------------------------------------------- fail-loud
