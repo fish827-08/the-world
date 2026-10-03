@@ -28,6 +28,10 @@
         ⇒ `frac_read_moore` = **引擎实际能直读**的比例
     ⚠️ 口径 A（定稿字面，"距离 ≤1 格"）与口径 B（引擎邻表）在纬度/对角处略有差；
         两者都报，判读用哪个由天平定。
+    🔴 **d>0 子集（列前缀 `pos_`）**：`mem_bit=1` 的构造要求"存在一个 **≠ 当前格** 的
+        记忆富食点"（`encode_signal_states` 的 `mem_hit`）⇒ d==0 的槽**不驱动 mem_bit**。
+        故另报 d>0 子集的同族统计（`pos_n_slots` / `pos_d_med` / `pos_d_p90` /
+        `pos_frac_dle1` / `pos_frac_read_moore`）—— 该子集才是"私有性"争点的直接读数。
 
 用法（项目根目录）：
     PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m experiments.p1c_distance_probe \
@@ -78,7 +82,10 @@ def measure(e: SphereEngine) -> dict:
                 "d_med": None, "d_p90": None, "d_p99": None,
                 "d_mean": None, "d_max": None,
                 "frac_d0": None, "frac_dle1": None, "frac_dle15": None,
-                "frac_read_moore": None, "_d_pool": np.empty(0)}
+                "frac_read_moore": None,
+                "pos_n_slots": 0, "pos_d_med": None, "pos_d_p90": None,
+                "pos_frac_dle1": None, "pos_frac_read_moore": None,
+                "_d_pool": np.empty(0), "_pos_pool": np.empty(0)}
 
     flat = np.asarray(e._flat)[:n]
     wm = np.asarray(e._work_memory)[:n]
@@ -90,7 +97,10 @@ def measure(e: SphereEngine) -> dict:
                 "d_med": None, "d_p90": None, "d_p99": None,
                 "d_mean": None, "d_max": None,
                 "frac_d0": None, "frac_dle1": None, "frac_dle15": None,
-                "frac_read_moore": None, "_d_pool": np.empty(0)}
+                "frac_read_moore": None,
+                "pos_n_slots": 0, "pos_d_med": None, "pos_d_p90": None,
+                "pos_frac_dle1": None, "pos_frac_read_moore": None,
+                "_d_pool": np.empty(0), "_pos_pool": np.empty(0)}
 
     ai, _sj = np.nonzero(valid)
     cur = flat[ai].astype(np.int64)
@@ -116,6 +126,7 @@ def measure(e: SphereEngine) -> dict:
         readable[i] = readable[i] or bool((band == mem[i]).any())
 
     eps = 1e-9
+    pos = d > eps
     return {
         "n_agents": n, "n_slots": n_slots,
         "frac_empty": float(1.0 - n_slots / n_cap),
@@ -125,7 +136,11 @@ def measure(e: SphereEngine) -> dict:
         "frac_dle1": _frac(d <= 1.0 + eps),
         "frac_dle15": _frac(d <= 1.5 + eps),
         "frac_read_moore": _frac(readable),
-        "_d_pool": d,
+        "pos_n_slots": int(pos.sum()),
+        "pos_d_med": _pct(d[pos], 50), "pos_d_p90": _pct(d[pos], 90),
+        "pos_frac_dle1": _frac(d[pos] <= 1.0 + eps),
+        "pos_frac_read_moore": _frac(readable[pos]),
+        "_d_pool": d, "_pos_pool": d[pos],
     }
 
 
@@ -203,9 +218,12 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     cols = ["tick", "n_agents", "n_slots", "frac_empty", "d_med", "d_p90",
             "d_p99", "d_mean", "d_max", "frac_d0", "frac_dle1", "frac_dle15",
-            "frac_read_moore", "ms_per_tick_window"]
+            "frac_read_moore", "ms_per_tick_window",
+            "pos_n_slots", "pos_d_med", "pos_d_p90", "pos_frac_dle1",
+            "pos_frac_read_moore"]
     recs: list[dict] = []
     pool: list[np.ndarray] = []
+    pos_pool: list[np.ndarray] = []
     t_prev = time.perf_counter()
     extinct_at = None
     with open(out, "w", encoding="utf-8", newline="") as f:
@@ -224,6 +242,7 @@ def main() -> int:
                 t_prev = now
                 rec = measure(e)
                 pool.append(rec.pop("_d_pool"))
+                pos_pool.append(rec.pop("_pos_pool"))
                 rec["tick"] = t
                 rec["ms_per_tick_window"] = round(ms_t, 2)
                 recs.append(rec)
@@ -237,9 +256,11 @@ def main() -> int:
                       f"p90={rec['d_p90'] if rec['d_p90'] is None else round(rec['d_p90'], 3)} "
                       f"≤1格={rec['frac_dle1'] if rec['frac_dle1'] is None else round(rec['frac_dle1'], 4)} "
                       f"可直读(Moore)={rec['frac_read_moore'] if rec['frac_read_moore'] is None else round(rec['frac_read_moore'], 4)} "
+                      f"d>0可直读={rec['pos_frac_read_moore'] if rec['pos_frac_read_moore'] is None else round(rec['pos_frac_read_moore'], 4)} "
                       f"ms/t={rec['ms_per_tick_window']}", flush=True)
 
     dd = np.concatenate(pool) if pool else np.empty(0)
+    pd = np.concatenate(pos_pool) if pos_pool else np.empty(0)
     eps = 1e-9
     pooled = {
         "n_samples": len(recs), "n_dist_pairs": int(dd.size),
@@ -256,6 +277,22 @@ def main() -> int:
             sum(r["frac_read_moore"] * r["n_slots"] for r in recs) / wsum)
     else:
         pooled["frac_read_moore"] = None
+    # d>0 子集池化（mem_bit 判据相关；与上面同口径，按 pos_n_slots 加权）
+    if pd.size:
+        wsum_pos = sum(r["pos_n_slots"] for r in recs)
+        pooled["pos_n_dist_pairs"] = int(pd.size)
+        pooled["pos_d_med"] = _pct(pd, 50)
+        pooled["pos_d_p90"] = _pct(pd, 90)
+        pooled["pos_frac_dle1"] = _frac(pd <= 1.0 + eps)
+        pooled["pos_frac_read_moore"] = (
+            float(sum(r["pos_frac_read_moore"] * r["pos_n_slots"]
+                      for r in recs) / wsum_pos) if wsum_pos else None)
+    else:
+        pooled["pos_n_dist_pairs"] = 0
+        pooled["pos_d_med"] = None
+        pooled["pos_d_p90"] = None
+        pooled["pos_frac_dle1"] = None
+        pooled["pos_frac_read_moore"] = None
 
     summary = {
         "probe": "p1c_distance_probe", "argv": sys.argv[1:],
@@ -265,6 +302,7 @@ def main() -> int:
         "notes": [
             "口径A = 定稿字面：球面大圆距离 ≤1.0 格（单位=1 纬度格宽）",
             "口径B = 引擎真值：记忆格 ∈ Moore 8 邻（行内 mem_in_nb 口径，含极点带特判）",
+            "pos_* = d>0 子集（mem_bit 判据要求槽 ≠ 当前格；d==0 槽不驱动 mem_bit）",
             "纯测量，不预设结论；分支判读由天平据 §5.1 P1-c 条款执行",
         ],
     }
@@ -282,6 +320,11 @@ def main() -> int:
     print(f"  分段占比：d==0 {pooled['frac_d0']:.4f}｜d≤1 {pooled['frac_dle1']:.4f}"
           f"（口径A）｜d≤1.5 {pooled['frac_dle15']:.4f}｜"
           f"可直读(Moore) {pooled['frac_read_moore']:.4f}（口径B）")
+    if pooled.get("pos_n_dist_pairs"):
+        print(f"  [d>0 子集（mem_bit 判据相关）] n={pooled['pos_n_dist_pairs']} "
+              f"中位={pooled['pos_d_med']:.3f} p90={pooled['pos_d_p90']:.3f} "
+              f"d≤1={pooled['pos_frac_dle1']:.4f}（口径A）｜"
+              f"可直读(Moore)={pooled['pos_frac_read_moore']:.4f}（口径B）")
     print(f"  逐采样 CSV：{out}")
     print(f"  摘要 JSON：{sp}")
     if extinct_at is not None:
