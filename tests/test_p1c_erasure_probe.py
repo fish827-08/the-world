@@ -208,6 +208,10 @@ def test_dm_guard_positive_and_negative(tmp_path):
     mism3 = probe._dm_guard_mismatches(bad3, stored)
     assert len(mism3) == 1 and "n_agents" in mism3[0]
 
+    # 负例 d：存档不存在 ⇒ 报"不存在"（主函数另有跑前拒跑门，见 main 前置检查）
+    mism4 = probe._dm_guard_mismatches(ok_rows, tmp_path / "nope.csv")
+    assert len(mism4) == 1 and "不存在" in mism4[0]
+
 
 # ---------------- ⑤ _id 非降序 fail-loud ----------------
 

@@ -363,6 +363,9 @@ def main() -> int:
         bad.append(str(ex))
     if bad:
         raise SystemExit("🔴 P1-c 擦除探针前置读回失败：\n  - " + "\n  - ".join(bad))
+    if a.dm_guard and not Path(a.dm_guard).exists():
+        raise SystemExit(f"🔴 dm-guard 前置检查失败：存档不存在 {a.dm_guard} "
+                         f"⇒ 拒跑（避免跑完 {a.ticks}t 才发现无法对锚）")
 
     print(f"# [P1-c-erase] seed={a.seed} ticks={a.ticks} sample={a.sample} "
           f"device={rb['rows']}x{rb['cols']} patches={rb['patches']} "
