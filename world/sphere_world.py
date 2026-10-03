@@ -117,7 +117,7 @@ class SphereWorld:
         ----
         (row, col) : 元组 (NDArray[int64], NDArray[int64])
             与入参形状相同的两个数组；row = flat // cols，col = flat % cols。
-            例：flat=125, cols=120 → row=1, col=5。 //读到解释代码，就是把经纬度的点转化为具体的格子（120，60）的点吗？，方法解释是做什么可以说的通俗一点
+            例：flat=125, cols=120 → row=1, col=5。
         """
         flat = np.asarray(flat, dtype=np.int64)
         return np.divmod(flat, self.cols)
