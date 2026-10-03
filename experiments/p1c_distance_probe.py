@@ -312,14 +312,19 @@ def main() -> int:
         f.flush()
         os.fsync(f.fileno())
 
+    # R360 裁定 1（空池容错）：零有效记忆槽的 run 跑完后池为空 ⇒ d_mean/d_max/
+    # frac_read_moore 为 None，仅打印层容错（不动 CSV/JSON/数值/判据）。
+    def _pf(v, spec: str) -> str:
+        return "n/a" if v is None else format(v, spec)
+
     print("\n===== P1-c 池化（全部采样点、全部有效记忆槽）=====")
     print(f"  配对样本 n={pooled['n_dist_pairs']}（{pooled['n_samples']} 个采样点）")
     print(f"  距离（格，单位=1 纬度格宽）：中位={pooled['d_med']:.3f} "
           f"p90={pooled['d_p90']:.3f} p99={pooled['d_p99']:.3f} "
-          f"均值={pooled['d_mean']:.3f} max={pooled['d_max']:.3f}")
+          f"均值={_pf(pooled['d_mean'], '.3f')} max={_pf(pooled['d_max'], '.3f')}")
     print(f"  分段占比：d==0 {pooled['frac_d0']:.4f}｜d≤1 {pooled['frac_dle1']:.4f}"
           f"（口径A）｜d≤1.5 {pooled['frac_dle15']:.4f}｜"
-          f"可直读(Moore) {pooled['frac_read_moore']:.4f}（口径B）")
+          f"可直读(Moore) {_pf(pooled['frac_read_moore'], '.4f')}（口径B）")
     if pooled.get("pos_n_dist_pairs"):
         print(f"  [d>0 子集（mem_bit 判据相关）] n={pooled['pos_n_dist_pairs']} "
               f"中位={pooled['pos_d_med']:.3f} p90={pooled['pos_d_p90']:.3f} "
