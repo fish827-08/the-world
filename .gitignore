@@ -60,6 +60,15 @@ experiments/local_rerun_d2x.bat
 #    依据：_share/规则-文件存放.md
 _archive/frozen_trees/
 _archive/桌面残留-*/
+# 旧设计稿/旧路线稿的归档批次（2026-10-03 由 `_trash_local/_design_drafts_*` 移入）
+_archive/设计旧稿-*/
+
+# 🔴 `_trash_local/` = 临时草稿区（R342 规则①「临时文件用完即删」）
+#    入 ignore 的理由：它**污染 `git status`**（10-03 实测 1 912 个游离文件 ⇒ 真改动被淹没，
+#    镜的审核帖亦独立指出同一问题）⇒ 协作效率受损。
+#    ⚠️ **但它不是垃圾桶**：需要复现的判读/编排脚本已收编进 `experiments/_legacy_scripts/`（含溯源表）。
+#    依据：_share/规则-文件存放.md §三
+_trash_local/
 
 # === 2026-09-12 迁移后：本地副本/备份/独立仓库（不入主仓） ===
 .git.backup-*/
