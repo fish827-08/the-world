@@ -54,6 +54,13 @@ long_run_*.txt
 _rerun_logs/*
 experiments/local_rerun_d2x.bat
 
+# === 2026-10-03 R342 文件存放规则：归档区（代码快照/桌面残留，体积大且可重新生成）===
+# 🔴 落点纪律：一律进 `_archive/`（本目录），❌ 不要进 `_trash_local/`
+#    （后者未入库 ⇒ 别人复现不了，等于没整理）
+#    依据：_share/规则-文件存放.md
+_archive/frozen_trees/
+_archive/桌面残留-*/
+
 # === 2026-09-12 迁移后：本地副本/备份/独立仓库（不入主仓） ===
 .git.backup-*/
 _gitee_review/
