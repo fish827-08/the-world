@@ -425,6 +425,218 @@ class _HomeRangeTracker:
         return (len(_go), int(ii.size))
 
 
+# ---- 🔴 R358 T4（A1/A2/A3）：M0 仪表（砚《C1-M0仪表产出规格》§三 探针侧旁路）----
+#   落列（每采样点）：G0 `g15_mean` ｜ G1 `g1_entropy` + `marks_hist_0..15` ｜
+#   G3 `sig_run_len_hist_1..8` + 审计三列 ｜ G4 `g4_mem_bit_*` ｜ G5 `g5_dir_diff`/
+#   `g5_move_diff`/`g5_n_*`。**默认关**（关 ⇒ 表头与行逐字节等于旧版）。
+_M0_COLS = (["g15_mean", "g1_entropy"]
+            + [f"marks_hist_{i}" for i in range(16)]
+            + [f"sig_run_len_hist_{i}" for i in range(1, 9)]
+            + ["g3_fresh_cells", "g3_ambig_n", "g3_orphan_n",
+               "g4_mem_bit_frac", "g4_mem_bit_on", "g4_mem_bit_n",
+               "g5_dir_diff", "g5_move_diff", "g5_n_sig", "g5_n_nosig"])
+
+
+class _M0Instruments:
+    """M0 仪表：G0/G1/G3/G4/G5 —— 探针侧旁路，**只读**引擎（不消费 RNG、不写引擎）。
+
+    逐采样点语义（交付说明与判读报告须连带引用）：
+      · G0 `g15_mean` = 活体 `Gene.SIGNAL_STRENGTH` 均值（空池 ⇒ NaN，同 g22 口径）；
+      · G1 `g1_entropy` = 非零格 pattern（字母表 1..15）Shannon 熵 ÷ log2(16)
+        （**按规格原文**；15 符号理论满熵 ≈ 0.977 ⇒ 报告时注明）；
+        `marks_hist_0..15` = 原始直方图（口径可离线重算）；
+      · G3 = **同发射者连续 tick 写**的连串长度直方图（run 收尾入桶 ⇒ 累计量，
+        正在写的串不计；`_8` = ≥8 溢出桶）。审计列：`g3_fresh_cells` = 累计新写
+        格数；`g3_ambig_n` = 同格多写者（归因歧义）次数；`g3_orphan_n` = 新写格
+        找不到同格候选（归因失败）次数（正常应恒 0，非 0 = 探针口径 bug 的信号）。
+      · G4 = `_mem_bit_on/_mem_bit_n`（**须 `signal_alphabet="8"`**：attach 时非 "8"
+        显式告警；Rust 下沉路径不累计 ⇒ 本探针强制 Python 路径天然满足）；
+      · G5 `g5_dir_diff` = 「有信号 vs 无信号」个体下一步去向分布的总变差距离
+        （9 档：8 邻 + 静止）；`g5_move_diff` = |P(静止|无) − P(静止|有)|；
+        `g5_n_sig`/`g5_n_nosig` = 两档人·次。
+
+    🔴 测量时点（与引擎源码逐点对齐；改引擎需复核本类）：
+      · G5 的 has_sig 与引擎决策**同式同源**（读 `_marks` + 查 `_nb_table`/`_pole_nb`，
+        见 `sphere_engine.py:3120,3180`）；决策时点图 = **本步末的 `_marks`**
+        —— 依据：步 t 内 tick()（:2843）→ 发射写 marks（:3664，步 4.5）→ 移动决策读
+        marks（步 5）；移动之后到步末无人再写 marks（唯一写点 = :3664，已全仓核）
+        ⇒ 步末 marks 逐位等于移动实读图（含本步新写；pattern=0 写入会**清格**，
+        该语义被本式自然涵盖）。方向 = 本步实成位移（移动前格 → 本步末格；两端均
+        存活者；本步内出生者无完整位移观测 ⇒ 不计）。极区行按 (dr, sign(dc)) 归类
+        （极点坍缩 ⇒ 近似，报告披露）。
+      · G3 归因：新写格 ↔ 上步末同格个体。依据 = 发射写**移动前**格（`:3634`
+        `e_flat = self._flat[emitters]`，在移动步骤 5 之前）；同格多写者归因规则 =
+        连续（last=t−1）优先 → 长连串优先 → 小 id 兜底，并计 `ambig`。
+    """
+
+    def __init__(self) -> None:
+        self.hist_run = np.zeros(9, dtype=np.int64)      # 下标 = min(len, 8)
+        self.streak: dict[int, tuple[int, int]] = {}     # id -> (last_tick, len)
+        self.fresh_n = 0
+        self.ambig_n = 0
+        self.orphan_n = 0
+        self.last_flat = None      # 上步末位置（= 本步移动/决策前位置）
+        self.last_ids = None
+        self.g5 = None
+
+    # ---- 装配 + fail-loud 自检（列产不出来必须当场炸，不许静默 NaN）----
+
+    def attach(self, eng) -> None:
+        for attr in ("_marks", "_age", "duration"):
+            if not hasattr(eng.signals, attr):
+                raise RuntimeError(
+                    f"🔴 M0 仪表装配失败：signals.{attr} 不存在（引擎结构变了？）")
+        for attr in ("_nb_table", "_pole_nb", "_mem_bit_on", "_mem_bit_n",
+                     "_flat", "_id", "_genes"):
+            if not hasattr(eng, attr):
+                raise RuntimeError(f"🔴 M0 仪表装配失败：引擎缺 {attr}（G0/G3/G5 需要）")
+        if int(eng._genes.shape[1]) <= int(Gene.SIGNAL_STRENGTH):
+            raise RuntimeError("🔴 M0 仪表装配失败：_genes 宽度 ≤ g15 下标")
+        self.last_flat = np.asarray(eng._flat).copy()
+        self.last_ids = np.asarray(eng._id).copy()
+        if str(getattr(eng, "_alpha", "")) != "8":
+            print(f"  ⚠️ M0 G4：signal_alphabet={getattr(eng, '_alpha', None)!r} ≠ '8' "
+                  f"⇒ mem_bit 通路不在（g4_* 恒 n/a）；G4 数据须装置切 \"8\""
+                  f"（P1-a 前提）。", file=sys.stderr)
+
+    # ---- 每 tick（G3 归因 + 维护"上步末"快照；只读）----
+
+    def after_step(self, eng, t: int, sampled: bool) -> None:
+        fresh = self._fresh_cells(eng)
+        if sampled:                # G5 用更新前快照（上步末位置）＋本步末 marks
+            self.g5 = self._compute_g5(eng)
+        self._track_runs(eng, t, fresh)
+        self.last_flat = np.asarray(eng._flat).copy()
+        self.last_ids = np.asarray(eng._id).copy()
+
+    @staticmethod
+    def _fresh_cells(eng) -> np.ndarray:
+        """本步新写格（只读）。tick() 先于写 ⇒ 步末 `age == duration` ⇔ 本步写入。"""
+        sig = eng.signals
+        idx = np.flatnonzero(sig._marks)
+        return idx[sig._age[idx] == sig.duration]
+
+    def _track_runs(self, eng, t: int, fresh: np.ndarray) -> None:
+        if fresh.size == 0:
+            return
+        self.fresh_n += int(fresh.size)
+        lf = self.last_flat
+        if lf is None or lf.size == 0:
+            self.orphan_n += int(fresh.size)
+            return
+        order = np.argsort(lf, kind="stable")
+        lfs = lf[order]
+        lis = np.asarray(self.last_ids)[order]
+        lo = np.searchsorted(lfs, fresh, "left")
+        hi = np.searchsorted(lfs, fresh, "right")
+        st = self.streak
+        for j in range(int(fresh.size)):
+            a, b = int(lo[j]), int(hi[j])
+            if b == a:
+                self.orphan_n += 1
+                continue
+            cand = lis[a:b]
+            if cand.size > 1:
+                self.ambig_n += 1
+                cont = [int(k) for k in cand if st.get(int(k), (-1, 0))[0] == t - 1]
+                pool = cont if cont else [int(k) for k in cand]
+                vid = max(pool, key=lambda k: (st.get(k, (-1, 0))[1], -k))
+            else:
+                vid = int(cand[0])
+            prev = st.get(vid)
+            if prev is not None and prev[0] == t - 1:
+                st[vid] = (t, prev[1] + 1)
+            else:
+                if prev is not None:
+                    self.hist_run[min(prev[1], 8)] += 1
+                st[vid] = (t, 1)
+
+    # ---- 每采样点（G5 + 采样列）----
+
+    def _compute_g5(self, eng):
+        ids_prev = self.last_ids
+        ids_now = np.asarray(eng._id)
+        if ids_prev is None or ids_prev.size == 0 or ids_now.size == 0:
+            return None
+        for ids_x in (ids_prev, ids_now):        # 归因前提：id 升序（引擎不变量）
+            if ids_x.size > 1 and not bool((np.diff(ids_x) > 0).all()):
+                raise RuntimeError("🔴 M0 G5：_id 非升序 ⇒ searchsorted 归因不可信。")
+        pos = np.searchsorted(ids_prev, ids_now)
+        pos_c = np.minimum(pos, ids_prev.size - 1)
+        ok = (pos < ids_prev.size) & (ids_prev[pos_c] == ids_now)
+        if not ok.any():
+            return None
+        cells = self.last_flat[pos[ok]]            # 决策时点（移动前）格
+        now_flat = np.asarray(eng._flat)[ok]
+        # 决策时点信号图 = 本步末 marks（步内唯一写点 :3664 在移动之前 ⇒ 逐位等同实读）
+        dm = np.asarray(eng.signals._marks)
+        hs = np.zeros(cells.size, dtype=bool)
+        cols = int(eng.world.cols)
+        rows_ = cells // cols
+        top = rows_ == int(eng.world._pole_top)
+        bot = rows_ == int(eng.world._pole_bottom)
+        normal = ~(top | bot)
+        if normal.any():
+            hs[normal] = (dm[eng._nb_table[cells[normal]]] > 0).any(axis=1)
+        for mask, prow in ((top, 0), (bot, 1)):
+            if mask.any():
+                hs[mask] = bool((dm[eng._pole_nb[prow]] > 0).any())
+        nr = now_flat // cols
+        nc_ = now_flat % cols
+        dr = nr - rows_
+        dc = nc_ - (cells % cols)
+        dc = (dc + cols // 2) % cols - cols // 2    # 环形折算（极点坍缩 ⇒ 近似）
+        code = np.full(cells.size, 4, dtype=np.int64)     # 4 = 静止
+        mv = (dr != 0) | (dc != 0)
+        code[mv] = (dr[mv] + 1) * 3 + np.sign(dc[mv]).astype(np.int64) + 1
+        n_sig = int(hs.sum())
+        n_no = int(cells.size) - n_sig
+        out = {"g5_n_sig": n_sig, "g5_n_nosig": n_no,
+               "g5_dir_diff": float("nan"), "g5_move_diff": float("nan")}
+        if n_sig and n_no:
+            h1 = np.bincount(code[hs], minlength=9).astype(np.float64)
+            h0 = np.bincount(code[~hs], minlength=9).astype(np.float64)
+            p1 = h1 / h1.sum()
+            p0 = h0 / h0.sum()
+            out["g5_dir_diff"] = float(0.5 * np.abs(p1 - p0).sum())
+            out["g5_move_diff"] = float(abs(p0[4] - p1[4]))
+        return out
+
+    def sample_cols(self, eng) -> dict:
+        d: dict = {}
+        N = int(np.asarray(eng._flat).size)
+        if N:
+            d["g15_mean"] = float(eng._genes[:N, int(Gene.SIGNAL_STRENGTH)].mean())
+        else:
+            d["g15_mean"] = float("nan")
+        hist16 = np.bincount(eng.signals._marks, minlength=16)
+        for i in range(16):
+            d[f"marks_hist_{i}"] = int(hist16[i])
+        nz = hist16[1:].astype(np.float64)
+        tot = float(nz.sum())
+        if tot <= 0:
+            d["g1_entropy"] = float("nan")
+        else:
+            p = nz[nz > 0] / tot
+            d["g1_entropy"] = float(-(p * np.log2(p)).sum() / math.log2(16.0))
+        for i in range(1, 9):
+            d[f"sig_run_len_hist_{i}"] = int(self.hist_run[i])
+        d["g3_fresh_cells"] = int(self.fresh_n)
+        d["g3_ambig_n"] = int(self.ambig_n)
+        d["g3_orphan_n"] = int(self.orphan_n)
+        on_ = int(eng._mem_bit_on)
+        n_ = int(eng._mem_bit_n)
+        d["g4_mem_bit_frac"] = (float(on_) / float(n_)) if n_ else float("nan")
+        d["g4_mem_bit_on"] = on_
+        d["g4_mem_bit_n"] = n_
+        g5 = self.g5 if self.g5 is not None else {}
+        d["g5_dir_diff"] = g5.get("g5_dir_diff", float("nan"))
+        d["g5_move_diff"] = g5.get("g5_move_diff", float("nan"))
+        d["g5_n_sig"] = g5.get("g5_n_sig", 0)
+        d["g5_n_nosig"] = g5.get("g5_n_nosig", 0)
+        return d
+
+
 def _dump_pairs(hr, path: str, seed, arm) -> int:
     """🔴 R316 设计 1：把 `hr` 的存活个体活动量追加到 `path`（每 run 一段）。
 
@@ -762,7 +974,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
             prior_rows=None, out_path=None, on_row=None, hr_tracker=None,
-            g22_init=None):
+            g22_init=None, m0=None):
     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
 
     🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
@@ -779,6 +991,9 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
       · `save_every > 0` + `snapshot_dir` ⇒ 每 N tick 存快照 + 侧车（N 须 == sample）
       · `resume_sample=True` ⇒ 从 `snapshot_dir/<tag>.snapshot.npz` 接续；
         `ticks` 仍是**绝对目标 tick**
+    🔴 R358 T4（砚 C1 规格）：`m0` = `_M0Instruments` 实例（默认 None ⇒ 逐字节等于
+      旧版）。传入 ⇒ 每采样点追加 M0 仪表列（G0/G1/G3/G4/G5，见类 docstring）；
+      续跑时仪表统计**从本段起点重新累计**（分段口径）。
     🔴 `run_one` **不自己动 `out_path`**：清残行（`_strip_rows_after`）由 main 在
       "`fout` 已 flush 且尚未开始本 run" 的窗口里做 —— 若在这里 `os.replace` 整个
       CSV 文件，会把 `fout` 缓冲里**还没落盘的行**一起覆盖掉（本实现的第一版就栽在这）。
@@ -837,7 +1052,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
                       labels, n_patch_total, init_cap_full, init_patch_cap,
                       init_cap_sum, visited_mask, patch_ever_visited, first_visit,
                       save_every, snapshot_dir, tag, on_row=on_row,
-                      hr_tracker=hr_tracker)
+                      hr_tracker=hr_tracker, m0=m0)
 
 
 def _fail_save_every(save_every, sample, snapshot_dir):
@@ -960,7 +1175,8 @@ def _loop(seed, mem_on, rows_out, start_tick, ticks, sample, labels,
 def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                n_patch_total, init_cap_full, init_patch_cap, init_cap_sum,
                visited_mask, patch_ever_visited, first_visit,
-               save_every, snapshot_dir, tag, on_row=None, hr_tracker=None):
+               save_every, snapshot_dir, tag, on_row=None, hr_tracker=None,
+               m0=None):
     """采样主循环（首跑 / 续跑共用）——见 `_loop` 的落盘顺序说明。
 
     🔴 R303：`on_row` 非 None ⇒ **每个采样点生成后立刻回调落盘**（行节拍 == 快照节拍），
@@ -971,9 +1187,16 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
     t_slice = time.perf_counter()
     last = start_tick
     stop = "ticks"
+    if m0 is not None:              # 🔴 R358 T4：装配 + fail-loud 自检
+        m0.attach(eng)
 
     for t in range(start_tick + 1, ticks + 1):
+        # 🔴 R358 T4：`sampled` 上移到 step 前（纯函数值不变）⇒ `after_step` 与
+        #   采样判定同步、且 G5 能在"更新上步末快照"**之前**读到决策时点状态。
+        sampled = (t % sample == 0) or (t == ticks)
         eng.step()
+        if m0 is not None:
+            m0.after_step(eng, t, sampled)
         flat = eng._flat
         visited_mask[flat] = True
         for p in np.unique(labels[flat]):
@@ -981,7 +1204,6 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                 patch_ever_visited[p] = True
                 first_visit[int(p)] = t
 
-        sampled = (t % sample == 0) or (t == ticks)
         if sampled:
             dt = (time.perf_counter() - t_slice) / max(t - last, 1) * 1e3
             last = t
@@ -1045,6 +1267,8 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
                 **_g22_stats(eng, N),
                 **_hr,
             })
+            if m0 is not None:      # 🔴 R358 T4：M0 仪表列（默认关 ⇒ 行不变）
+                rows_out[-1].update(m0.sample_cols(eng))
             # 🔴 R303：sample 级行落盘（回调由 main 提供：writerow+flush+fsync）。
             #   `rows_out` 仍保留（summary 需要末行、续跑清行需要行集合）。
             if on_row is not None:
@@ -1135,6 +1359,13 @@ def main():
                     help="把**初始** g22（记忆权重基因）钉到该值，之后**自由演化**。"
                          "默认 None = 不改（逐位等价）。用于双端扰动实验：从 0.1 / 0.9 两端出发，"
                          "看是否收敛回同一个最优值（稳定化选择）")
+    # ---- 🔴 R358 T4（A1/A2/A3）：M0 仪表（砚 C1 规格；默认关 ⇒ 逐字节等于旧版）----
+    ap.add_argument("--m0-instruments", action="store_true",
+                    help="每采样点追加 M0 仪表列：g15_mean / g1_entropy + "
+                         "marks_hist_0..15 / sig_run_len_hist_1..8 + g3_* 审计 / "
+                         "g4_mem_bit_* / g5_dir_diff,g5_move_diff,g5_n_*。"
+                         "**只读引擎状态、不消费 RNG**；G4 需 signal_alphabet='8'"
+                         "（否则告警为 n/a）")
     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
     add_device_arg(ap)
     a = ap.parse_args()
@@ -1187,6 +1418,8 @@ def main():
               "g22_mean_gen0", "g22_mean_gen1", "g22_mean_gen2", "g22_mean_gen3p",
               "g22_mean_latest", "pop_gen0", "pop_gen1", "pop_gen2", "pop_gen3p",
               "max_gen"]
+    if a.m0_instruments:  # 🔴 R358 T4：M0 仪表列（默认关 ⇒ 表头不变）
+        header = header + _M0_COLS
     if a.home_range:      # 🔴 R308：仅在开启时追加个体活动范围列（默认关 ⇒ 表头不变）
         header = header + _HR_COLS
 
@@ -1197,7 +1430,7 @@ def main():
           f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} "
           f"arms={['on' if m else 'off' for m in arms]} "
           f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
-          f"weight_gene={a.weight_gene} append={a.append} "
+          f"weight_gene={a.weight_gene} m0_instruments={a.m0_instruments} append={a.append} "
           f"resume_sample={a.resume_sample} save_every={a.save_every}")
 
     # ---- v2：run 级断点续跑准备（R264）----
@@ -1247,6 +1480,16 @@ def main():
     need_header = (not _append_mode) or (not os.path.exists(a.out)) \
         or (os.path.getsize(a.out) == 0)
 
+    # 🔴 R358 T4：续跑列一致性（M0 仪表列两档混用 ⇒ 列错位；硬拦）
+    if _append_mode and os.path.exists(a.out) and os.path.getsize(a.out) > 0:
+        with open(a.out, "r", newline="", encoding="utf-8") as _fh:
+            _hdr_ex = next(csv.reader(_fh), [])
+        if ("g1_entropy" in _hdr_ex) != bool(a.m0_instruments):
+            print("🔴 续跑列不一致：已存在 CSV 的 M0 仪表列与本次 --m0-instruments "
+                  "不符（混用两档 ⇒ 列错位）。换 --out 或保持一致。中止。",
+                  file=sys.stderr)
+            sys.exit(2)
+
     # 🔴 v3：sample 级续跑的"清残行"**必须在打开 `fout` 之前**做。
     #   踩过三个坑（全是"静默错"，只有对拍才发现）：
     #     ① 用 `os.replace` ⇒ CSV 换 inode，而 `fout` 指向孤儿 ⇒ 后续行全丢；
@@ -1291,6 +1534,7 @@ def main():
                 # 清行段处理过）。**不能用 --append 的 prior_rows 合并**：
                 # 那会把旧行读进来再重写一遍 ⇒ 浮点 repr 往返抖精度。
                 _hr = _HomeRangeTracker() if a.home_range else None   # R308：每 run 新建
+                _m0 = _M0Instruments() if a.m0_instruments else None  # 🔴 R358 T4：每 run 新建
                 if _hr is not None:      # 🔴 R318 设计 4：扰动参数挂到跟踪器上
                     _hr.ptb_mode = a.perturb
                     _hr.ptb_every = int(a.perturb_every)
@@ -1302,7 +1546,7 @@ def main():
                     a.weight_gene,
                     save_every=a.save_every, snapshot_dir=a.snapshot_dir,
                     resume_sample=_res, prior_rows=None, out_path=a.out,
-                    on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init)
+                    on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init, m0=_m0)
                 # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
                 fout.flush()
                 os.fsync(fout.fileno())
