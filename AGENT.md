@@ -488,8 +488,12 @@ gitee 私有仓库  little-fishy/digital-life-sphere
 
 - **未说明理由的分支一律删除**，不做事后追认
 - 命名统一 **`feat/<短名>`**；❌ 禁用 `feature/`（历史分支保留）
-- 一个分支 = **一个 worktree 目录**（`git worktree add ../_wt_<name> feat/<name>`），
+- 一个分支 = **一个 worktree 目录**（**树内** `.worktrees/<name>`：
+  `git worktree add .worktrees/<name> feat/<name>`；任务卡流用 `collab-toolkit/tools/worktree.py`（R359）），
   **不在同一工作树反复 checkout**——反复 checkout 是"陈旧副本"的制造机
+  > ⚠️ 2026-10-03 更新（所有者指示）：旧写法 `../_wt_<name>`（域外）**作废**——
+  > 域外文件会被定时清理器清除（`_wt_*` 旧树实测已被清，git 仅剩 prunable 登记）；
+  > `.worktrees/` 已入 `.gitignore`，不污染主工作区 `git status`。
 - ❌ **全员禁用 `git worktree prune`**（2026-09-12 事故）
   > 它会把**被标记 `prunable` 但仍在使用**的工作树登记一并清掉。
   > 2026-09-12 实际事故：`prune` 连带删除 `.git/worktrees/_gitee_review/`，导致**唯一活跃工作区**失去 git 身份
