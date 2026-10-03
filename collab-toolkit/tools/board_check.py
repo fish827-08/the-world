@@ -487,6 +487,110 @@ def collect_metrics(root: str) -> dict:
     }
 
 
+# ---------------- B3：任务卡池异常检测（orchestra §13.2 四条） ----------------
+# 🔴 设计：四条规则全部是**纯函数**（不读时钟以外的外部状态、不调 LLM），
+# 便于单测「各触发一次」；阈值集中在这里，改一处即可（与 task_card.py 同参）。
+CARD_FILE_DEFAULT = os.path.join("_share", "任务卡.md")
+CARD_POOL_MIN_PENDING = 2     # 规则1 卡池告急：pending 卡数 < 2
+CARD_STALE_CLAIM_MIN = 30     # 规则2 claimed 滞留 > 30min 未更新
+CARD_DONE_BACKLOG_MIN = 5     # 规则3 done 积压 > 5min 未核验（协调者可能挂了）
+CARD_FEEDBACK_OPEN_MIN = 10   # 规则4 反馈悬置 > 10min 无人裁决
+
+# 规则4 说明：orchestra 的「open 反馈」= 有人提了反馈没人裁决。放在任务卡语境里，
+# 等价物 = **failed 卡**（执行方报了失败/负反馈，等协调者裁决 → verified 或 打回 pending）。
+# done 是「正反馈等核验」（规则3 已管，5min 更严），故**不重复计入规则4**。
+
+
+def _task_card_cards(root: str, path: str | None = None) -> list:
+    """读任务卡表 → 卡 dict 列表；文件不存在/解析不出卡 ⇒ 返回 []（**不报错**）。
+
+    🔴 卡表尚未建立时（任务卡机制刚落地）整块规则静默跳过 —— 否则天天误报。
+    """
+    p = path or CARD_FILE_DEFAULT
+    if not os.path.isabs(p):
+        p = os.path.join(root, p)
+    if not os.path.isfile(p):
+        return []
+    try:
+        tools = os.path.dirname(os.path.abspath(__file__))
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        import task_card  # 同目录，标准库自足；只读解析，不触发锁
+    except Exception:
+        return []
+    with open(p, encoding="utf-8") as f:
+        return task_card.parse_cards(f.read())
+
+
+def check_card_pool(root: str, path: str | None = None,
+                    min_pending: int = CARD_POOL_MIN_PENDING,
+                    stale_claim_min: int = CARD_STALE_CLAIM_MIN,
+                    done_min: int = CARD_DONE_BACKLOG_MIN,
+                    feedback_min: int = CARD_FEEDBACK_OPEN_MIN) -> list:
+    """任务卡池四条异常检测（只读）。返回与 board_check 同构的 findings。"""
+    cards = _task_card_cards(root, path)
+    if not cards:
+        return []
+    out = []
+
+    # 规则1 卡池告急：pending 太少 ⇒ 队伍要断炊（没人可派）
+    n_pending = sum(1 for d in cards if d["状态"] == "pending")
+    if n_pending < min_pending:
+        out.append({"level": "error", "item": "cardpool",
+                    "msg": f"卡池告急：pending {n_pending} < {min_pending} —— "
+                           f"可派工的卡不够了，赶紧补卡"})
+
+    def _aged(status: str, minutes: int):
+        """超龄卡（按「更新」时间算）：[(卡号, 负责, 更新, 滞留分钟)]。"""
+        hits = []
+        for d in cards:
+            if d["状态"] != status:
+                continue
+            age = _minutes_since(d["更新"])
+            if age > minutes:
+                hits.append((d["卡号"], d.get("负责", "") or "—",
+                             d.get("更新", "") or "?", age))
+        return hits
+
+    # 规则2 claimed 滞留：认领了不动（干等 = 最容易发生也最隐蔽的停滞）
+    for cid, who, upd, age in _aged("claimed", stale_claim_min):
+        out.append({"level": "warn", "item": "cardpool",
+                    "msg": f"claimed 滞留：{cid}（{who}）{upd} 已 {age:.0f}min "
+                           f"> {stale_claim_min}min 未更新 —— 可 `task_card stale --apply` 打回"})
+    # 规则3 done 积压：交了活没人核验（协调者可能挂了）
+    for cid, who, upd, age in _aged("done", done_min):
+        out.append({"level": "warn", "item": "cardpool",
+                    "msg": f"done 积压：{cid}（{who}）{upd} 已 {age:.0f}min "
+                           f"> {done_min}min 未核验 —— 该去 verify 了"})
+    # 规则4 反馈悬置：failed 反馈没人裁决（> 规则3，给执行方留喘息）
+    for cid, who, upd, age in _aged("failed", feedback_min):
+        out.append({"level": "warn", "item": "cardpool",
+                    "msg": f"反馈悬置：{cid}（{who}）{upd} 已 {age:.0f}min "
+                           f"> {feedback_min}min 无人裁决 —— 要么 verify，要么打回"})
+
+    if not out:
+        out.append({"level": "ok", "item": "cardpool",
+                    "msg": f"卡池正常：{len(cards)} 张卡（pending {n_pending}）"})
+    return out
+
+
+def _minutes_since(ts: str) -> float:
+    """卡内时间戳（2026-10-03 20:05 / 10-03 20:05）→ 距今分钟；解析不出 ⇒ 0。"""
+    from datetime import datetime as _dt
+    s = (ts or "").strip()
+    if not s:
+        return 0.0
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%m-%d %H:%M", "%m-%d"):
+        try:
+            d = _dt.strptime(s, fmt)
+        except ValueError:
+            continue
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=TZ8)
+        return (_now() - d).total_seconds() / 60.0
+    return 0.0
+
+
 # ---------------- 输出 ----------------
 def print_findings(findings: list) -> tuple:
     icons = {"ok": "[OK]  ", "warn": "[警告]", "error": "[错误]"}
@@ -512,6 +616,9 @@ def cmd_check(args) -> int:
     findings = []
     findings += check_sizes(share_dir)
     findings += check_signatures(board)
+    # 🔴 files 必须先初始化：`--no-encoding` 时下面 `files` 为空列表而非未定义，
+    # 否则 check_encoding(files) 抛 UnboundLocalError（2026-10-03 R359 B3 修）。
+    files = []
     if not args.no_encoding:
         files = [os.path.join(share_dir, n) for n in SHARE_FILES]
     if args.deep:  # 含 docs/ 全量（较慢）
@@ -523,6 +630,8 @@ def cmd_check(args) -> int:
     findings += check_summary_freshness(board)
     findings += check_todo_sync(share_dir, board)
     findings += check_pin(board)
+    if not getattr(args, "no_card_pool", False):
+        findings += check_card_pool(root, getattr(args, "card_file", None))
     findings += check_locks(share_dir)
     findings += check_remote_refs(root, args.remote, args.branch, args.net)
     if not args.no_refs:
@@ -638,6 +747,11 @@ def main(argv=None) -> int:
     p_ck.add_argument("--no-encoding", action="store_true",
                       help="跳过编码污染检查（F-R31 家族）")
     p_ck.add_argument("--deep", action="store_true", help="编码检查含 docs/ 全量")
+    p_ck.add_argument("--card-file", default=None,
+                      help=f"任务卡表路径（默认 {CARD_FILE_DEFAULT}；"
+                           f"文件不存在 ⇒ 卡池规则静默跳过）")
+    p_ck.add_argument("--no-card-pool", action="store_true",
+                      help="跳过任务卡池异常检测（B3 四条）")
     p_ck.add_argument("--net", action="store_true",
                       help="联网对账（git ls-remote；F-R24 下推荐）")
     p_ck.add_argument("--remote", default="gitee")

@@ -62,28 +62,33 @@ def test_check_sizes_thresholds(fake_share):
     root, share, board = fake_share
     big = os.path.join(share, "路线图.md")
     with open(big, "w", encoding="utf-8") as f:
-        f.write("x" * (140 * 1024))  # 140KB -> 预警
+        f.write("x" * (bc.SIZE_WARN_KB + 10) * 1024)  # 预警线 +10KB -> 警告
     findings = bc.check_sizes(share)
     by_file = {f.get("file"): f for f in findings if f.get("file")}
     assert by_file["路线图.md"]["level"] == "warn"
     assert by_file["README.md"]["level"] == "ok"
 
 
-def test_check_sizes_error_over_200k(fake_share):
-    """§3.3 阈值 2026-09-19 由 150 → 200KB；本测试钉死**工具与章程一致**。
+def test_check_sizes_error_over_limit(fake_share):
+    """🔴 本测试钉死**工具阈值 == AGENT.md §3.3 硬上限**（F-R23 家族：两处漂移）。
 
-    ⚠️ 若改 `bc.SIZE_ERR_KB` 而不同步 `AGENT.md` §3.3 ⇒ 两处漂移（F-R23 家族）。
+    ⚠️ 阈值史：预警 130→200（2026-09-19）｜硬上限 200→**300**（2026-10-01 fish 定，
+    见 board_check.py 注释）。原测试还钉着 200/130 的老值 ⇒ **套件一直红**，
+    2026-10-03 由 R359 B3 交付时一并修（红套件不可交付）。
+    🔴 改阈值时**必须同步**：`board_check.py` 常量 + `AGENT.md §3.3` + 本测试。
     """
     _, share, _ = fake_share
     with open(os.path.join(share, "讨论板.md"), "w", encoding="utf-8") as f:
-        f.write("x" * (201 * 1024))
+        f.write("x" * ((bc.SIZE_ERR_KB + 1) * 1024))
     findings = bc.check_sizes(share)
     assert any(f["level"] == "error" and f.get("file") == "讨论板.md"
                for f in findings)
-    # 150KB 已**不再**报警（阈值已放宽）
+    # 越过预警线、但没到硬上限 ⇒ 只警告、不报错
     with open(os.path.join(share, "讨论板.md"), "w", encoding="utf-8") as f:
-        f.write("x" * (151 * 1024))
+        f.write("x" * ((bc.SIZE_WARN_KB + 1) * 1024))
     findings = bc.check_sizes(share)
+    assert any(f["level"] == "warn" and f.get("file") == "讨论板.md"
+               for f in findings)
     assert not any(f["level"] == "error" and f.get("file") == "讨论板.md"
                    for f in findings)
 
@@ -255,3 +260,96 @@ def test_check_encoding_all_clean(tmp_path):
     p = tmp_path / "a.md"
     p.write_text("干净 🔴\n", encoding="utf-8")
     assert bc.check_encoding([str(p)])[0]["level"] == "ok"
+
+
+# ---------------- B3：任务卡池异常检测（四条规则各触发一次） ----------------
+OLD_TS = "2026-10-03 07:00"   # 明显早于任何阈值；用旧日期 ⇒ 测试不依赖"此刻"
+
+
+def _write_cards(path, rows):
+    """rows = [(卡号, 状态, 负责, 建卡, 更新)]；写成 task_card 的同款表格。"""
+    head = "| 卡号 | 状态 | 负责 | 目标 | 输入 | 约束 | 验收 | 建卡 | 更新 | 结果 |\n"
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# 任务卡\n\n" + head + "|" + "---" * 10 + "|\n")
+        for cid, st, who, t0, t1 in rows:
+            f.write("| %s | %s | %s | 目标%s | - | - | - | %s | %s |  |\n"
+                    % (cid, st, who, cid, t0, t1))
+
+
+def test_card_pool_rule1_pending_too_few(tmp_path):
+    """规则1 卡池告急：pending < 2。"""
+    p = str(tmp_path / "cards.md")
+    _write_cards(p, [("R1", "pending", "", OLD_TS, OLD_TS),
+                     ("R2", "claimed", "甲", OLD_TS, OLD_TS)])
+    out = bc.check_card_pool(str(tmp_path), path=p)
+    hits = [f for f in out if f["level"] == "error" and "卡池告急" in f["msg"]]
+    assert len(hits) == 1 and "pending 1 < 2" in hits[0]["msg"]
+
+
+def test_card_pool_rule1_ok_when_enough_pending(tmp_path):
+    p = str(tmp_path / "cards.md")
+    _write_cards(p, [("R1", "pending", "", OLD_TS, OLD_TS),
+                     ("R2", "pending", "", OLD_TS, OLD_TS)])
+    assert not [f for f in bc.check_card_pool(str(tmp_path), path=p)
+                if f["level"] == "error"]
+
+
+def test_card_pool_rule2_claimed_stale(tmp_path):
+    """规则2 claimed 滞留 > 30min。"""
+    p = str(tmp_path / "cards.md")
+    _write_cards(p, [("R1", "claimed", "甲", OLD_TS, OLD_TS)])
+    out = bc.check_card_pool(str(tmp_path), path=p, stale_claim_min=1)
+    hits = [f for f in out if f["level"] == "warn" and "claimed 滞留" in f["msg"]]
+    assert len(hits) == 1 and "R1" in hits[0]["msg"] and "甲" in hits[0]["msg"]
+
+
+def test_card_pool_rule3_done_backlog(tmp_path):
+    """规则3 done 积压 > 5min 未核验（协调者可能挂了）。"""
+    p = str(tmp_path / "cards.md")
+    _write_cards(p, [("R1", "done", "甲", OLD_TS, OLD_TS)])
+    out = bc.check_card_pool(str(tmp_path), path=p, done_min=1)
+    hits = [f for f in out if f["level"] == "warn" and "done 积压" in f["msg"]]
+    assert len(hits) == 1 and "R1" in hits[0]["msg"]
+
+
+def test_card_pool_rule4_feedback_open(tmp_path):
+    """规则4 反馈悬置：failed 卡（负反馈等裁决）超 10min 无人处理。"""
+    p = str(tmp_path / "cards.md")
+    _write_cards(p, [("R1", "failed", "甲", OLD_TS, OLD_TS)])
+    out = bc.check_card_pool(str(tmp_path), path=p, feedback_min=1)
+    hits = [f for f in out if f["level"] == "warn" and "反馈悬置" in f["msg"]]
+    assert len(hits) == 1 and "R1" in hits[0]["msg"]
+
+
+def test_card_pool_done_is_not_counted_as_feedback(tmp_path):
+    """🔴 规则3 与规则4 不打架：done 只走 5min 那条（正反馈），失败才走 10min。"""
+    p = str(tmp_path / "cards.md")
+    _write_cards(p, [("R1", "done", "甲", OLD_TS, OLD_TS)])
+    out = bc.check_card_pool(str(tmp_path), path=p, feedback_min=1)
+    assert not [f for f in out if "反馈悬置" in f["msg"]]
+
+
+def test_card_pool_silent_when_file_missing(tmp_path):
+    """🔴 卡表还没建 ⇒ 静默跳过（否则机制刚落地就天天误报）。"""
+    out = bc.check_card_pool(str(tmp_path), path=str(tmp_path / "不存在.md"))
+    assert out == []
+
+
+def test_card_pool_ok_when_all_fresh(tmp_path):
+    p = str(tmp_path / "cards.md")
+    now = bc._now().strftime("%Y-%m-%d %H:%M")
+    _write_cards(p, [("R1", "pending", "", now, now),
+                     ("R2", "pending", "", now, now)])
+    out = bc.check_card_pool(str(tmp_path), path=p)
+    assert any(f["level"] == "ok" and f["item"] == "cardpool" for f in out)
+    assert not [f for f in out if f["level"] != "ok"]
+
+
+def test_check_cli_accepts_card_file(tmp_path, fake_share):
+    """--card-file 能透传（否则规则形同虚设）。"""
+    root, share, _ = fake_share
+    p = os.path.join(tmp_path, "cards.md")
+    _write_cards(p, [("R1", "pending", "", OLD_TS, OLD_TS)])
+    # 🔴 --root 属子解析器 ⇒ 必须放在子命令之后（老写法 `main(["--root", r,"check"])` 会撞）
+    assert bc.main(["check", "--root", root, "--no-refs", "--no-encoding",
+                    "--card-file", p]) == 2  # 卡池告急 = error ⇒ 2

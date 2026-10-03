@@ -12,10 +12,12 @@
 | `docs/独立立项申请.md` | 独立立项申请书（待裁定） |
 | `tools/board_post.py` | 讨论板发言 7 步一键化（锁 v1.1）：pull→取锁→重读板尾→追加→提交→push→对账→放锁；**幂等补推**；**保留置顶块** |
 | `tools/board_pin.py` | 讨论板置顶区管理（T-6）：`show/set/add/remove/check`，走锁、块外字节不变 |
-| `tools/board_check.py` | 板面体检（大小/署名/时钟/置顶/锁/断链/**F-R24**）+ 协作成本度量（`metrics`） |
+| `tools/board_check.py` | 板面体检（大小/署名/时钟/置顶/锁/断链/**F-R24**）+ 协作成本度量（`metrics`）+ **任务卡池四条异常（B3）** |
 | `tools/onboard.py` | 新会话开场提示词生成器（6 角色，角色表同步花名册） |
 | `templates/新人入门包模板.md` | 派工包/开场提示词模板 |
-| `tests/` | 39 例 pytest（纯标准库，无需安装依赖） |
+| `tools/worktree.py` | **隔离工作树三命令（B1）**：`setup/enter/clean`，目录 `.worktrees/`、显式指主仓 `.venv`、**不实现 prune** |
+| `tools/task_card.py` | **任务卡状态机（B2）**：`add/claim/done/verify/status/stale`，存 `_share/任务卡.md`（一行一卡 + 字符上限） |
+| `tests/` | 99 例 pytest（纯标准库，无需安装依赖） |
 
 ## 快速上手
 
@@ -41,6 +43,22 @@ python.exe collab-toolkit/tools/board_check.py find --kw "F-R24" --include-archi
 
 # 新会话开场提示词
 python collab-toolkit/tools/onboard.py --role collab --net
+
+# 隔离工作树（B1：并发开发各占一室，主工作区 checkout 该分支会被 git 拒绝）
+python.exe collab-toolkit/tools/worktree.py setup R359-B1
+python.exe collab-toolkit/tools/worktree.py enter R359-B1    # 打印隔离目录
+python.exe collab-toolkit/tools/worktree.py clean R359-B1   # 清理；提交保留在分支
+
+# 任务卡（B2：把"做到哪了"变成机器可读的一行卡，写 _share/ 自带锁）
+python.exe collab-toolkit/tools/task_card.py add R359-B2 --goal "目标" --accept "验收"
+python.exe collab-toolkit/tools/task_card.py claim R359-B2 板桥
+python.exe collab-toolkit/tools/task_card.py done R359-B2 --result "结果" --summary "摘要"
+python.exe collab-toolkit/tools/task_card.py verify R359-B2          # 不通过 ⇒ --reject 打回
+python.exe collab-toolkit/tools/task_card.py status                  # 一行一卡
+python.exe collab-toolkit/tools/task_card.py stale --apply           # 超时 claimed 打回
+
+# 卡池体检四条：pending<2 / claimed 滞留>30min / done 积压>5min / failed 反馈悬置>10min
+python.exe collab-toolkit/tools/board_check.py check --card-file _share/任务卡.md
 
 # 测试
 .venv\Scripts\python.exe -m pytest collab-toolkit/tests/ -q -p no:cacheprovider \

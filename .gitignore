@@ -133,3 +133,9 @@ _tmp_pytest_collab/
 _tmp_pytest_*/
 _pt_*/
 _share/.locks/*.post-journal.json
+
+# === R359（2026-10-03）：任务卡隔离工作树（collab-toolkit/tools/worktree.py）===
+# 路径固定 = `.worktrees/<卡号>`，分支 `task/<卡号>`；提交活在分支上，目录只是检出。
+# 🔴 必须忽略：否则 1912 个游离文件那种事再来一遍（R343 教训：游离文件淹没真改动）。
+# ⚠️ 只忽略**目录**，不要忽略 `.worktrees` 这个父名本身（便于日后人眼排查）。
+.worktrees/
