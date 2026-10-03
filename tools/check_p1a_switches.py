@@ -4,11 +4,18 @@
 用途：在跑 P1-b（读 `mem_bit_frac`）**之前**，先确认"8" 档与记忆机制**真的开了**。
 为什么必须有这一步
 ----------------
-`mem_bit_frac = _mem_bit_on / _mem_bit_n`，而`_work_memory` 初值 = -1（`sphere_engine.py:1361`），
-且只在"站在富食格上"时写入、被 `memory_v2` 门控（`:3586-3593`）
-⇒ **默认配置下 mem_bit 恒 0** ⇒ P1-b 会 FAIL，
-   但真实原因只是"没开记忆"，**不是"私有信息路线证伪"**。
-⇒ 这正是 R326"改装置只改预设档、实际未生效"的同族坑（已踩过一次）。
+`mem_bit` 读的是 **`self._work_memory`**（`sphere_engine.py:3643` 传给 `encode_signal_states`），
+而**写入 `_work_memory` 的只有 `memory_v2 == False` 那一支**（`:3589-3593`的 `elif food_rich.any()`）。
+
+🔴 **v1.2 实测推翻了我 R345 的方向**（本脚本 v1 版判错在此更正）：
+
+| `memory_v2` | 写入目标 | `mem_bit` 实测 |
+|---|---|---|
+| **False**（默认） | `elif food_rich.any()` ⇒ 写 **`_work_memory`** | **515/1811 ≈ 28%** ✅ |
+| True | `_mem_v2_write` ⇒ 写 `_mem_az` 等**新数组**（`:5404` "取代 v1 `_work_memory` 写入"） | **0/1818 = 0%** ❌ |
+
+⇒ **正确口径是「必须保持 `memory_v2=False`」，不是"必须打开"。**
+⇒ 这仍是 R326"改装置只改预设档、实际未生效"的同族坑（已踩过一次）—— 只是方向与我原先想的相反。
 
 用法：
     .venv/Scripts/python.exe tools/check_p1a_switches.py
@@ -37,8 +44,8 @@ class Check:
 def main() -> int:
     ap = argparse.ArgumentParser(description="P1-a 开关自检（零机时）")
     ap.add_argument("--alphabet", default="8", help="期望的 signal_alphabet（默认 8）")
-    ap.add_argument("--memory-v2", dest="memory_v2", action="store_true", default=None,
-                    help="期望 memory_v2=True（默认：不指定则跳过）")
+    ap.add_argument("--expect-mem-frac", choices=["off", "on"], default="off",
+                    help="期望的 memory_v2 状态：off=必须 False（默认，正确）；on=仅供对照实验")
     args = ap.parse_args()
 
     checks: list[Check] = []
@@ -77,28 +84,23 @@ def main() -> int:
         ifc = getattr(cfg, "info_structure", None)
         mv2 = getattr(ifc, "memory_v2", None) if ifc is not None else None
         mgrad = getattr(ifc, "memory_gradient", None) if ifc is not None else None
-        if args.memory_v2 is None:
-            # 🔴 判定逻辑自纠：**未开就必须拦住**，不能只"报告"后仍放行
-            #    （这正是我批评 v1.1 P1 门"报告≠闸门"的同一个坑 ⇒ 我自己不能犯）
-            checks.append(Check(
-                "memory_v2=True（P1-b 的**硬前提**）",
-                bool(mv2) is True,
-                f"实得 memory_v2={mv2}（属 InfoStructureConfig，config.py:635）"
-                + ("" if mv2 else "⇒ 🔴 **未开 ⇒ _work_memory 全 -1 ⇒ mem_bit 恒 0 ⇒ P1-b 必 FAIL**"),
-                fix="开 memory_v2（🔴 注意硬 assert：`config.py:668` 要求 "
-                    "`memory_gradient == 'orientation'`；另 memory_v2 与 rd/dynamic_centroid 有构造期互斥，"
-                    "见 sphere_engine.py:1096-1101）",
-            ))
-        else:
-            checks.append(Check(
-                "memory_v2=True（P1-b 的前提）",
-                bool(mv2) is True,
-                f"期望=True 实得={mv2}；memory_gradient={mgrad}",
-                fix="开 memory_v2（config.py:668 要求 memory_gradient=='orientation'）",
-            ))
+        # 🔴 v1.2 实测：必须 memory_v2 == False（默认档）
+        want_v2 = (args.expect_mem_frac == "on")
+        checks.append(Check(
+            f"memory_v2 == {want_v2}（P1-b 的**硬前提**；v1.2 实测口径）",
+            bool(mv2) is want_v2,
+            f"期望={want_v2} 实得={mv2}（属 InfoStructureConfig，config.py:635）"
+            + ("" if bool(mv2) is want_v2 else
+               ("⇒ 🔴 **开了 memory_v2 ⇒ 走 _mem_v2_write，不再写 _work_memory"
+                "⇒ mem_bit 恒 0 ⇒ P1-b 必 FAIL**" if mv2 else
+                "⇒ 🔴 **未开 ⇒ _work_memory 无写入路径 ⇒ mem_bit 恒 0**")),
+            fix=("🔴 **不要开 memory_v2**（v1.2 实测 0/1818）。`mem_bit` 读 `_work_memory`（:3643），"
+                 "而该数组仅在 `memory_v2=False` 的 `elif food_rich.any()` 分支写入（:3589-3593）"
+                 if mv2 else "检查记忆写入路径"),
+        ))
 
         # ---- 3b) memory_v2 的伴随硬assert（提前暴露，别等跑批才 fail-loud）
-        if bool(mv2):
+        if bool(mv2) and not want_v2:
             checks.append(Check(
                 "memory_v2 的伴随条件 memory_gradient=='orientation'（config.py:668）",
                 mgrad == "orientation",
@@ -113,7 +115,7 @@ def main() -> int:
     wm_init = next((l.strip() for l in eng if "self._work_memory = np.full" in l), "")
     has_v2_gate = any("if food_rich.any():" in l for l in eng)
     checks.append(Check(
-        "静态：_work_memory 初值为 -1（故默认配置下 mem_bit 恒 0）",
+        "静态：_work_memory 初值为 -1（启动时为空，靠富食格写入填充）",
         "np.full((n, 4), -1" in wm_init or "-1" in wm_init,
         wm_init or "未找到初始化行",
     ))
