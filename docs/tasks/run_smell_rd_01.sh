@@ -53,7 +53,7 @@ group_args() {
   case "$1" in
     a0) echo "--arms off" ;;                       # rd 关 + 无 smell = 基线
     a1) echo "--arms on" ;;                        # rd 开 + 无 smell（= S2-6 on 臂）
-    b1) echo "--arms on --extra=--smell-channels food --extra=--use-in-move" ;;
+    b1) echo "--arms on --smell-channels food --use-in-move" ;;
     *)  echo "UNKNOWN_GROUP:$1" >&2; exit 2 ;;
   esac
 }
@@ -69,6 +69,27 @@ deploy() {
   echo "[deploy] 冻结树就绪：$TREE"
 }
 
+# ---------------------------------------------------------------- 🔴 起跑前自检
+# 🔴 教训（2026-10-03）：首版编排器给 B1 写了 `--extra=--smell-channels food`，
+#    但 **s2 探针不认 `--extra`**（那是 `_run_s2g2.py` 的参数）⇒ B1 六臂全 rc=2，
+#    **白跑 3 小时**。根因 = 参数透传层没做"探针是否接受"的校验。
+#    ⇒ 纪律：**每组参数先跑 --help 级别的解析校验，全批起跑前必须过。**
+selftest() {
+  echo "[selftest] 校验三组参数是否被探针接受..."
+  local g
+  for g in a0 a1 b1; do
+    if ( cd "$TREE" && $PY -m experiments.s2_depletion_probe \
+           $(device_args) --seeds 999 --ticks 1 --sample 1 $(group_args "$g") \
+           --out /tmp/_selftest_$g.csv ) >/tmp/_selftest_$g.log 2>&1; then
+      echo "  [OK]   $g：参数被接受"
+    else
+      echo "  [FAIL] $g：参数被拒 ⇒ $(tail -2 /tmp/_selftest_$g.log | head -1)"
+      return 1
+    fi
+  done
+  echo "[selftest] 三组参数全部通过"
+}
+
 # ---------------------------------------------------------------- 起一批
 run_one() {
   local g="$1" s="$2"
@@ -82,11 +103,17 @@ run_one() {
   ( cd "$TREE" && eval "$cmd" ) > "$LOGDIR/${s}_${lab}.log" 2>&1
   local rc=$?
   # 装置守卫：bg_low_frac_actual 必须为 0.0（纯 A 支）
+  # ⚠️ 2026-10-03 修正：CSV **数据行是纯数值**（无 key= 形式）⇒ 原grep 恒空。
+  #    正确读法 = 最后一行的倒数第 3 列（表头 bg_low_frac_actual 固定为倒数第 3 列）。
   if [ $rc -ne 0 ]; then
     echo "[FAIL] seed=$s group=$lab rc=$rc （见 $LOGDIR/${s}_${lab}.log）"; return $rc
   fi
-  local blf; blf=$(grep -o 'bg_low_frac_actual=[0-9.]*' "$out" 2>/dev/null | tail -1 | cut -d= -f2)
-  echo "[done] seed=$s group=$lab rows=$(($(wc -l < "$out")-1)) last_tick=$(tail -1 "$out" | cut -d, -f3) bg_low=$blf"
+  local blf; blf=$(tail -1 "$out" | awk -F',' '{print $(NF-2)}')
+  local npx; npx=$(tail -1 "$out" | awk -F',' '{print $14}')
+  if [ "$blf" != "0.0" ]; then
+    echo "[WARN] seed=$s group=$lab装置守卫异常：bg_low_frac_actual=$blf（应 0.0）"
+  fi
+  echo "[done] seed=$s group=$lab rows=$(($(wc -l < "$out")-1)) last_tick=$(tail -1 "$out" | cut -d, -f3) bg_low=$blf n_patches=$npx"
 }
 
 # ---------------------------------------------------------------- 编排
@@ -116,7 +143,7 @@ orchestrate() {
   for f in "$RESDIR"/*.csv; do
     printf "  %-34s rows=%-4s last_tick=%-6s bg_low=%s\n" "$(basename "$f")" \
       "$(($(wc -l < "$f")-1))" "$(tail -1 "$f" | cut -d, -f3)" \
-      "$(grep -o 'bg_low_frac_actual=[0-9.]*' "$f" | tail -1 | cut -d= -f2)"
+      "$(tail -1 "$f" | awk -F',' '{print $(NF-2)}')"
   done
   echo "[续跑] 本批完成后应接 LTO-1（见派工单：先验完整性 + 免费回归 + 幂等）"
   echo "=========================================="
@@ -124,6 +151,7 @@ orchestrate() {
 
 case "${1:-status}" in
   start)   orchestrate ;;
+  selftest) deploy; selftest ;;
   status)
     echo "== $CODE 状态 =="
     ls -1 "$RESDIR"/*.csv 2>/dev/null | wc -l | xargs echo "已完成 run:"

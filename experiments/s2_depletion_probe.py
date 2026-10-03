@@ -487,10 +487,12 @@ def main():
     out_json = a.out.replace(".csv", ".summary.json")
 
     def _write_summary_atomic():
+        # 🔴 R336：分片运行下补读同目录同 seed 另一臂 ⇒ 单 run 作业也能算整批口径。
+        rows_for_c2 = _load_peer_summaries(out_json, summary)
         out = {
             "params": vars(a),
             "summary": summary,
-            "criterion_2": _criterion_2(summary),
+            "criterion_2": _criterion_2(rows_for_c2),
         }
         tmp = out_json + ".tmp"
         with open(tmp, "w", encoding="utf-8") as jf:
@@ -601,11 +603,61 @@ def main():
     print(json.dumps(out["criterion_2"], ensure_ascii=False, indent=2))
 
 
+def _load_peer_summaries(out_json, own_rows):
+    """🔴 R336 修复：分片运行下补读同目录的**同 seed 另一臂** summary。
+
+    背景（缺陷）
+    ----------
+    `_criterion_2` 是**整批级**判定：按 seed 分组后要求同 seed 的 off + on **都**在`summary` 里
+    才能配对比较。而预注册（如 S2判据②）要求按 `(seed, arm)` 切成多个**单run 作业**，
+    每个作业只产1 个 run 的 summary ⇒ **任何单 run 的 summary 里只有一只手臂**
+    ⇒ 12/12 实测`per_seed={}` / `verdict=null`。
+
+    🔴 危险面：若有人只看单个 summary 就下结论，会拿到 `null` 而误以为"无法判定"，
+    甚至可能被误读为"代码判定通过/失败"。
+
+    修法
+    ----
+    读同目录 `*.summary.json`，把**其他**作业产出的 run 行并入 `rows`（同seed+同arm 去重，
+    **自己刚写的行优先**，避免读到自己的旧版本）。
+    ⇒ 单 run 作业也能算出整批口径的 `criterion_2`，且**整批作业的行为逐字节不变**
+    （此时 `rows` 已含全部 run，补读只会命中同 seed+同 arm 的重复行，被去重丢弃）。
+
+    失败一律降级为"只算自己手上的行"（绝不抛异常中断跑批）。
+    """
+    rows_by_key = {(r["seed"], r["arm"]): r for r in own_rows}
+    d = os.path.dirname(os.path.abspath(out_json))
+    try:
+        names = sorted(f for f in os.listdir(d) if f.endswith(".summary.json"))
+    except OSError:
+        return list(own_rows)
+    for fn in names:
+        peer = os.path.join(d, fn)
+        if os.path.abspath(peer) == os.path.abspath(out_json):
+            continue                                   # 跳过自己
+        try:
+            with open(peer, encoding="utf-8") as jf:
+                data = json.load(jf)
+        except (OSError, ValueError):
+            continue                                   # 半个文件/损坏 ⇒ 跳过
+        for r in data.get("summary", []) or []:
+            try:
+                key = (r["seed"], r["arm"])
+            except (KeyError, TypeError):
+                continue
+            if key not in rows_by_key:                # 自己刚写的行优先
+                rows_by_key[key] = r
+    return list(rows_by_key.values())
+
+
 def _criterion_2(summary: list) -> dict:
-    """判据②：on 臂斑块「相对初始容量」方差是否 > off 臂。
+    """判据②：on臂斑块「相对初始容量」方差是否 > off 臂。
 
     抽成函数的目的：让「每 run 原子重写 summary」能复用它（R278 P3 逐 run flush），
     同时保证整批跑完时的结论与旧版**逐字段一致**（单测守护）。
+
+    🔴 R336：`summary` 允许由 `_load_peer_summaries` 补入同seed 另一臂的行，
+    以支持分片运行（单 run 作业）下的整批口径判定。
     """
     by_seed = {}
     for s in summary:
@@ -627,7 +679,10 @@ def _criterion_2(summary: list) -> dict:
             }
     off_vals = [v["off_var_init_tail"] for v in c2.values()]
     on_vals = [v["on_var_init_tail"] for v in c2.values()]
+    # 🔴 有配对时 verdict 才是布尔；无配对（如单 run 且找不到同seed 另一臂）⇒ None，
+    #    但**必须同时报n_paired**，避免"null"被误读为"判定失败"。
     c2_overall = {
+        "n_paired_seeds": len(c2),
         "off_var_init_mean": round(sum(off_vals) / len(off_vals), 6) if off_vals else None,
         "on_var_init_mean": round(sum(on_vals) / len(on_vals), 6) if on_vals else None,
         "verdict_on_gt_off_init": (all(v["on_gt_off_init"] for v in c2.values())
