@@ -54,15 +54,21 @@ def main() -> int:
     print("=" * 92)
     print(f"文件：{fp.name}（{len(lines)} 行）\n")
 
+    # 🔴 变更记录区里的旧名是**正确的历史陈述**（记录当时用的旧名）⇒ 跳过
+    hist_start = next((i for i, l in enumerate(lines, 1) if l.startswith("## 变更记录")), len(lines) + 1)
+
     legacy_hits: dict[str, list[int]] = defaultdict(list)
     canon_hits: dict[str, list[int]] = defaultdict(list)
+    hist_hits: list[int] = []
     for i, l in enumerate(lines, 1):
         for c in CANON:
             if re.search(rf"(?<![A-Za-z0-9-]){re.escape(c)}(?![A-Za-z0-9-])", l):
                 canon_hits[c].append(i)
-        # 旧名：P1b（不带连字符）
         if re.search(r"(?<![A-Za-z0-9-])P1b(?![A-Za-z0-9-])", l):
-            legacy_hits["P1b"].append(i)
+            if i >= hist_start:
+                hist_hits.append(i)
+            else:
+                legacy_hits["P1b"].append(i)
 
     print("【检查 1】门名出现位置")
     for c in CANON:
@@ -70,14 +76,17 @@ def main() -> int:
     for k, v in legacy_hits.items():
         print(f"  🔴旧名 {k:6s} 出现 {len(v):3d} 处  行号 {v[:8]} ⇒ 应改为 {LEGACY.get(k, '?')}")
     if legacy_hits:
-        issues.append(("门名旧写法", f"发现旧名 {list(legacy_hits)}"))
+        issues.append(("门名旧写法（正文）", f"发现旧名 {list(legacy_hits)}"))
+    if hist_hits:
+        print(f"  ℹ️旧名在变更记录区 {len(hist_hits)} 处 ⇒ **正确历史陈述，不算问题**")
 
     # ---- 检查 2：§5.1 与 §9.1 两处表格的门名是否一致
     print("\n【检查 2】§5.1（详细定义）与 §9.1（汇总）门名一致性")
     # 找两张表：含 "P1-a" 的行 vs 含 "P1" 开头的行
     detail_line = next((i for i, l in enumerate(lines, 1) if l.startswith("| **P1-a")), None)
     summary_lines = [i for i, l in enumerate(lines, 1)
-                     if re.match(r"^\|\s*\*{0,2}P1\b", l) and i != detail_line]
+                     if re.match(r"^\|\s*\*{0,2}P1\b", l) and i != detail_line
+                     and i < hist_start]
     if detail_line and summary_lines:
         print(f"  §5.1 详细定义首行：{detail_line}")
         print(f"  §9.1 汇总表候选行：{summary_lines}")
@@ -106,8 +115,16 @@ def main() -> int:
 
     # ---- 检查 4：已知的"1 格"表述是否还留在风险表里
     print("\n【检查 4】已作废前提（记忆格离发射者仅 1 格）是否仍出现在文档里")
-    bad = [(i, l.strip()[:90]) for i, l in enumerate(lines, 1)
-           if re.search(r"记忆格.{0,12}(仅|只)\s*1\s*格|绝大多数在 1 格内", l)]
+    NEG = ("不是事实", "待测量", "已正名", "是错误", "被否定", "而非", "不成立", "P1-c 距离门待测")
+    bad = []
+    for i, l in enumerate(lines, 1):
+        if not re.search(r"记忆格.{0,16}(仅|只)\s*1\s*格|绝大多数在 1 格内", l):
+            continue
+        # 🔴 否定语境排除：若同句已声明该前提不成立/待测量 ⇒ 不算残留（R347 误报过一次）
+        if any(n in l for n in NEG):
+            print(f"     （行 {i} 命中关键词但处于**否定语境**，已排除）")
+            continue
+        bad.append((i, l.strip()[:90]))
     if bad:
         for i, t in bad:
             print(f"  🔴 行 {i}：{t}")
