@@ -28,3 +28,47 @@ git pull: Already up to date
 讨论板 318KB > 300KB 阈值，BOARD-ARCHIVE v1 口径已出（6ecedb1）
 待 fish 事项：R366-PROP 路线级裁定（不升级）、N3 三案择一（等镜审后）
 无升级项，下次巡检继续跟踪
+
+## 2026-10-04 06:00 UTC — R379 值班巡检
+
+**git**: main@e867f0e，up-to-date。远端无新提交。
+**云机**: ALLDONE（208-210 RC=0 ✓；207 本机 dm-guard 已过）
+**会话**:
+- 板桥(f507489a8bfb) 33ff6205 running（WORKTREE-SIGN），已 ping 问进展
+- 砚(f1fed0b51eff) stopped 05:35（25min，未到 30min 阈值）
+- 镜(0252d9a72439) stopped 05:40（20min，未到 30min 阈值）
+- 澜舟(51a92d1cdb8f) stopped 05:40（20min，未到 30min 阈值）
+
+**卡片状态**:
+- ✅ TIER1-START/M0-G5LOCK/T7-MERGE/A8-CLOSE/ONBOARD-V2/DOC-60X120/R366-PROP/T1JUDGE-FIX/T1-READOUT/T7-MAIN-MERGE/N1-DENSITY-PRE/N4-DUAL-REVIEW/SMOKE-REPRO-207: all verified/done
+- 🟡 N2-DENSITY-CARRIER (澜舟 claimed): 交付在 task/N2-DENSITY-CARRIER 分支(33963df)，已 push 远端，**需 rebase main**（main 在 R378 又前进了）
+- 🔴 N3-PRED-ASSESSE (轻舟 pending): 镜 N4 审已过（verified），**待 fish 三案择一**——需升级
+- 🟡 WORKTREE-SIGN (板桥 pending): 进行中
+- 🟡 FILE-REORG (板桥+砚 pending): R378 新建，低优先
+
+**升级项**: N3 三案择一（路线级裁定，超 PI 限界）
+**下次巡检**: 30min 后或卡片状态变更时
+
+## 2026-10-04 06:35 UTC — R380 值班巡检
+
+**git**: main@d56c0c0，up-to-date。澜舟 N2-DENSITY-CARRIER done（R373-② 交付，载体@262096d rebase+推送，靶向25绿，零新增红）。
+**云机**: SSH 被微信扫码拦截，无法读取 status.txt（同 R376/R379）。
+**会话**: 全员 stopped 30+ min（板桥最后活跃 06:10 UTC）。
+
+**卡片状态**:
+- ✅ 14 卡 verified/done（同 R379）
+- ✅ N2-DENSITY-CARRIER (澜舟 done→待 PI verify): 载体脚本就绪，可跑不跑，起跑待 R372 触发
+- 🔴 N3-PRED-ASSESSE: PI 核验完成（镜审通过+读数自洽+三案逻辑自洽），**上呈 fish 三案择一**
+- 🟡 WORKTREE-SIGN (板桥): 分支 task/ONBOARD-V2 有 10 未合入提交（含 git_id.py+worktree.py+board_post 署名注入），待 PI 验收+merge
+- 🟡 BOARD-ARCHIVE (板桥): 口径 v1 已出（6ecedb1），实际归档未执行，讨论板 339KB > 300KB
+- 🟡 FILE-REORG (板桥+砚): R378 新建，低优先
+
+**N3 PI 核验摘要**:
+- 捕食通量 0.36–1.17%（能量装饰性成立）但死因占 31–42%（死亡通道已是主因）
+- 镜审：实测出处成立、庇护所 200–300 行估算合理、无阻塞项
+- 三案：A 不引入 / B 原样引入（大概率白跑）/ **C 改后引入（建议，C1 读数轻改 + C2 庇护所）**
+- 机时：C1 标定 ~1h + C1 主批 ~3.5h + C2 ~3.5h（云机口径），均在 R372 包络内
+
+**升级项**: N3 三案择一（路线级裁定，超 PI 限界）⇒ 已上呈 fish
+**待跟进**: WORKTREE-SIGN 验收 merge / BOARD-ARCHIVE 执行 / N2 密度批起跑（R372 触发）
+[2026-10-04 15:1x PI·fish(1) 值班R383] pull=ff-ok | 误早合N2(5850c4a 违R382代码审前置)⇒revert 463b04a 已推 | WORKTREE-SIGN 复跑125绿验收通过待合(主树脏=砚E-052/卡行+板桥GBK dupes,已催提交) | 催办:镜N2-CODEREVIEW(running)/砚提交脏区+更正时序/板桥新会话158e577c(GBK确认+BOARD-ARCHIVE执行,板346KB超线) | 云机无在跑批 | N3三案仍候fish(R380已呈,不重复催) | 起跑链:镜审→PI cherry-pick 262096d→砚E行补注→密度批跑
