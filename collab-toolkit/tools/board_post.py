@@ -284,6 +284,23 @@ except Exception:  # 退化：整块当正文（置顶区不会被误改，但�
 
 
 # ---------------- 主流程 ----------------
+def auto_inject_identity(root: str) -> None:
+    """本树署名文件（`worktree.py setup --role` 生成）在 ⇒ 注入 GIT_CONFIG_* env（R371①）。
+
+    作者位由此**自动 = 本人花名**，不再依赖逐命令 `-c`、也不读写同机共享 config。
+    没有署名文件 ⇒ 什么都不做（行为与改前完全一致，不静默改身份）。
+    """
+    try:
+        sys.path.insert(0, _HERE)
+        import git_id
+        name, email = git_id.load_sign_file(root)
+        if name and email:
+            git_id.apply_to_process(name, email)
+            print(f"[署名注入] {name} <{email}>（来自 {git_id.SIGN_FILENAME}）")
+    except Exception as e:
+        print(f"[署名注入] 跳过（{type(e).__name__}: {e}）")
+
+
 def cmd_post(args) -> int:
     root = os.path.abspath(args.root)
     args.root = root
@@ -292,6 +309,7 @@ def cmd_post(args) -> int:
     STATE["args"] = args
     STATE["journal"] = journal_path(root, args.slot)
     install_signal_guard()
+    auto_inject_identity(root)
     try:
         # ⓪ 环境检查
         if not os.path.isdir(os.path.join(root, ".git")):

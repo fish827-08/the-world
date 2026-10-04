@@ -93,6 +93,15 @@ def test_check_sizes_error_over_limit(fake_share):
                    for f in findings)
 
 
+def test_warn_band_is_non_empty():
+    """🔴 钉住 R374（2026-10-04 PI 裁定）：预警线 250 < 硬上限 300 ⇒ 预警带必须存在。
+
+    两线重合（曾短暂出现 300/300）会压平预警带 ⇒ 上面两条测试的 warn 分支不可达，
+    归档失去提前量。此测试是那道裁定的回归位，改阈值须重新裁定。
+    """
+    assert bc.SIZE_WARN_KB == 250 and bc.SIZE_ERR_KB == 300
+
+
 # ---------------- 锁检查 ----------------
 def test_check_locks_empty(fake_share):
     _, share, _ = fake_share

@@ -233,7 +233,8 @@ def release_lock(lock_tool: str, lock_dir: str, slot: str) -> None:
     try:
         subprocess.run([sys.executable, lock_tool, "release", "--slot", slot,
                         "--lock-dir", lock_dir],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=60,
+                       encoding="utf-8", errors="replace")
     except Exception:
         pass
 

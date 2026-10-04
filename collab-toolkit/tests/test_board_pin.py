@@ -71,8 +71,10 @@ def test_validate_unclosed_marker():
 def repo_with_pin(tmp_path):
     bare = tmp_path / "remote.git"
     work = tmp_path / "work"
-    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
-    subprocess.run(["git", "clone", str(bare), str(work)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True,
+                   text=True, encoding="utf-8", errors="replace")
+    subprocess.run(["git", "clone", str(bare), str(work)], check=True, capture_output=True,
+                   text=True, encoding="utf-8", errors="replace")
     for k, v in (("user.email", "t@t"), ("user.name", "t")):
         subprocess.run(["git", "config", k, v], cwd=work, check=True)
     share = work / "_share"
@@ -83,9 +85,9 @@ def repo_with_pin(tmp_path):
         encoding="utf-8")
     subprocess.run(["git", "add", "_share/讨论板.md"], cwd=work, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=work, check=True,
-                   capture_output=True)
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
     subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=work, check=True,
-                   capture_output=True)
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
     return str(work)
 
 

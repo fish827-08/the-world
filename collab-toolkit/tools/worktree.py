@@ -6,6 +6,8 @@
 
 三个命令：
   setup <卡号>   建隔离目录 `.worktrees/<卡号>` + 检出 `task/<卡号>` 分支
+                 （🔴 R370：建完必打印当前署名并提醒先设本人花名；
+                   带 `--name <花名> --email <邮箱>` 时代写 git config）
   enter <卡号>   只打印该卡的隔离目录路径（给别的会话/脚本用）
   clean <卡号>   清理工作树（**提交保留在分支上**，分支不删）
 
@@ -94,6 +96,35 @@ def resolve_python(root: str, override: str | None = None) -> tuple:
     return exe, os.path.isfile(exe), "主仓 .venv（worktree 内无 .venv，见 R249）"
 
 
+def plan_identity(name: str | None, email: str | None,
+                  role: str | None = None) -> dict:
+    """纯函数：setup 后怎么定署名（R370 身份纪律 / R227 / R371①）。
+
+    - `--role <键>` → `role`：花名/邮箱从 onboard.ROLE_REGISTRY 查，写**本树署名文件**
+      （`.qoder-sign.env`，env 注入用），**不写共享 config**（R371 竞写病灶）
+    - `--name` + `--email` 都给 → `set`：写该工作树的 `git config`（同机多树共享落点，
+      见 `worktree_config_scope`；只在明确要设树/机默认身份时用）
+    - 只给一半 → `bad`（不猜邮箱：中文花名拼不出邮箱，宁可停下问）
+    - 都没给 → `ask`（打印提醒，不静默回落）
+    """
+    if role:
+        return {"action": "role", "role": role, "name": name, "email": email}
+    if name and email:
+        return {"action": "set", "name": name, "email": email}
+    if name or email:
+        return {"action": "bad",
+                "msg": f"--name/--email 必须成对给（收到 name={name!r} email={email!r}）"}
+    return {"action": "ask"}
+
+
+def resolve_identity(root: str, plan: dict) -> tuple:
+    """`role` 计划 → (花名, 邮箱)。--name/--email 可覆盖注册表值。"""
+    sys.path.insert(0, _HERE)
+    import git_id
+    name, email = git_id.role_identity(plan["role"], root)
+    return plan.get("name") or name, plan.get("email") or email
+
+
 def plan_setup(root: str, card: str) -> dict:
     """setup 的**计划**（纯函数）：将要执行的 git 命令 + 各处存在性。
 
@@ -147,6 +178,31 @@ def run_git_print(root: str, args: list) -> int:
     return rc
 
 
+def apply_identity(wt_dir: str, name: str, email: str) -> int:
+    """写入 git 署名（R370 身份纪律）。
+
+    落点 = 仓库 local config（`config.worktree` 需 `extensions.worktreeConfig`，
+    本仓未开 ⇒ 同机多工作树**共享**这份署名）。因此切身份时每次 setup 都要重设，
+    别让上一个人的署名替你背锅。
+    """
+    for key, val in (("user.name", name), ("user.email", email)):
+        rc, _, err = run_git_capture(wt_dir, ["config", key, val])
+        if rc != 0:
+            sys.stderr.write(f"  [署名写入失败] git config {key} rc={rc}: {err[:200]}\n")
+            return rc
+    got_name = run_git_capture(wt_dir, ["config", "user.name"])[1]
+    got_mail = run_git_capture(wt_dir, ["config", "user.email"])[1]
+    print(f"  [署名已生效] user.name={got_name or name} user.email={got_mail or email}")
+    print("           （落点 = 仓库 local config，同机多工作树共享 ⇒ 换人开工必须重设）")
+    return 0
+
+
+def current_identity(wt_dir: str) -> tuple:
+    """读该工作树当前生效的 git 署名（读不到返回空串，不抛）。"""
+    return (run_git_capture(wt_dir, ["config", "user.name"])[1],
+            run_git_capture(wt_dir, ["config", "user.email"])[1])
+
+
 # ---------------- 子命令 ----------------
 def cmd_setup(args) -> int:
     root = os.path.abspath(args.root)
@@ -175,9 +231,41 @@ def cmd_setup(args) -> int:
         print("  [隔离已生效] 主工作区 `git checkout " + plan["paths"]["branch"] +
               "` 会被 git 拒绝（分支已被本 worktree 占用）")
     print("-" * 60)
+    ident = plan_identity(args.name, args.email, getattr(args, "role", None))
+    if ident["action"] == "bad":
+        sys.stderr.write(f"  [拒绝] {ident['msg']} —— 中文花名拼不出邮箱，不猜\n")
+        return 1
+    if ident["action"] == "role":
+        sys.path.insert(0, _HERE)
+        import git_id
+        try:
+            name, email = resolve_identity(root, ident)
+        except git_id.GitIdError as e:
+            sys.stderr.write(f"  [拒绝] {e}\n")
+            return e.code
+        p = git_id.write_sign_file(plan["paths"]["dir"], name, email)
+        print(f"  [本树署名文件已生成] {p}")
+        print(f"     应然署名 = {name} <{email}>（来自 onboard.ROLE_REGISTRY['{ident['role']}']）")
+        print("     开工第一步（bash）: eval \"$(python.exe "
+              f"{os.path.join(_HERE, 'git_id.py')} env --role {ident['role']})\"")
+        print("     ⇒ 之后本会话内所有 git 命令的作者位自动 = 本人花名，免逐命令 -c（R371①）")
+        print(f"     不写共享 config（R371 竞写病灶）；校验用："
+              f"python {os.path.join(_HERE, 'git_id.py')} verify --root {plan['paths']['dir']}")
+    elif ident["action"] == "set":
+        rc = apply_identity(plan["paths"]["dir"], args.name, args.email)
+        if rc != 0:
+            return 1
+    else:
+        cur_name, cur_mail = current_identity(plan["paths"]["dir"])
+        print(f"  当前署名: user.name={cur_name or '(未设置)'} "
+              f"user.email={cur_mail or '(未设置)'}")
+        print("  🔴 R370 身份纪律：worktree 内开工第一步先设本人署名（别让他人替你背锅）——")
+        print(f"     git -C {plan['paths']['dir']} config user.name <本人花名> && "
+              f"git -C {plan['paths']['dir']} config user.email <花名拼音>@the-world.local")
+        print("     或本次 setup 直接带 --role <角色键>（推荐：写本树署名文件，不碰共享 config）")
+        print("     或带 --name <花名> --email <邮箱>（脚本代写 git config）")
     print(MSG_NO_PRUNE)
-    print("常用: python.exe " + os.path.join(".venv", "Scripts", "python.exe")
-          if os.name == "nt" else "常用: " + exe)
+    print(f"常用解释器: {exe}")
     return 0
 
 
@@ -232,6 +320,13 @@ def main(argv=None) -> int:
     p.add_argument("card", help="卡号，如 R359-B1")
     p.add_argument("--python", default=None,
                    help="显式指定解释器（默认指向主仓 .venv；裸机必给）")
+    p.add_argument("--name", default=None,
+                   help="本人花名（R370：给了就代写 git config user.name；须与 --email 成对）")
+    p.add_argument("--email", default=None,
+                   help="署名邮箱，如 banqiao@the-world.local（须与 --name 成对）")
+    p.add_argument("--role", default=None,
+                   help="角色键（如 collab/dev/eval），花名与邮箱取自 onboard.ROLE_REGISTRY；"
+                        "写本树署名文件 .qoder-sign.env，不写共享 config（R371①，推荐）")
     p.set_defaults(fn=cmd_setup)
 
     p = sub.add_parser("enter", parents=[common], help="打印隔离目录路径")

@@ -143,3 +143,63 @@ def test_clean_refuses_dirty_worktree(repo, capsys):
         f.write("x\n")
     assert wt.main(["clean", "R359-T", "--root", repo]) == 2
     assert os.path.isdir(os.path.join(repo, ".worktrees", "R359-T"))
+
+
+# ---------------- 署名纪律（R370 / R227，ONBOARD-V2 ③） ----------------
+def test_plan_identity_pair_rules():
+    assert wt.plan_identity("板桥", "banqiao@the-world.local")["action"] == "set"
+    assert wt.plan_identity(None, None)["action"] == "ask"
+    for half in (("板桥", None), (None, "banqiao@the-world.local")):
+        assert wt.plan_identity(*half)["action"] == "bad"  # 只给一半 ⇒ 不猜邮箱
+
+
+def test_setup_without_name_reminds_loudly(repo, capsys):
+    """不给 --name ⇒ 必须打印 R370 提醒 + 当前署名（fail-loud，不静默）。"""
+    assert wt.main(["setup", "R359-T", "--root", repo]) == 0
+    out = capsys.readouterr().out
+    assert "R370" in out and "user.name" in out and "当前署名" in out
+
+
+def test_setup_with_name_writes_identity(repo, capsys):
+    wt_dir = os.path.join(repo, ".worktrees", "R359-T")
+    rc = wt.main(["setup", "R359-T", "--root", repo,
+                  "--name", "板桥", "--email", "banqiao@the-world.local"])
+    assert rc == 0
+    assert "署名已生效" in capsys.readouterr().out
+    name, mail = wt.current_identity(wt_dir)
+    assert name == "板桥" and mail == "banqiao@the-world.local"
+
+
+def test_setup_rejects_half_identity(repo, capsys):
+    assert wt.main(["setup", "R359-T", "--root", repo, "--name", "板桥"]) == 1
+    assert "成对" in capsys.readouterr().err
+
+
+# ---------------- --role：署名文件注入（卡 WORKTREE-SIGN / R371①） ----------------
+def test_plan_identity_role_wins():
+    assert wt.plan_identity(None, None, "collab")["action"] == "role"
+    assert wt.plan_identity("板桥", "b@the-world.local", "collab")["action"] == "role"
+    assert wt.plan_identity("板桥", "b@the-world.local")["action"] == "set"
+    assert wt.plan_identity("板桥", None, None)["action"] == "bad"
+
+
+def test_setup_with_role_writes_sign_file_not_shared_config(repo, capsys):
+    """--role ⇒ 写**本树**署名文件（可 source），不碰同机共享的 local config。"""
+    wt_dir = os.path.join(repo, ".worktrees", "R359-T")
+    before = wt.current_identity(repo)          # 仓库现有身份（可能来自全局 config）
+    assert wt.main(["setup", "R359-T", "--root", repo, "--role", "collab"]) == 0
+    out = capsys.readouterr().out
+    assert "本树署名文件已生成" in out and "板桥" in out
+    import git_id
+    assert git_id.load_sign_file(wt_dir) == ("板桥", "banqiao@the-world.local")
+    # 🔴 共享 config 必须原样未动 —— R371 竞写病灶（A 设板桥、B 设砚，谁后写谁赢）不得复发
+    assert wt.current_identity(wt_dir) == before
+
+
+def test_setup_with_undecided_role_fails_loud(repo, capsys):
+    assert wt.main(["setup", "R359-T", "--root", repo, "--role", "web"]) == 1
+    assert "花名未定" in capsys.readouterr().err
+
+
+def test_setup_rejects_unknown_role(repo, capsys):
+    assert wt.main(["setup", "R359-T", "--root", repo, "--role", "nope"]) == 1
