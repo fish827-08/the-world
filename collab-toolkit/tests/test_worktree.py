@@ -143,3 +143,33 @@ def test_clean_refuses_dirty_worktree(repo, capsys):
         f.write("x\n")
     assert wt.main(["clean", "R359-T", "--root", repo]) == 2
     assert os.path.isdir(os.path.join(repo, ".worktrees", "R359-T"))
+
+
+# ---------------- 署名纪律（R370 / R227，ONBOARD-V2 ③） ----------------
+def test_plan_identity_pair_rules():
+    assert wt.plan_identity("板桥", "banqiao@the-world.local")["action"] == "set"
+    assert wt.plan_identity(None, None)["action"] == "ask"
+    for half in (("板桥", None), (None, "banqiao@the-world.local")):
+        assert wt.plan_identity(*half)["action"] == "bad"  # 只给一半 ⇒ 不猜邮箱
+
+
+def test_setup_without_name_reminds_loudly(repo, capsys):
+    """不给 --name ⇒ 必须打印 R370 提醒 + 当前署名（fail-loud，不静默）。"""
+    assert wt.main(["setup", "R359-T", "--root", repo]) == 0
+    out = capsys.readouterr().out
+    assert "R370" in out and "user.name" in out and "当前署名" in out
+
+
+def test_setup_with_name_writes_identity(repo, capsys):
+    wt_dir = os.path.join(repo, ".worktrees", "R359-T")
+    rc = wt.main(["setup", "R359-T", "--root", repo,
+                  "--name", "板桥", "--email", "banqiao@the-world.local"])
+    assert rc == 0
+    assert "署名已生效" in capsys.readouterr().out
+    name, mail = wt.current_identity(wt_dir)
+    assert name == "板桥" and mail == "banqiao@the-world.local"
+
+
+def test_setup_rejects_half_identity(repo, capsys):
+    assert wt.main(["setup", "R359-T", "--root", repo, "--name", "板桥"]) == 1
+    assert "成对" in capsys.readouterr().err

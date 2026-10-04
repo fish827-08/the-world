@@ -62,10 +62,12 @@ def test_check_sizes_thresholds(fake_share):
     root, share, board = fake_share
     big = os.path.join(share, "路线图.md")
     with open(big, "w", encoding="utf-8") as f:
-        f.write("x" * (bc.SIZE_WARN_KB + 10) * 1024)  # 预警线 +10KB -> 警告
+        f.write("x" * (bc.SIZE_WARN_KB + 10) * 1024)  # 预警线 +10KB -> 触线
     findings = bc.check_sizes(share)
     by_file = {f.get("file"): f for f in findings if f.get("file")}
-    assert by_file["路线图.md"]["level"] == "warn"
+    # 🔴 断言"触线必非 ok"，不断言一定是 warn：2026-10-04 预警线抬到 300 后
+    # SIZE_WARN_KB == SIZE_ERR_KB，预警带被压平（触线即 error）。带是否恢复待裁。
+    assert by_file["路线图.md"]["level"] in ("warn", "error")
     assert by_file["README.md"]["level"] == "ok"
 
 
@@ -75,6 +77,8 @@ def test_check_sizes_error_over_limit(fake_share):
     ⚠️ 阈值史：预警 130→200（2026-09-19）｜硬上限 200→**300**（2026-10-01 fish 定，
     见 board_check.py 注释）。原测试还钉着 200/130 的老值 ⇒ **套件一直红**，
     2026-10-03 由 R359 B3 交付时一并修（红套件不可交付）。
+    ⚠️ 2026-10-04：预警线也抬到 300（板桥，对齐 fish 裁定）⇒ 两线重合、预警带为空，
+    本测试原"越过预警线但未到硬上限 ⇒ 只警告"分支不再可达 ⇒ 改为按两线关系断言。
     🔴 改阈值时**必须同步**：`board_check.py` 常量 + `AGENT.md §3.3` + 本测试。
     """
     _, share, _ = fake_share
@@ -83,13 +87,14 @@ def test_check_sizes_error_over_limit(fake_share):
     findings = bc.check_sizes(share)
     assert any(f["level"] == "error" and f.get("file") == "讨论板.md"
                for f in findings)
-    # 越过预警线、但没到硬上限 ⇒ 只警告、不报错
+    # 越过预警线、但没到硬上限 ⇒ 只警告、不报错；两线重合时无此区间，触线即 error
     with open(os.path.join(share, "讨论板.md"), "w", encoding="utf-8") as f:
         f.write("x" * ((bc.SIZE_WARN_KB + 1) * 1024))
     findings = bc.check_sizes(share)
-    assert any(f["level"] == "warn" and f.get("file") == "讨论板.md"
+    expected = "warn" if bc.SIZE_WARN_KB < bc.SIZE_ERR_KB else "error"
+    assert any(f["level"] == expected and f.get("file") == "讨论板.md"
                for f in findings)
-    assert not any(f["level"] == "error" and f.get("file") == "讨论板.md"
+    assert not any(f["level"] == "ok" and f.get("file") == "讨论板.md"
                    for f in findings)
 
 
