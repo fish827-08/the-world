@@ -5,11 +5,11 @@
     python tools/tier1_judge.py [--data-dir the-world-data/p1c_erase] [--out docs/Tier-1判读结果-YYYYMMDD.md]
 
 判据（天平 2026-10-03 锁定，R225 红线）：
-  ① pep_frac_read_moore ≥0.80 ⇒ H1 带｜≤0.50 ⇒ H2 带
+  ① pep_frac_read_moore ≥0.80 ⇒ H1 带｜≤0.50 ⇒ H2 带（pep = 被擦除集）
   ② pep_d_med ≤2.0 ⇒ H1｜≥3.0 ⇒ H2
-  ③ ΔR ≤0.05 ⇒ H1｜≥0.25 ⇒ H2
-  ④ 一致性锁：≥3/4 种子同带 + 池化值离带界 ≥2×SD
-  ⑤ 判 H2 需 SNR ≥2（R7.5）
+  ③ ΔR = pos_frac_read_moore − pep_frac_read_moore（差，非比）；≤0.05 ⇒ H1｜≥0.25 ⇒ H2
+  ④ 一致性锁：≥3/4 种子同带 + 池化值离带界 ≥2×SD；逐 seed 须 P1/P2 同向，异向 ⇒ 判别不出
+  ⑤ 判 H2 需 SNR = (0.862 − pep池化) / 种子间SD ≥2（T1 §3.3-3，仅用于判 H2）
 
 🔴 本脚本不跑批（R117：起跑令只在 fish）；只读已有数据。
 """
@@ -17,8 +17,10 @@
 import argparse
 import csv
 import json
+import math
 import os
 import statistics as st
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -44,19 +46,13 @@ def read_p1c_csv(fp: str) -> Dict:
     if not rows:
         return {"error": f"空文件: {fp}"}
 
-    # 提取关键列（按轻舟 T7 交付的列名）
-    # 🔴 列名须与 experiments/p1c_erasure_probe.py 的输出一致
-    key_cols = [
-        "pep_frac_read_moore",  # 保留集可直读比例（Moore 邻）
-        "pep_d_med",  # 保留集中位距离
-        "delta_R",  # 擦除集 vs 保留集的 K 相对变化
-        # 诊断列（fail-loud）
-        "eng_wr_ticks", "probe_rich_ticks",
-    ]
+    # 🔴 delta_R 不在 CSV 中，须由 pos_frac_read_moore − pep_frac_read_moore 现算（T1 §3.1）
+    # 列名须与探针输出一致（experiments/p1c_erasure_probe.py）
+    raw_cols = ["pos_frac_read_moore", "pep_frac_read_moore", "pep_d_med"]
 
     # 池化（跨窗口平均）
     pooled = {}
-    for col in key_cols:
+    for col in raw_cols:
         vals = [float(r[col]) for r in rows if col in r and r[col] not in ("", "NaN")]
         if vals:
             pooled[col] = {
@@ -67,6 +63,23 @@ def read_p1c_csv(fp: str) -> Dict:
             }
         else:
             pooled[col] = {"mean": float("nan"), "median": float("nan"), "stdev": 0.0, "n": 0}
+
+    # ΔR = pos − pep（差，非比；T1 §3.1）
+    pos_mean = pooled["pos_frac_read_moore"]["mean"]
+    pep_mean = pooled["pep_frac_read_moore"]["mean"]
+    if not (math.isnan(pos_mean) or math.isnan(pep_mean)):
+        delta_r = pos_mean - pep_mean
+        # 种子间 SD 用逐窗口差值算（更稳健）
+        deltas = [
+            float(r.get("pos_frac_read_moore", "NaN")) - float(r.get("pep_frac_read_moore", "NaN"))
+            for r in rows
+            if r.get("pos_frac_read_moore", "NaN") not in ("", "NaN")
+            and r.get("pep_frac_read_moore", "NaN") not in ("", "NaN")
+        ]
+        delta_stdev = st.stdev(deltas) if len(deltas) > 1 else 0.0
+        pooled["delta_R"] = {"mean": delta_r, "median": delta_r, "stdev": delta_stdev, "n": len(deltas)}
+    else:
+        pooled["delta_R"] = {"mean": float("nan"), "median": float("nan"), "stdev": 0.0, "n": 0}
 
     return {"file": fp, "n_windows": len(rows), "pooled": pooled}
 
@@ -87,17 +100,39 @@ def load_all_seeds(data_dir: str) -> Dict[int, Dict]:
 # 判据检查
 # ============================================================================================
 def judge_single_metric(value: float, metric_name: str) -> Tuple[Optional[str], str]:
-    """单指标判 H1/H2/不定。返回 (判定, 说明)。"""
+    """单指标判 H1/H2/不定。返回 (判定, 说明)。NaN ⇒ 判不定（fail-loud，不 crash）。"""
+    if math.isnan(value):
+        return None, f"NaN ⇒ 不定（数据缺失）"
+
     th = THRESHOLDS.get(metric_name)
     if not th:
         return None, f"未知指标: {metric_name}"
 
-    if value >= th["H1"]:
-        return "H1", f"{value:.3f} ≥ {th['H1']} ⇒ H1"
-    elif value <= th["H2"]:
-        return "H2", f"{value:.3f} ≤ {th['H2']} ⇒ H2"
+    # 🔴 delta_R 方向反转：≤H1 ⇒ H1（低差 = 擦除影响小 = H1）；≥H2 ⇒ H2
+    if metric_name == "delta_R":
+        if value <= th["H1"]:
+            return "H1", f"{value:.3f} ≤ {th['H1']} ⇒ H1"
+        elif value >= th["H2"]:
+            return "H2", f"{value:.3f} ≥ {th['H2']} ⇒ H2"
+        else:
+            return None, f"{value:.3f} 在 ({th['H1']}, {th['H2']}) ⇒ 不定"
     else:
-        return None, f"{value:.3f} 在 ({th['H2']}, {th['H1']}) ⇒ 不定"
+        # pep_frac_read_moore: ≥H1 ⇒ H1；≤H2 ⇒ H2
+        # pep_d_med: ≤H1 ⇒ H1；≥H2 ⇒ H2
+        if metric_name == "pep_d_med":
+            if value <= th["H1"]:
+                return "H1", f"{value:.3f} ≤ {th['H1']} ⇒ H1"
+            elif value >= th["H2"]:
+                return "H2", f"{value:.3f} ≥ {th['H2']} ⇒ H2"
+            else:
+                return None, f"{value:.3f} 在 ({th['H1']}, {th['H2']}) ⇒ 不定"
+        else:  # pep_frac_read_moore
+            if value >= th["H1"]:
+                return "H1", f"{value:.3f} ≥ {th['H1']} ⇒ H1"
+            elif value <= th["H2"]:
+                return "H2", f"{value:.3f} ≤ {th['H2']} ⇒ H2"
+            else:
+                return None, f"{value:.3f} 在 ({th['H2']}, {th['H1']}) ⇒ 不定"
 
 
 def check_consensus(judgments: List[Optional[str]]) -> Tuple[bool, str]:
@@ -159,12 +194,18 @@ def judge_tier1(seeds: Dict[int, Dict]) -> Dict:
                 "explanation": explanation,
             }
 
-        # 单 seed 综合判（三指标多数决）
-        verdicts = [seed_judgment["metrics"][m]["verdict"] for m in ["pep_frac_read_moore", "pep_d_med", "delta_R"]]
-        from collections import Counter
-        cnt = Counter(verdicts)
-        seed_verdict = cnt.most_common(1)[0][0] if cnt else None
+        # 🔴 单 seed 综合判（T1 §3.1/3.2：P1/P2 同向才可判；异向 ⇒ 判别不出）
+        # P1 = pep_frac_read_moore 方向；P2 = delta_R 方向（pep_d_med 为辅助）
+        pep_v = seed_judgment["metrics"]["pep_frac_read_moore"]["verdict"]
+        dr_v = seed_judgment["metrics"]["delta_R"]["verdict"]
+        if pep_v is not None and dr_v is not None and pep_v == dr_v:
+            seed_verdict = pep_v  # P1/P2 同向
+        elif pep_v is None and dr_v is None:
+            seed_verdict = None  # 两者都不定
+        else:
+            seed_verdict = None  # 异向 ⇒ 判别不出
         seed_judgment["seed_verdict"] = seed_verdict
+        seed_judgment["p1_p2_agree"] = (pep_v == dr_v) if (pep_v and dr_v) else False
 
         result["seeds"][seed] = seed_judgment
 
@@ -194,15 +235,14 @@ def judge_tier1(seeds: Dict[int, Dict]) -> Dict:
         cnt = Counter(seed_verdicts)
         final_verdict = cnt.most_common(1)[0][0]
 
-        # 判 H2 需 SNR ≥2
+        # 🔴 判 H2 需 SNR ≥2（T1 §3.3-3：SNR = (0.862 − pep池化) / 种子间SD）
         if final_verdict == "H2":
-            # SNR = |ΔR_pool| / stdev(ΔR)
-            delta_r_pool = pool_stats["delta_R"]["pool_mean"]
-            delta_r_sd = pool_stats["delta_R"]["pool_stdev"]
-            snr = compute_snr(delta_r_pool, delta_r_sd)
+            pep_pool = pool_stats["pep_frac_read_moore"]["pool_mean"]
+            pep_sd = pool_stats["pep_frac_read_moore"]["pool_stdev"]
+            snr = compute_snr(0.862 - pep_pool, pep_sd)
             if snr < THRESHOLDS["h2_snr_min"]:
                 result["final_verdict"] = "不定（H2 但 SNR < 2）"
-                result["notes"].append(f"⚠️ SNR = {snr:.2f} < {THRESHOLDS['h2_snr_min']}（R7.5）")
+                result["notes"].append(f"⚠️ SNR = ({0.862} − {pep_pool:.3f}) / {pep_sd:.3f} = {snr:.2f} < {THRESHOLDS['h2_snr_min']}（T1 §3.3-3）")
             else:
                 result["final_verdict"] = f"H2（SNR = {snr:.2f} ≥ {THRESHOLDS['h2_snr_min']}）"
         else:
@@ -317,9 +357,10 @@ def main():
 
     if args.out:
         Path(args.out).write_text(md, encoding="utf-8")
-        print(f"✅ 判读稿已写入: {args.out}")
+        sys.stdout.buffer.write(f"OK 判读稿已写入: {args.out}\n".encode("utf-8"))
     else:
-        print(md)
+        sys.stdout.buffer.write(md.encode("utf-8"))
+        sys.stdout.buffer.write(b"\n")
 
     return 0
 
