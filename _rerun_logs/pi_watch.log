@@ -74,3 +74,12 @@ git pull: Already up to date
 [2026-10-04 15:1x PI·fish(1) 值班R383] pull=ff-ok | 误早合N2(5850c4a 违R382代码审前置)⇒revert 463b04a 已推 | WORKTREE-SIGN 复跑125绿验收通过待合(主树脏=砚E-052/卡行+板桥GBK dupes,已催提交) | 催办:镜N2-CODEREVIEW(running)/砚提交脏区+更正时序/板桥新会话158e577c(GBK确认+BOARD-ARCHIVE执行,板346KB超线) | 云机无在跑批 | N3三案仍候fish(R380已呈,不重复催) | 起跑链:镜审→PI cherry-pick 262096d→砚E行补注→密度批跑
 [2026-10-04 15:1x R383收口] WORKTREE-SIGN 已合 ca77d68(主树125绿复跑)+卡verified c47cbbb已推 | 砚E-052更正e362491到位、DENSITY-RUN claimed待镜 | 镜N2-CODEREVIEW running进行中(过则PI cherry-pick 262096d回main解起跑门①) | 板桥新会话执行BOARD-ARCHIVE(板346KB) | ⚠️留证:da52f3b作者位=板桥但内容为砚回帖，疑跨线署名错位，待板桥WORKTREE-SIGN机制上线后自查回帖 | 密度批门②fish已点头(R382)，唯余门①+镜审
 [2026-10-04 15:3x PI·fish(1) 值班R383] pull=ff-ok(已最新) | N2-CODEREVIEW pending->done(bff08b2板帖+卡行)：镜结论fbaf57e🟢+PI独立worktree@262096d靶向37绿(density19+erasure6含两态逐字节等价+distance12)+cherry-pick预检零冲突面(463b04a后main未触碰) | 硬前置唯余轻舟ack——已限期催办(23:00前回帖，逾期按卡片死锁报fish) | 署名错位同型第二起留证:916da8c内容[PI]作者=板桥(WORKTREE-SIGN注入前旧会话)，本次板帖env注入自证PI署名OK | 云机load0健康无在跑批 | 不催:板桥FILE-REORG(密度批后低优)/N3三案候fish(R380已呈) | 各会话stopped但无卡挂起(镜卡已闭环) | 链:ack->PI cherry-pick->砚E-052起跑(R372包络内免请示)
+[2026-10-04 16:20 PI值班巡检 R383] 起点=ddc616d（砚 D-DENSITY-SMOKE 缺陷报告）
+- PI 独立复核缺陷成立：erasure_probe:458 守卫 !=_S2 and not smoke；build_cmd(68-85) 确不传 --smoke
+- 裁定=澜舟出补丁走正常链（R382），板帖+任务卡 cc8f6a9（并行会话 624bd8a=R385 fish 直令已收录，口径一致）
+- 派单：澜舟 fffee243 running（dispatch rev2 两次：派单+催办领参考补丁）；砚 f01893da / 镜 5e665a01 running 已通知
+- 砚进展：复现门 D0 1700×207 通过（05bc59d 追报）；参考补丁 task/D-DENSITY-SMOKE@3fa90c1（署名=砚，规范：不合 main、归澜舟自取）
+- PI 复审取证（独立 worktree 实跑）：test_p1c_density_sweep 20 passed；+erasure_probe 回归 26 passed（不采信转述✅）
+- 云机：load 0.00/内存 available 1571M/磁盘 18%，健康空闲
+- 未完链：澜舟领补丁上板→镜代码审→PI 复审→cherry-pick 合 main→板帖示砚→DENSITY-RUN 起跑（12 run，R385 全本机）
+- 无升级 fish 事项（载体级缺陷在正常链内闭合；未触 3轮/5轮上限）
