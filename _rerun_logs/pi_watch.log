@@ -1,0 +1,30 @@
+
+== 巡检 13:10 (PI·fish(1) 值班) ==
+HEAD: b88d30a (T7-MERGE + N3 评估稿)
+云机: ALLDONE (207 RC=1 dm-guard, 208-210 RC=0)
+会话: 全员 stopped（镜/澜舟/砚/板桥 均 >30min）
+验收:
+  T7-MERGE → verified（零新增红，对拍 _rerun_logs/t7_merge/ 通过）
+  T7-MAIN-MERGE → verified（同批完成）
+  N3 评估稿 → 已交付，待镜 N4 审
+裁定:
+  板桥 SIZE_WARN_KB=300 → 250（Option A：保留预警缓冲，ERR=300 不动）
+待跟进:
+  T1JUDGE-FIX: 澜舟会话 stopped 无提交，需催办
+  N4-DUAL-REVIEW: 镜 N1 审完成，N3 审待启动（会话 stopped）
+  R366-PROP: 待 fish 路线级裁定（不升级）
+  BOARD-ARCHIVE: 板桥新卡，待启动
+  密度批起跑: 前置条件检查——N1 预注册 verified ✓ / 镜 N4 审 N1 完成 ✓ / 待 N3 审后统一评估
+
+=== R376 值班巡检 2026-10-04 13:30 ===
+HEAD: 6fb90b7 (R375 验卡轮)
+git pull: Already up to date
+云机 SSH: 微信扫码拦截，无法读取 status.txt
+四会话均 stopped 30+ min ⇒ 催办已发：
+  砚(200ec927): P0 同机冒烟门未 claim，催 claim+起跑
+  澜舟(fffee243): N2-DENSITY-CARRIER claimed 无提交，催进度
+  板桥(33ff6205): WORKTREE-SIGN pending 无进度，催 claim
+  镜(5e665a01): N4 verified，建议启动密度批独立复算准备
+讨论板 318KB > 300KB 阈值，BOARD-ARCHIVE v1 口径已出（6ecedb1）
+待 fish 事项：R366-PROP 路线级裁定（不升级）、N3 三案择一（等镜审后）
+无升级项，下次巡检继续跟踪

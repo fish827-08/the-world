@@ -1,0 +1,61 @@
+// the-world 每 tick 执行管线（system-modeler / flow 视图，2026-10-03）
+// 证据：simulation/sphere_engine.py（行号见各节点）
+// 图例：绿色=Python 专属；橙红=有 Rust 下沉路径（use_sim_core=True 时）；
+//       黄色=双路径条件分流；虚线=机制开启时被 H3 拦截或强制 Python。
+digraph tick_pipeline {
+  rankdir=TB;
+  nodesep=0.18; ranksep=0.35;
+  fontname="Microsoft YaHei"; labelloc=t;
+  label="the-world 单 tick 管线：外层 _advance_one_tick(:2759) → 内层 _step_population(:3204)\n绿=Python专属  橙=可下沉Rust  虚线=H3互斥/强制Python";
+
+  subgraph cluster_outer {
+    label="外层：环境推进"; style=rounded; color="#888888"; fontsize=13;
+
+    o1 [label="① 资源再生 (:2763)\nrd开→Python子集 | 否则 Rust regrow(:2809)/regrow_patchy(:2823)\n| 否则 ResourceField.regrow", shape=box, style=filled, fillcolor="#f2c9a0"];
+    o2 [label="② 尸体腐烂 (:2841)\n_step_corpse_decay — S2 机制，Python 专属", shape=box, style=filled, fillcolor="#a8d5a2"];
+    o3 [label="③ 信号场时间推进 (:2843)\nsignals.tick() 剩余寿命-1（稀疏：只推 age>0 格）", shape=box, style=filled, fillcolor="#a8d5a2"];
+    o4 [label="④ 气味场 (:2848)\n每 update_every tick：SmellField.update(源)\n_smell_gen++ 失效消费端缓存", shape=box, style=filled, fillcolor="#a8d5a2"];
+    o5 [label="⑤ 种群行动 (:2852) → 进入内层", shape=box, style=filled, fillcolor="#7fb3d5"];
+    o6 [label="⑥ 资源轮作收尾 (:2857)\n_rd.rotate→capacity_from_base→validate_writeback\n斑块质心增量重算；极区触及→回退全量(:2889)", shape=box, style=filled, fillcolor="#a8d5a2"];
+    o7 [label="⑦ 能量封顶 (:2909) + 越限探针", shape=box, style=filled, fillcolor="#a8d5a2"];
+    o8 [label="⑧ D-17 观测队列 (:2921)\n_observe_selection_cohort(:5183)", shape=box, style=filled, fillcolor="#a8d5a2"];
+    o9 [label="⑨ 组装 TickStats (:2923)\n_ec_flush 逐tick分通道能量记账", shape=box, style=filled, fillcolor="#d9d2e9"];
+
+    o1 -> o2 -> o3 -> o4 -> o5 -> o6 -> o7 -> o8 -> o9;
+  }
+
+  subgraph cluster_inner {
+    label="内层：_step_population 种群阶段（编号即代码序）"; style=rounded; color="#888888"; fontsize=13;
+
+    i0 [label="0) 个体化温度响应 (:3246)\ng9恒温/g11温度偏好→eff_activity", shape=box, style=filled, fillcolor="#a8d5a2"];
+    i1 [label="1~3) 光合/代谢/维持扣费 (:3264)\nRust: step_vectors_stage1(:3270)", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i2 [label="2.5) S2 愈合 (:3377)\n伤口机制强制 Python", shape=box, style=filled, fillcolor="#a8d5a2", fontcolor="#555555"];
+    i3 [label="3.5) g19植物化光合补算 + L10a 蓄力结果 (:3402)\nfruit_charge 有 Rust 路径(:5948)", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i4 [label="4) 进食 格→胃 (:3406)\nRust: consume_many(:3464/:3504)", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i5 [label="4.3)  contest 争夺(:3520)/食腐(:3548) + _rd.note_tick 休耕判死(:3550)\nPython 专属", shape=box, style=filled, fillcolor="#a8d5a2"];
+    i6 [label="4.4) 工作记忆写入 L5 四槽 round-robin (:3572)\nmemory_v2 强制 Python（H3拦:1102）", shape=box, style=filled, fillcolor="#a8d5a2", fontcolor="#555555"];
+    i7 [label="4.5) 信号发射 g15 田字格pattern (:3596)\nRust: signal_emit(:3621)；扣费在编码之前", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i8 [label="4.5b) L10a 动物吃果实 (:3671)\neat_fruit Rust 路径(:5994)", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i9 [label="5) 移动（唯一胖段 :3675-4518）\n停留率/饥饿调制/ASM/D2感知/记忆v2/oracle后检\nRust: step_vectors_stage2(:3769)+step_movement(:3795)\nD2启用⇒整段强制 Python", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i10 [label="5.5+6.5) 捕食 g16 + 文化学习 (:4519)\nRust: predation_and_culture(:4583) 合并单次CSR(l4_l5.rs)", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i11 [label="7) 死亡判定 (:4748) 饿死→老死→被捕食\n7.5) 死亡投放尸体 (:4794)", shape=box, style=filled, fillcolor="#a8d5a2"];
+    i12 [label="8) 繁殖 g12冷却/阈值0.25+g2x0.65 (:4803)\nRust: reproduce_batch(:4870) 只吃预生成RNG\nID分配/concatenate 留 Python", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i13 [label="8.5) 愉悦度更新 (:5057)\nRust: pleasure_update(:6045) Rayon并行逐位一致", shape=box, style=filled, fillcolor="#f2c9a0"];
+    i14 [label="9) 清理尸体/压缩槽位 → 返回 TickStats", shape=box, style=filled, fillcolor="#a8d5a2"];
+
+    i0 -> i1 -> i2 -> i3 -> i4 -> i5 -> i6 -> i7 -> i8 -> i9 -> i10 -> i11 -> i12 -> i13 -> i14;
+  }
+
+  o5 -> i0 [label="调用", style=bold];
+  i14 -> o6 [label="回到外层", style=bold];
+
+  // 旁路：数据产出与 Rust 边界
+  o9 -> sink [label="历史/采样", style=dashed];
+  sink [label="TickStats → EvolutionObserver(世代双触发)\n→ statistics → generations.csv / manifest / broker直播", shape=note, style=filled, fillcolor="#fff2cc"];
+
+  h3 [label="H3 fail-loud 拦截清单（构造期抛错）：\nL1/L2(:941) subpos(:956) rd(:975) g23迁徙(:996) 季节(:1011)\n光驱动再生(:1023) span2(:1036) 尸创(:1049) memv2(:1102)\nARS(:1269) oracle(:1553)", shape=note, style="filled,dashed", fillcolor="#fce4ec", fontcolor="#b71c1c"];
+  rng [label="逐位等价根基：每 tick rng 抽取次数与形状恒定\nstep_vectors 两段式 = 把 RNG 缺口留在 Python 侧", shape=note, style=filled, fillcolor="#e3f2fd"];
+
+  o5 -> rng [style=dotted, constraint=false];
+  i9 -> h3 [style=dotted, constraint=false];
+}

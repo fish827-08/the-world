@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<title>the-world 架构浏览器</title>
+<style>
+:root{
+  --bg:#16181d; --panel:#1f232b; --panel2:#262b35; --line:#3a4150;
+  --text:#e6e9ef; --sub:#9aa3b2; --mono:#c8d3e6;
+  --green:#3fa66b; --orange:#e08a3c; --violet:#9a6fd6; --blue:#4c8dd6;
+  --warn-bg:#2b2417; --danger-bg:#2b1a1c; --info-bg:#182430;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:"Segoe UI","Microsoft YaHei",sans-serif;font-size:14px}
+.wrap{max-width:1280px;margin:0 auto;padding:20px}
+h1{font-size:20px;margin:0}
+.meta{color:var(--sub);font-size:12px;margin-top:4px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:16px 0}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.stat b{font-size:18px;display:block}
+.stat span{color:var(--sub);font-size:12px}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.tab{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+  padding:5px 14px;cursor:pointer;color:var(--text);font-size:13px}
+.tab.on{background:var(--blue);border-color:var(--blue);color:#fff}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+@media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
+.card h3{margin:0 0 8px;font-size:14px}
+.stage{border-left:4px solid var(--green);background:var(--panel2);
+  border-radius:6px;padding:6px 10px;margin:5px 0;cursor:pointer;font-size:13px}
+.stage.rust{border-color:var(--orange)} .stage.gate{border-color:var(--violet)}
+.stage.flow{border-color:var(--blue)} .stage.sel{outline:1px solid var(--blue);background:#2a3446}
+.stage .ln{font-family:Consolas,monospace;color:var(--mono);font-size:12px;margin-right:6px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:6px 0 12px;font-size:12px;color:var(--sub)}
+.dot{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--sub);font-weight:600}
+code{font-family:Consolas,monospace;color:var(--mono);font-size:12px;background:var(--panel2);padding:1px 5px;border-radius:4px}
+.note{border-radius:8px;padding:10px 12px;font-size:13px;margin-top:10px;border:1px solid var(--line)}
+.note.info{background:var(--info-bg)} .note.warn{background:var(--warn-bg)} .note.danger{background:var(--danger-bg)}
+.note b{display:block;margin-bottom:4px}
+.clist{display:flex;flex-direction:column;gap:6px}
+.citem{background:var(--panel2);border-radius:6px;padding:8px 10px;cursor:pointer;border-left:4px solid var(--blue)}
+.citem.sel{outline:1px solid var(--blue)}
+.citem small{display:block;color:var(--sub)}
+#detail{min-height:120px}
+.kv b{display:inline}
+.foot{color:var(--sub);font-size:12px;margin-top:18px;border-top:1px solid var(--line);padding-top:10px}
+[hidden]{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>the-world 架构浏览器<span style="color:var(--sub);font-weight:400"> · 当前态建模 2026-10-03</span></h1>
+  <div class="meta">全部节点带代码行号证据（sphere_engine.py 等）· 点击阶段/容器可交互 · 派生自 docs/架构可视化-20261003/ 的 DSL/DOT 源工件</div>
+
+  <div class="stats">
+    <div class="stat"><b>60×120</b><span>球面网格 · 极点坍缩</span></div>
+    <div class="stat"><b>24</b><span>基因位 g0–g23 · 预留位已全接管</span></div>
+    <div class="stat"><b>12+1</b><span>Rust 下沉调用点 · 另 LightTempRust 直连</span></div>
+    <div class="stat"><b>v3 · ~100键</b><span>快照含 RNG 状态</span></div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+
+  <!-- ============ L1 上下文 ============ -->
+  <section data-view="ctx">
+    <div class="grid2">
+      <div class="card">
+        <h3>边界内：数字生命模拟系统（7 容器）</h3>
+        <div class="grid2" id="ctxbox"></div>
+        <div class="note info"><b>与典型 Web 架构的最大区别</b>
+        系统边界内没有网络服务 / 数据库 / 消息队列——除 broker 直播外全部是本地进程内计算。科学模拟把可复现性置于可扩展性之上。</div>
+      </div>
+      <div class="card">
+        <h3>关键关系（谁和它打交道）</h3>
+        <table><tr><th>关系</th><th>内容</th></tr>
+        <tr><td><code>所有者 fish → 编排层</code></td><td>py -m observatory / run_batch.py / run_d2_experiment.py 发起实验；按 CSV/summary 裁定</td></tr>
+        <tr><td><code>观看者 → 观察台</code></td><td>浏览器订阅 broker WebSocket 快照流（纯只读）</td></tr>
+        <tr><td><code>系统 → Gitee/GitHub</code></td><td>代码远端（双仓镜像）；零号规则=发言前 pull 发言后 push</td></tr>
+        <tr><td><code>持久化 → the-world-data</code></td><td>实验产物唯一正式落点；「不入仓=未交付」</td></tr>
+        <tr><td><code>编排层 ⇢ 引擎</code></td><td><b>subprocess 进程边界</b>（非函数调用）；数据契约=CSV/summary/snapshot</td></tr>
+        <tr><td><code>引擎 → sim_core</code></td><td>use_sim_core=True 时 12 处<b>同进程 FFI</b>；Rust 只算数值不做决策</td></tr>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 容器/组件 ============ -->
+  <section data-view="cont" hidden>
+    <div class="grid2" style="grid-template-columns:230px 1fr">
+      <div class="card"><h3>容器（点击切换）</h3><div class="clist" id="clist"></div></div>
+      <div class="card" id="detail"></div>
+    </div>
+  </section>
+
+  <!-- ============ tick 管线 ============ -->
+  <section data-view="tick" hidden>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--green)"></i>Python 专属</span>
+      <span><i class="dot" style="background:var(--orange)"></i>有 Rust 下沉</span>
+      <span><i class="dot" style="background:var(--violet)"></i>H3 拦截 / 强制 Python</span>
+      <span><i class="dot" style="background:var(--blue)"></i>进入内层</span>
+      <span>行号 = sphere_engine.py · 点击阶段看详情</span>
+    </div>
+    <div class="grid3">
+      <div class="card"><h3>外层 _advance_one_tick <code>:2759</code></h3><div id="outer"></div></div>
+      <div class="card"><h3>内层 _step_population <code>:3204</code></h3><div id="inner" style="max-height:520px;overflow-y:auto"></div></div>
+      <div class="card"><h3>阶段详情</h3><div id="stagedetail"></div>
+        <div class="note info"><b>移动段（:3675–4518）内部要点</b>
+        _asm_update_modes(:3760) · step_vectors_stage2(:3769) · _move_decide_batch(:4027)/_v2(:4055) ·
+        _mem_v2_step(:5436/:5475) · _oracle_after_move(:4489) · D2 启用 ⇒ 整段走 Python（Rust 未实现码本/瓶颈/softmax）</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 纪律 ============ -->
+  <section data-view="disc" hidden>
+    <div class="grid3">
+      <div class="note info"><b>① 双路径逐位对拍（C7）</b>
+        Rust 只吃预生成 RNG、不做 ID 分配/死亡压缩；step_vectors 两段式专为把 RNG 缺口留在 Python。
+        验收 = 同种子两引擎逐 tick TickStats 位级比较（tests/test_sim_core_engine.py）；
+        CountingRNG（provenance.py:35）使随机流消费可机械校验。</div>
+      <div class="note danger"><b>② H3 fail-loud</b>
+        机制未下沉而 use_sim_core=True ⇒ 引擎构造期直接抛错（13 处，见下表）。
+        原则：「开关开了行为却不变」= 静默 no-op，宁炸不静默。</div>
+      <div class="note warn"><b>③ 基因双写校验</b>
+        24 位索引单一事实源在 simulation/genes.py；genes.rs 只是镜像。
+        引擎初始化查 3 项（SOCIABILITY/PERCEPTION/AGGRESSION），测试查全量 24 项；
+        区分「名字漂移⇒重建 .so」与「值漂移」（2026-09-26 陈旧 .so 事故立法）。</div>
+    </div>
+    <div class="grid2" style="margin-top:14px">
+      <div class="card"><h3>H3 拦截清单（sphere_engine.py 构造期守卫）</h3>
+        <table id="h3t"><tr><th>机制</th><th>行号</th></tr></table></div>
+      <div class="card"><h3>已知地雷与硬约束</h3>
+        <div class="note danger"><b>极区邻接有向非对称</b>
+          neighbors() 在极区四行有向 ⇒ 任何局部/增量算法触及极行必须回退全量
+          （如斑块质心增量重算 :2889）。</div>
+        <div class="note warn"><b>perception_radius 只许 4 / 8</b>
+          config.py:316 硬断言（传 6 会 F1 硬失败）；语义是邻居<b>个数</b>不是距离——
+          4=Von Neumann、8=Moore，两者感知范围都是 1 格。球面下「方形窗口」不良定义。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 数据流 ============ -->
+  <section data-view="data" hidden>
+    <div class="grid2">
+      <div class="card"><h3>三条产出流（互不污染）</h3>
+        <table><tr><th>流</th><th>路径</th><th>落点</th></tr>
+        <tr><td>离线交付</td><td>step → TickStats → observer → statistics</td>
+            <td>generations.csv + manifest（config 指纹 + git_commit + 逐子树 SHA256）→ the-world-data/</td></tr>
+        <tr><td>断点续跑</td><td>save_snapshot(v3) → npz（~100 键含 RNG）</td>
+            <td>加载三连校验：版本 / 指纹 / gene_count</td></tr>
+        <tr><td>实时直播</td><td>broker 泵 → 环形缓冲 + asyncio → WebSocket</td>
+            <td>引擎对象不跨线程共享，只传序列化 dict</td></tr></table>
+        <div class="note info"><b>快照三条铁律（事故教训写进注释）</b>
+          派生量不进档；跨 tick 状态必须进档（R215-b：ARS 漏登⇒续跑 IndexError）；
+          探针/归因标记必须进档（F-R7）。</div>
+      </div>
+      <div class="card"><h3>git 边界与编排纪律</h3>
+        <table><tr><th>位置</th><th>性质</th></tr>
+        <tr><td><code>主仓 the-world/</code></td><td>代码 + docs + _share；results/ 被 .gitignore 排除</td></tr>
+        <tr><td><code>the-world-data/</code></td><td>独立数据仓（Gitee 1024MB 配额拆分）；产物唯一落点</td></tr>
+        <tr><td><code>_rerun_logs/</code></td><td>定点放开（每 run 固定名 npz ≈4–6MB；禁 *.npz 通配）</td></tr>
+        <tr><td><code>evidence/</code></td><td>判读脚本 + 判决 JSON + 编排 shell 必须入库 ⇒ 云机可复现</td></tr></table>
+        <div class="note warn"><b>编排层 = 进程边界</b>
+          batch_runner(:1354) 不 import 引擎，只 subprocess 拉起脚本；
+          run 间以文件对账；汇总禁止合并均值（R38③：pred_frac 分层）。</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="foot">源工件：docs/架构可视化-20261003/{the-world.structurizr.dsl · tick-pipeline.dot · 架构讲解.md} —— DSL/DOT 为架构源，本页与 Canvas 预览均为派生视图。本页零外部依赖（无 CDN/网络请求），可离线双击打开。</div>
+</div>
+
+<script>
+const CONT=[
+ {id:"engine",name:"Python 仿真引擎",dir:"simulation/",tech:"Python 3.12 + NumPy",role:"唯一状态持有者；SoA 数组化整群推进（6670 行）",comps:[
+  ["SphereEngine tick 循环","sphere_engine.py :2759 / :3204","外层9段+内层约17阶段"],
+  ["SimConfig 配置总集","config.py :1418","29个dataclass；__post_init__硬断言；fingerprint()拦跨档续跑"],
+  ["基因注册表","genes.py :30 / :216","Gene(IntEnum)24位 + validate_gene_wiring()"],
+  ["oracle 正向对照","oracle.py :61","R→S能量回馈；守恒且保本（return_ratio≤1由构造保证）"],
+  ["provenance","provenance.py :35 / :142","CountingRNG + git_commit + 逐子树SHA256"]]},
+ {id:"simcore",name:"sim_core Rust 加速核",dir:"sim_core/src/",tech:"Rust + PyO3 + Rayon（同进程FFI）",role:"只算数值、不做决策；17 pyfunction + 1 pyclass",comps:[
+  ["pyo3 边界层","lib.rs（1086行）","require_len校验；native_gene_indicators；validate_gene_wiring"],
+  ["step_vectors","step_vectors.rs","stage1光合/代谢 + stage2移动扣费/死亡；两段式留RNG缺口"],
+  ["movement/predation/culture/l4_l5","movement.rs 等","8邻格决策；捕食+文化合并单次CSR"],
+  ["reproduction/signal/consume/regrow","reproduction.rs 等","繁殖只吃预生成RNG；发射扣费在编码前；bincount竞争进食"],
+  ["pleasure/dispersal/light_temp/neighbors/genes","pleasure.rs 等","Rayon愉悦度逐位一致；基因常量镜像"]]},
+ {id:"world",name:"环境场层",dir:"world/",tech:"Python + NumPy",role:"球面拓扑 + 五个场 + 亚格坐标",comps:[
+  ["SphereWorld 球面拓扑","sphere_world.py","60×120等距圆柱投影；极点坍缩；面积权重∝cos(lat)；⚠极区有向"],
+  ["LightTemp","light_and_temperature.py :179","唯一world直连Rust；季节开启时强制回Python"],
+  ["ResourceField","resource_field.py :419/:446","容量=面积×倍率（极地养不活）；R217惰性结算只算脏格"],
+  ["ResourceDynamics","resource_dynamics.py :303/:453","资源-消费者负反馈；强制Python（H3拦:975）"],
+  ["SignalField","signal_field.py :104/:126","uint8低4位=16 pattern；_age=剩余寿命；稀疏tick"],
+  ["SmellField","smell_field.py :177/:234","近场全分辨率+远场粗网格两级；插值在读路径"],
+  ["subpos","subpos.py","亚格连续坐标；flat派生自整数格⇒零格数组开销；仅Python路径"]]},
+ {id:"obs",name:"观察台",dir:"observatory/",tech:"Python",role:"指标单一口径产出 + 采样 + 直播 + 最小推断",comps:[
+  ["statistics","statistics.py","generation_statistics/d2_metrics/predation_fraction(D-16唯一口径)"],
+  ["EvolutionObserver","observer.py :95","世代前进+tick_interval双触发采样"],
+  ["SnapshotBroker","broker.py :104/:225","pump+环形缓冲+asyncio→WebSocket"],
+  ["inference","inference.py","permutation/bootstrap/compare_groups（仅numpy）"],
+  ["ExperimentRunner","experiment.py :86/:236","derive_seed确定性+5组矩阵+三重停止"],
+  ["world_capacity","world_capacity.py :43","C8对账：纬度对容量R²=1⇒信息价值为0"]]},
+ {id:"orch",name:"实验编排层",dir:"experiments/ + tools/",tech:"Python（subprocess）",role:"进程边界；数据契约=文件",comps:[
+  ["batch_runner","batch_runner.py :1354","不import引擎；PRESETS展开；汇总summary"],
+  ["run_d2_experiment","run_d2_experiment.py :199","D2四机制独立开关+manifest+CSV"],
+  ["run_batch","tools/run_batch.py :53","再包一层子进程+原地进度条"]]},
+ {id:"persist",name:"持久化",dir:"persistence/ + 引擎内",tech:"npz / CSV / JSON",role:"快照续跑线 + 结果交付线",comps:[
+  ["引擎级快照","sphere_engine.py :6120/:6122","SNAPSHOT_VERSION=3；~100键含RNG状态；加载三连校验"],
+  ["实验结果落盘","persistence/io.py :23/:80","manifest.json + generations.csv + survey"]]},
+ {id:"collab",name:"协作与文档面",dir:"_share/ + docs/",tech:"Markdown + git",role:"交流共识层，不承载引擎代码",comps:[
+  ["讨论板/路线图","_share/","仅追加；share_lock.py 硬互斥（TTL 900s）"],
+  ["台账/设计/预注册","docs/","跑前锁定，禁事后改"]]},
+];
+
+const OUTER=[
+ ["o1","① 资源再生",":2763","rust","rd开→Python子集再生；否则Rust regrow(:2809)/regrow_patchy(:2823,斑块倍率守恒)；旧.so缺regrow_patchy特性检测回退Python。","regrow / regrow_patchy"],
+ ["o2","② 尸体腐烂",":2841","gate","_step_corpse_decay——S2机制；开启时H3拦use_sim_core(:1049)，Python专属。",""],
+ ["o3","③ 信号场衰老",":2843","py","signals.tick()：剩余寿命−1；R217稀疏——只推进age>0格。",""],
+ ["o4","④ 气味场扩散",":2848","py","每update_every一次：SmellField.update(源)；_smell_gen++失效消费端缓存。",""],
+ ["o5","⑤ 种群行动",":2852","flow","_step_population()——进入内层17阶段（中列）。",""],
+ ["o6","⑥ 资源轮作收尾",":2857","gate","rotate→capacity_from_base→validate_writeback回写_capacity/_patch_mask；质心增量重算触及极行回退全量(:2889)；资源动态强制Python(:975)。",""],
+ ["o7","⑦ 能量封顶",":2909","py","能量上限+越限探针。",""],
+ ["o8","⑧ D-17观测队列",":2921","py","_observe_selection_cohort(:5183)——选择梯度观测。",""],
+ ["o9","⑨ 组装TickStats",":2923","py","_populate_history(:2941)内_ec_flush()逐tick分通道能量记账。",""]];
+
+const INNER=[
+ ["i0","0) 个体化温度响应",":3246","py","g9恒温/g11温度偏好→eff_activity。",""],
+ ["i1","1~3) 光合/代谢/维持",":3264","rust","胃→能量、基础扣费。","step_vectors_stage1 (:3270)"],
+ ["i2","2.5) S2 愈合",":3377","gate","wound_enabled；与corpse/contest同被H3拦(:1049)。",""],
+ ["i3","3.5) g19光合补算 + L10a蓄力结果",":3391","rust","stage1之后补算，保双路径一致。","fruit_charge (:5948)"],
+ ["i4","4) 进食（格→胃）",":3406","rust","bincount同格竞争→按序−=share。","consume_many (:3464/:3504)"],
+ ["i5","4.3) 争夺/食腐/休耕判死",":3520","py","_step_contest(:3520)、_step_scavenging(:3548)、_rd.note_tick(:3550)。",""],
+ ["i6","4.4) 工作记忆写入",":3572","gate","L5四槽round-robin；memory_v2(:5402)强制Python（H3 :1102）。",""],
+ ["i7","4.5) 信号发射 g15",":3596","rust","写田字格pattern；扣SIGNAL_COST=0.1，扣费在编码之前。","signal_emit (:3621)"],
+ ["i8","4.5b) L10a 动物吃果实",":3671","rust","果实传播机制。","eat_fruit (:5994)"],
+ ["i9","5) 移动（唯一胖段 :3675–4518）",":3675","rust","停留率/饥饿调制/ASM/D2感知/记忆v2/oracle后检全在此段；D2启用⇒整段强制Python。","step_vectors_stage2 (:3769) + step_movement (:3795)"],
+ ["i10","5.5+6.5) 捕食g16 + 文化学习",":4519","rust","合并单次调用：每tick只构建一次cell→个体CSR（分开下沉反而更慢）。","predation_and_culture (:4583, l4_l5.rs)"],
+ ["i11","7) 死亡判定 + 7.5) 投尸",":4748","py","饿死→老死→被捕食；_deposit_corpse(:4801)。",""],
+ ["i12","8) 繁殖",":4803","rust","g12冷却倒数、阈值0.25+g2×0.65；Rust只吃预生成RNG，ID分配/concatenate留Python。","reproduce_batch (:4870)"],
+ ["i13","8.5) 愉悦度更新",":5055","rust","120情境编码→事件收益→RPE→四数组；Rayon并行与单线程逐位一致。","pleasure_update (:6045)"],
+ ["i14","9) 清理尸体/压缩槽位",":5057","py","压缩重排槽位⇒oracle归因键必须用_id而非槽位索引。",""]];
+
+const H3=[["L1 追猎/恐惧、L2 冲刺",":941"],["subpos 亚格坐标",":956"],["资源轮作 resource_dynamics",":975"],
+ ["迁徙 g23（Rust常量仅镜像不参与计算）",":996"],["季节光照 tilt/season_period",":1011"],
+ ["光驱动再生 light_sensitivity",":1023"],["perception_span=2",":1036"],
+ ["尸体/伤口/争夺（S2）",":1049"],["memory_v2",":1102"],["ARS 双模式觅食",":1269"],["oracle（C-8）",":1553"]];
+
+const TABS=[["ctx","L1 上下文"],["cont","L2/L3 容器组件"],["tick","单 tick 管线"],["disc","三大纪律"],["data","数据/产物流"]];
+const tabsEl=document.getElementById("tabs");
+TABS.forEach(([id,label])=>{const b=document.createElement("button");b.className="tab";b.textContent=label;b.onclick=()=>show(id);tabsEl.appendChild(b);b.id="tab-"+id});
+function show(id){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.id==="tab-"+id));
+  document.querySelectorAll("section[data-view]").forEach(s=>s.hidden=s.dataset.view!==id);
+}
+
+// ctx 容器盒
+const ctx=document.getElementById("ctxbox");
+CONT.forEach(c=>{const d=document.createElement("div");d.className="stage flow";d.style.cursor="default";
+ d.innerHTML="<b>"+c.name+"</b><br><code>"+c.dir+"</code>";ctx.appendChild(d)});
+
+// 容器列表
+const clist=document.getElementById("clist");let selC=null;
+function renderCont(id){
+  selC=id;const c=CONT.find(x=>x.id===id);
+  document.querySelectorAll("#clist .citem").forEach((e,i)=>e.classList.toggle("sel",CONT[i].id===id));
+  document.getElementById("detail").innerHTML="<h3>"+c.name+" <code>"+c.tech+"</code></h3><p style='color:var(--sub)'>"+c.role+"</p>"+
+    "<table><tr><th>组件</th><th>证据</th><th>职责</th></tr>"+
+    c.comps.map(x=>"<tr><td><b>"+x[0]+"</b></td><td><code>"+x[1]+"</code></td><td>"+x[2]+"</td></tr>").join("")+"</table>";
+}
+CONT.forEach(c=>{const d=document.createElement("div");d.className="citem";d.innerHTML="<b style='font-size:13px'>"+c.name+"</b><small>"+c.dir+"</small>";
+ d.onclick=()=>renderCont(c.id);clist.appendChild(d)});
+renderCont("engine");
+
+// tick 管线
+function mkStage([id,title,line,kind,detail,rust],target){
+  const d=document.createElement("div");d.className="stage "+kind;d.dataset.id=id;
+  d.innerHTML="<span class='ln'>"+line+"</span>"+title;
+  d.onclick=()=>{document.querySelectorAll(".stage[data-id]").forEach(e=>e.classList.toggle("sel",e.dataset.id===id));
+    document.getElementById("stagedetail").innerHTML=
+      "<p><span class='dot' style='background:var(--"+({py:"green",rust:"orange",gate:"violet",flow:"blue"})[kind]+")'></span><b>"+title+"</b> <code>"+line+"</code></p><p>"+detail+"</p>"+
+      (rust?"<div class='note warn'><b>Rust 下沉函数</b><code>"+rust+"</code><br><small>前提：use_sim_core=True（config.py:369，默认False）且机制不在H3清单内。</small></div>":"")+
+      (kind==="gate"?"<div class='note danger'><b>H3 fail-loud</b>该机制未下沉Rust：若同时use_sim_core=True⇒构造期直接抛错，禁止静默no-op。</div>":"");};
+  target.appendChild(d);
+}
+OUTER.forEach(s=>mkStage(s,document.getElementById("outer")));
+INNER.forEach(s=>mkStage(s,document.getElementById("inner")));
+const i9=document.querySelector(".stage[data-id='i9']");if(i9)i9.click();
+
+// H3 表
+const h3t=document.getElementById("h3t");
+H3.forEach(([m,l])=>{const r=h3t.insertRow();r.insertCell().textContent=m;
+ r.cells[1].innerHTML="<code>sphere_engine.py "+l+"</code>"});
+
+show("ctx");
+</script>
+</body>
+</html>
