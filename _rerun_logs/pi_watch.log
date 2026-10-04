@@ -71,3 +71,4 @@ git pull: Already up to date
 
 **升级项**: N3 三案择一（路线级裁定，超 PI 限界）⇒ 已上呈 fish
 **待跟进**: WORKTREE-SIGN 验收 merge / BOARD-ARCHIVE 执行 / N2 密度批起跑（R372 触发）
+[2026-10-04 15:1x PI·fish(1) 值班R383] pull=ff-ok | 误早合N2(5850c4a 违R382代码审前置)⇒revert 463b04a 已推 | WORKTREE-SIGN 复跑125绿验收通过待合(主树脏=砚E-052/卡行+板桥GBK dupes,已催提交) | 催办:镜N2-CODEREVIEW(running)/砚提交脏区+更正时序/板桥新会话158e577c(GBK确认+BOARD-ARCHIVE执行,板346KB超线) | 云机无在跑批 | N3三案仍候fish(R380已呈,不重复催) | 起跑链:镜审→PI cherry-pick 262096d→砚E行补注→密度批跑
