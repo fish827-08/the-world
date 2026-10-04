@@ -49,6 +49,8 @@ def main() -> int:
     ap.add_argument("--pin-file", required=True, help="新置顶区文本（含 PIN-BEGIN/END 注释标记）")
     ap.add_argument("--head-file", required=True, help="新板首（快照+未落定项+归档说明）")
     ap.add_argument("--min-bytes", type=int, default=200_000, help="板面低于此值拒绝归档")
+    ap.add_argument("--archist", default="[归档人未署名]",
+                    help="归档人署名（写进归档件头部；R371 不许顶名）")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -56,7 +58,10 @@ def main() -> int:
         print("❌ 找不到讨论板", file=sys.stderr)
         return 2
     raw = BOARD.read_bytes()
-    txt = raw.decode("utf-8")
+    # Windows 换行防御（R13 归档实录）：板面为 CRLF 时，读入归一为 LF、写回还原
+    # CRLF，避免 text 模式二次转换产生 \r\r\n 损坏；git 存储恒为 LF，不受影响。
+    crlf = b"\r\n" in raw
+    txt = raw.decode("utf-8").replace("\r\n", "\n")
     if len(raw) < a.min_bytes:
         print(f"❌ 守卫拒绝：板面 {len(raw):,} B < 阈值 {a.min_bytes:,} B ⇒ 未到归档线，abort",
               file=sys.stderr)
@@ -85,7 +90,7 @@ def main() -> int:
           f"新板保留 {len(after):,} 字符（{n_posts_after} 帖）")
 
     arch_header = (f"# 讨论板归档（{a.round}）—— {a.arch}\n\n"
-                   f"> 归档人：`[所有者·天平]` ｜ 触发：板面 **{len(raw)/1024:.1f} KB** > 阈值 200 KB\n"
+                   f"> 归档人：`{a.archist}` ｜ 触发：板面 **{len(raw)/1024:.1f} KB** > 阈值 200 KB\n"
                    f"> 归档范围：板首 ~ **切点 `{a.cut}` 之前**（**append-only，不删内容**）\n"
                    f"> 检索：`python collab-toolkit/tools/board_check.py find --kw \"…\" --include-archive`\n"
                    f"> 工具：`tools/archive_board.py`（幂等守卫：切点必须唯一命中 + 归档件不得已存在）\n\n"
@@ -95,9 +100,14 @@ def main() -> int:
         print(f"[dry-run] 新板 {len((pin + head + after).encode('utf-8')):,} B")
         return 0
 
-    arch_path.write_text(arch_header + before, encoding="utf-8")
-    new_board = pin + head + after
-    BOARD.write_text(new_board, encoding="utf-8")
+    crlf = b"\r\n" in raw
+    def dump(path: Path, s: str) -> None:
+        data = (s.replace("\r\n", "\n").replace("\n", "\r\n") if crlf
+                else s).encode("utf-8")
+        path.write_bytes(data)
+
+    dump(arch_path, arch_header + before)
+    dump(BOARD, pin + head + after)
 
     nb = BOARD.read_text(encoding="utf-8")
     posts = len(re.findall(r"^### \[[^\]]+\]", nb, re.M))
