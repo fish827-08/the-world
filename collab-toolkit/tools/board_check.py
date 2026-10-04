@@ -390,7 +390,8 @@ def check_remote_refs(root: str, remote: str, branch: str, net: bool) -> list:
     """
     ref = f"refs/remotes/{remote}/{branch}"
     r = subprocess.run(["git", "rev-parse", "--verify", ref],
-                       cwd=root, capture_output=True, text=True)
+                       cwd=root, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     local = r.stdout.strip() if r.returncode == 0 else None
     out = []
     if local is None:
@@ -403,10 +404,12 @@ def check_remote_refs(root: str, remote: str, branch: str, net: bool) -> list:
                     "msg": f"{ref} = {local[:8]}（存在；F-R24 下仍建议 ls-remote 复核）"})
     if net:
         r2 = subprocess.run(["git", "ls-remote", remote, f"refs/heads/{branch}"],
-                            cwd=root, capture_output=True, text=True, timeout=60)
+                            cwd=root, capture_output=True, text=True, timeout=60,
+                            encoding="utf-8", errors="replace")
         remote_sha = r2.stdout.split()[0] if r2.returncode == 0 and r2.stdout.strip() else None
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace").stdout.strip()
         if remote_sha is None:
             out.append({"level": "warn", "item": "f-r24",
                         "msg": f"ls-remote {remote} 失败（网络/凭据？）"})

@@ -131,7 +131,8 @@ def test_take_own_lock_recovers_residual(repo_pair, tmp_path):
     locks = tmp_path / "work" / "_share" / ".locks"
     r = subprocess.run([sys.executable, REAL_LOCK_TOOL, "acquire", "--slot", "collab",
                         "--task", "上次被杀残留", "--lock-dir", str(locks)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     assert r.returncode == 0
     msg = tmp_path / "post.md"
     msg.write_text("**主题**：残留锁恢复\n", encoding="utf-8")
@@ -214,7 +215,8 @@ def test_lock_busy_aborts(repo_pair, tmp_path):
         [sys.executable, REAL_LOCK_TOOL, "acquire", "--slot", "dev",
          "--task", "占锁", "--lock-dir",
          str(tmp_path / "work" / "_share" / ".locks")],
-        capture_output=True, text=True)
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace")
     assert r.returncode == 0
     msg = tmp_path / "post.md"
     msg.write_text("**主题**：应被拒绝\n", encoding="utf-8")
