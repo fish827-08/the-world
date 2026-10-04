@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 
@@ -58,33 +59,34 @@ def test_build_cmd_frozen_string():
 
 
 def test_smoke_flag_matches_probe_guard(tmp_path, monkeypatch):
-    """贯通测试（D-DENSITY-SMOKE 防复发）：载体造的命令必须真能过探针 R278 守卫。
+    """贯通测试（D-DENSITY-SMOKE 防复发）：载体造的命令**真跑探针子进程**到 rc=0。
 
-    取真实 build_cmd 产物（仅把装置缩到微型 + ticks 缩短以省机时，不改参数**结构**），
-    在进程内跑探针 main：
-      ① 带 `--smoke` ⇒ 正常返回 0；
-      ② 去掉 `--smoke` ⇒ 必须 SystemExit（守卫拒跑）——若载体修复被摘除，①变红。
+    PI 16:05 裁定③原口径 = "ticks=5 微型档真跑 probe 子进程到 rc=0"——进程内
+    `probe.main()` 会绕过 `-m` 模块解析/参数装配/退出码语义，正是"测试绿而通路断"
+    的漏网面 ⇒ 本例走 subprocess，只缩装置与 ticks（**patches 取真实档值 850**，
+    参数结构一字不动）：
+      ① 载体产物（含 `--smoke`）⇒ rc=0 且 CSV 落盘；
+      ② 剥掉 `--smoke` ⇒ rc≠0 且探针 R278 守卫原文命中——载体修复被摘除即变红。
     """
-    from experiments import p1c_erasure_probe as probe
     monkeypatch.setitem(sweep.LOCKED_DEVICE, "rows", 24)
     monkeypatch.setitem(sweep.LOCKED_DEVICE, "cols", 60)
     monkeypatch.setitem(sweep.LOCKED_DEVICE, "pop", 50)
-    monkeypatch.setattr(sweep, "TICKS", 40)
-    monkeypatch.setattr(sweep, "SAMPLE", 20)
+    monkeypatch.setattr(sweep, "TICKS", 5)
+    monkeypatch.setattr(sweep, "SAMPLE", 1)
 
-    out = tmp_path / "d850_s207.csv"
+    out = tmp_path / "p1c_density_d850_s207_t5.csv"
     cmd = sweep.build_cmd(sys.executable, 850, 207, out)
-    assert "--smoke" in cmd and "--out" == cmd[-2]
-    # cmd = [python, -u, -m, module, *探针参数] ⇒ 进程内喂 argv 须剥前 4 项
-    monkeypatch.setattr(sweep.sys, "argv", ["p1c_erasure_probe"] + cmd[4:])
-    assert probe.main() == 0
-    assert out.exists()
+    assert "--smoke" in cmd and cmd[-2] == "--out"        # 非 D0 档必自带
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", cwd=sweep._ROOT, timeout=300)
+    assert r.returncode == 0, f"载体命令被探针拒跑：\n{(r.stdout + r.stderr)[-800:]}"
+    assert out.exists() and len(out.read_text(encoding="utf-8").splitlines()) == 6
 
-    cmd_nosmoke = ["p1c_erasure_probe"] + [c for c in cmd[4:] if c != "--smoke"]
-    monkeypatch.setattr(sweep.sys, "argv", cmd_nosmoke)
-    with pytest.raises(SystemExit) as ei:
-        probe.main()
-    assert "--smoke" in str(ei.value)
+    cmd_ns = [c for c in cmd if c != "--smoke"]
+    r2 = subprocess.run(cmd_ns, capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", cwd=sweep._ROOT, timeout=300)
+    assert r2.returncode != 0
+    assert "--smoke" in (r2.stdout + r2.stderr)           # 守卫原文（≠判别装置须显式 --smoke）
 
 
 def test_ladder_locked():
