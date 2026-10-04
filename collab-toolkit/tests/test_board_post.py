@@ -224,3 +224,41 @@ def test_lock_busy_aborts(repo_pair, tmp_path):
     rc = bp.main(_post_args(repo_pair, msg))
     assert rc == 2
     assert (tmp_path / "work" / "_share" / "讨论板.md").read_bytes() == before
+
+
+# ---------------- 署名注入（卡 WORKTREE-SIGN / R371①） ----------------
+@pytest.fixture()
+def _git_env_sandbox():
+    """进出各清一次 GIT_CONFIG_*：`apply_to_process` 改的是进程级 os.environ，
+    🔴 不清就会泄漏到后续测试文件（全量连跑时 test_git_id 的行为层断言随顺序变红）。
+    monkeypatch.delenv 对"原本不存在"的键不登记还原 ⇒ 这里自己兜底。"""
+    def _snap():
+        saved = {k: v for k, v in os.environ.items() if k.startswith("GIT_CONFIG_")}
+        for k in saved:
+            del os.environ[k]
+        return saved
+
+    before = _snap()
+    try:
+        yield
+    finally:
+        for k in [k for k in os.environ if k.startswith("GIT_CONFIG_")]:
+            del os.environ[k]
+        os.environ.update(before)
+
+
+def test_auto_inject_identity_from_sign_file(tmp_path, _git_env_sandbox):
+    """本树有署名文件 ⇒ 发帖提交自动带本人花名（免逐命令 -c，也不碰共享 config）。"""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+    import git_id
+    git_id.write_sign_file(str(tmp_path), "板桥", "banqiao@the-world.local")
+    bp.auto_inject_identity(str(tmp_path))
+    assert os.environ["GIT_CONFIG_COUNT"] == "2"
+    assert os.environ["GIT_CONFIG_KEY_0"] == "user.name"
+    assert os.environ["GIT_CONFIG_VALUE_0"] == "板桥"
+
+
+def test_auto_inject_identity_without_file_changes_nothing(tmp_path, _git_env_sandbox):
+    """没有署名文件 ⇒ 绝不动身份（不静默改环境，行为与改前一致）。"""
+    bp.auto_inject_identity(str(tmp_path / "empty"))
+    assert "GIT_CONFIG_COUNT" not in os.environ

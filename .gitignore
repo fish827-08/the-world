@@ -139,3 +139,8 @@ _share/.locks/*.post-journal.json
 # 🔴 必须忽略：否则 1912 个游离文件那种事再来一遍（R343 教训：游离文件淹没真改动）。
 # ⚠️ 只忽略**目录**，不要忽略 `.worktrees` 这个父名本身（便于日后人眼排查）。
 .worktrees/
+
+# === WORKTREE-SIGN（2026-10-04）：本树署名文件（collab-toolkit/tools/git_id.py）===
+# `worktree.py setup --role <键>` 生成的 GIT_CONFIG_* env 注入行 —— 属会话环境而非仓库内容
+# ⇒ 必须忽略（同 R343 游离文件教训）。
+.qoder-sign.env
