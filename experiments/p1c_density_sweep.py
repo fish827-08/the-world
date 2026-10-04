@@ -50,6 +50,9 @@ LOCKED_READBACK = {                            # §2.2 readback 位（跑后必�
     "rd_enabled": False, "use_sim_core": False, "subpos_enabled": True,
 }
 BAND_NAMES = {1700: "D0", 850: "D1", 425: "D2", 213: "D3"}
+# 探针判别装置指纹的 patches 维（`p1c_erasure_probe._S2 = (480, 960, 1700)`）：
+# 仅此档免 `--smoke`；漂移由 test_smoke_flag_matches_probe_guard 贯通测试判红。
+S2_PATCHES = 1700
 PRE_REG = "docs/预注册/预注册-N1-密度梯度批-20261004.md"
 DATA_DIR_DEFAULT = "the-world-data/p1c_density"
 ERASE_DIR_DEFAULT = "the-world-data/p1c_erase"
@@ -81,6 +84,10 @@ def build_cmd(python: str, patches: int, seed: int, out_path: Path,
         cmd += ["--home-range"]
     if dm_guard:
         cmd += ["--dm-guard", str(dm_guard)]
+    # D-DENSITY-SMOKE：探针 R278 守卫对 ≠(480,960,1700) 的档要求显式 `--smoke`，
+    # 而密度批的 patches 正是被测变量（非判别档 = 常态）⇒ 非 D0 档必须自带该旗标。
+    if patches != S2_PATCHES:
+        cmd += ["--smoke"]
     cmd += ["--out", str(out_path)]
     return cmd
 
