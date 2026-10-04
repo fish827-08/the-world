@@ -40,7 +40,7 @@ DEFAULT_ROOT = os.path.dirname(os.path.dirname(_HERE))
 # _share/ 交流文件清单（体检对象）
 SHARE_FILES = ["讨论板.md", "路线共识.md", "待办与交接.md", "路线图.md",
                "README.md", "花名册.md"]
-SIZE_WARN_KB = 200
+SIZE_WARN_KB = 250
 # 2026-09-19 由 fish 提议、[本地开发] 执行同步：150 → **200**
 # （AGENT.md §3.3 同日修订：单日两度触发归档、最短间隔 13.5h ⇒ 归档过频导致上下文断裂）
 # 2026-10-01 由 fish 决定：200 → **300**（第 11 轮归档后板面 159KB；同期发布"发帖精简令"）
@@ -390,7 +390,8 @@ def check_remote_refs(root: str, remote: str, branch: str, net: bool) -> list:
     """
     ref = f"refs/remotes/{remote}/{branch}"
     r = subprocess.run(["git", "rev-parse", "--verify", ref],
-                       cwd=root, capture_output=True, text=True)
+                       cwd=root, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     local = r.stdout.strip() if r.returncode == 0 else None
     out = []
     if local is None:
@@ -403,10 +404,12 @@ def check_remote_refs(root: str, remote: str, branch: str, net: bool) -> list:
                     "msg": f"{ref} = {local[:8]}（存在；F-R24 下仍建议 ls-remote 复核）"})
     if net:
         r2 = subprocess.run(["git", "ls-remote", remote, f"refs/heads/{branch}"],
-                            cwd=root, capture_output=True, text=True, timeout=60)
+                            cwd=root, capture_output=True, text=True, timeout=60,
+                            encoding="utf-8", errors="replace")
         remote_sha = r2.stdout.split()[0] if r2.returncode == 0 and r2.stdout.strip() else None
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace").stdout.strip()
         if remote_sha is None:
             out.append({"level": "warn", "item": "f-r24",
                         "msg": f"ls-remote {remote} 失败（网络/凭据？）"})
