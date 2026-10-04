@@ -58,6 +58,27 @@ def test_build_cmd_frozen_string():
     assert "--smoke" not in cmd0
 
 
+def test_build_cmd_smoke_flag_guards():
+    """D-DENSITY-SMOKE 语义核对（采砚 @3fa90c1 的 `_S2` 真值交叉锁，我缺这一半）：
+
+    载体侧常量 `S2_PATCHES` 必须等于**探针守卫真值** `_S2` 的 patches 维 ⇒
+    若探针判别装置漂移（如 `_S2` 改成别的档），本例立即变红，而不是让
+    `build_cmd` 静默少传/多传 `--smoke`（这是 subprocess 贯通例覆盖不到的模式）。
+    另逐档验：D0 免旗标（复现门/dm-guard 路径逐字不变）、D1–D3 恰一个且紧邻 `--out` 前。
+    """
+    from experiments.p1c_erasure_probe import _S2
+    assert sweep.S2_PATCHES == _S2[2], "载体 S2_PATCHES 与探针判别指纹漂移"
+    assert _S2 == (480, 960, 1700), "D0 必须命中判别装置（否则 D0 也需 --smoke）"
+
+    cmd_d0 = sweep.build_cmd("PY", 1700, 207, Path("D/x.csv"), dm_guard="G.csv")
+    assert "--smoke" not in cmd_d0
+    for p in (850, 425, 213):
+        cmd = sweep.build_cmd("PY", p, 208, Path("D/x.csv"))
+        assert (480, 960, p) != _S2, f"{p} 档应为非判别装置（守卫触发前提）"
+        assert cmd.count("--smoke") == 1, f"d{p} 缺/多 --smoke：{cmd}"
+        assert cmd[cmd.index("--smoke") + 1] == "--out"
+
+
 def test_smoke_flag_matches_probe_guard(tmp_path, monkeypatch):
     """贯通测试（D-DENSITY-SMOKE 防复发）：载体造的命令**真跑探针子进程**到 rc=0。
 
