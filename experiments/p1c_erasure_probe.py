@@ -17,6 +17,10 @@
   patches 读回==请求 / `_id` 严格升序；非判别装置（≠480×960/1700）须显式 `--smoke`。
 - `--dm-guard <stored csv>`：跑完后共享列逐采样点与 P1-c 产物核对（round 4；
   排除 `ms_per_tick_window`），任一不等 ⇒ SystemExit（seed 207 必开，T1 设计 §2.2-5）。
+- `--home-range`（N2 密度批 A1，默认关 ⇒ 表头/行/summary 逐字节不变）：并入
+  **s3 R308 home-range 核心口径**（`_HomeRangeTracker` 的 9 字段最小端口，剔除
+  R316-318 扩列；`update/stats` 仅采样 tick ⇒ 与 s3 同式），采样行追加 `_HR_COLS`，
+  summary 追加 `pooled.hr_run_median`（A1 run 级 = 逐采样窗中位）。
 
 用法（项目根目录）：
     PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m experiments.p1c_erasure_probe \
@@ -29,6 +33,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 import time
@@ -58,6 +63,100 @@ _KEEP = 4            # 现容量（最近 4 条 = 引擎真保留 ⇒ 不计入�
 _K16, _K64 = 16, 64  # 反事实容量窗
 _S2 = (480, 960, 1700)   # 判别装置指纹（s2）
 _DM_EXCLUDE = ("ms_per_tick_window",)
+
+# ---- N2 密度批 A1：home-range 列（端口自 s3 R308 `_HomeRangeTracker` 核心 9 字段；
+#      仅 `--home-range` 开启时追加 ⇒ 默认关 ⇒ 表头/行/summary 逐字节不变）
+_HR_COLS = ["hr_n", "hr_max_dist_median", "hr_max_dist_p90",
+            "hr_hist_0_5", "hr_hist_5_10", "hr_hist_10_20", "hr_hist_20_50",
+            "hr_hist_50p", "hr_move_median", "hr_patch_median", "hr_away_median"]
+
+
+class _HomeRangeCore:
+    """个体活动范围累计（A1，N2 密度批；口径逐式 = s3 R308，剔除 R316-318 扩列）。
+
+    🔴 只读引擎状态（`_id/_flat`）+ 一次性 `labels` ⇒ 不消费主 RNG；默认关。
+    采样 tick 才 update（`hr_move` = 相邻采样点直线累计）⇒ 与 s3 同式：
+      · `hr_max_dist` = 首次被采到的格（≈出生位置）到当前位置的大圆距离（格）；
+      · `hr_move`     = 相邻采样点间直线距离累计（低估真实路径）；
+      · `hr_patch`    = 采到过的不同斑块数（背景格不计）；
+      · `hr_away`     = 采样点落背景（labels<0）比例。
+    只统计当前存活个体（死亡即丢记录，同 s3）。
+    """
+
+    __slots__ = ("nr", "nc", "reg")
+
+    def __init__(self, world):
+        self.nr = int(world.rows)
+        self.nc = int(world.cols)
+        # id -> [birth_r, birth_c, prev_r, prev_c, maxd, move, away_n, seen_n, {patches}]
+        self.reg: dict[int, list] = {}
+
+    def _dist(self, r1, c1, r2, c2) -> float:
+        """大圆距离，半径以「行」为单位（nr 行 = 180°）——与 s3 逐字同式。"""
+        lat1 = (r1 + 0.5) * math.pi / self.nr - math.pi / 2.0
+        lat2 = (r2 + 0.5) * math.pi / self.nr - math.pi / 2.0
+        dlon = (c1 - c2) * (2.0 * math.pi / self.nc)
+        x = (math.sin(lat1) * math.sin(lat2)
+             + math.cos(lat1) * math.cos(lat2) * math.cos(dlon))
+        return math.acos(max(-1.0, min(1.0, x))) * (self.nr / math.pi)
+
+    def update(self, eng, labels) -> None:
+        ids = np.asarray(eng._id)
+        if ids.size == 0:
+            return
+        flat = np.asarray(eng._flat)[:ids.size]
+        rows, cols = eng.world.flat_to_rc(flat)
+        lab = np.asarray(labels)[flat]
+        reg = self.reg
+        alive = set()
+        for k_i, r_i, c_i, l_i in zip(ids.tolist(), rows.tolist(),
+                                      cols.tolist(), lab.tolist()):
+            alive.add(k_i)
+            r = float(r_i)
+            c = float(c_i)
+            e = reg.get(k_i)
+            if e is None:
+                reg[k_i] = [r, c, r, c, 0.0, 0.0,
+                            1 if l_i < 0 else 0, 1,
+                            {int(l_i)} if l_i >= 0 else set()]
+            else:
+                d_birth = self._dist(r, c, e[0], e[1])
+                if d_birth > e[4]:
+                    e[4] = d_birth
+                e[5] += self._dist(r, c, e[2], e[3])
+                e[2] = r
+                e[3] = c
+                if l_i < 0:
+                    e[6] += 1
+                e[7] += 1
+                if l_i >= 0:
+                    e[8].add(int(l_i))
+        if len(reg) > len(alive):
+            self.reg = {k: v for k, v in reg.items() if k in alive}
+
+    def stats(self) -> dict:
+        vs = list(self.reg.values())
+        if not vs:
+            out = {c: float("nan") for c in _HR_COLS}
+            out["hr_n"] = 0
+            return out
+        md = np.array([v[4] for v in vs], dtype=float)
+        mv = np.array([v[5] for v in vs], dtype=float)
+        pn = np.array([len(v[8]) for v in vs], dtype=float)
+        aw = np.array([v[6] / max(v[7], 1) for v in vs], dtype=float)
+        return {
+            "hr_n": len(vs),
+            "hr_max_dist_median": float(np.median(md)),
+            "hr_max_dist_p90": float(np.percentile(md, 90)),
+            "hr_hist_0_5": float((md < 5).mean()),
+            "hr_hist_5_10": float(((md >= 5) & (md < 10)).mean()),
+            "hr_hist_10_20": float(((md >= 10) & (md < 20)).mean()),
+            "hr_hist_20_50": float(((md >= 20) & (md < 50)).mean()),
+            "hr_hist_50p": float((md >= 50).mean()),
+            "hr_patch_median": float(np.median(pn)),
+            "hr_move_median": float(np.median(mv)),
+            "hr_away_median": float(np.median(aw)),
+        }
 
 EPS = 1e-9
 
@@ -298,6 +397,8 @@ def main() -> int:
                     help=f"FIFO 环深（默认 {_K64}；K64 窗需要 ≥64）")
     ap.add_argument("--dm-guard", default=None,
                     help="P1-c 存档 CSV 路径：共享列逐采样点核对（不等即停）")
+    ap.add_argument("--home-range", action="store_true",
+                    help="追加 A1 home-range 列（s3 R308 核心口径端口；默认关⇒逐字节不变）")
     ap.add_argument("--smoke", action="store_true",
                     help="非判别装置（≠480×960/1700）时显式声明（仪表冒烟）")
     add_device_arg(ap)                      # R5.6：显式 --device（预设档防呆）
@@ -367,6 +468,21 @@ def main() -> int:
         raise SystemExit(f"🔴 dm-guard 前置检查失败：存档不存在 {a.dm_guard} "
                          f"⇒ 拒跑（避免跑完 {a.ticks}t 才发现无法对锚）")
 
+    # ---- A1 home-range（默认关 ⇒ 整块不执行；开启时惰性导入并前置校验）
+    hr_labels = None
+    hr_tracker = None
+    if a.home_range:
+        rb["home_range"] = True                    # 仅开启时写入（默认关⇒summary 不变）
+        from experiments.s2_depletion_probe import _label_patches  # 惰性：默认关不触导入
+        pm = getattr(e.resources, "_patch_mask", None)
+        if pm is None:
+            raise SystemExit("🔴 --home-range：resources._patch_mask 缺失 ⇒ 无法标注斑块"
+                             "（口径 = s3 R308 labels）。中止。")
+        hr_labels = _label_patches(e.world, pm)
+        if int((hr_labels >= 0).sum()) == 0:
+            raise SystemExit("🔴 --home-range：无任何斑块格标签 ⇒ hr_patch/away 口径失效。中止。")
+        hr_tracker = _HomeRangeCore(e.world)
+
     print(f"# [P1-c-erase] seed={a.seed} ticks={a.ticks} sample={a.sample} "
           f"device={rb['rows']}x{rb['cols']} patches={rb['patches']} "
           f"pop0={rb['initial_pop']} ring={rb['ring_depth']} smoke={rb['smoke']}")
@@ -390,6 +506,8 @@ def main() -> int:
             "pep64_n", "pep64_d_med", "pep64_d_p90", "pep64_frac_dle1",
             "pep64_frac_read_moore",
             "eng_wr_ticks", "probe_rich_ticks"]
+    if a.home_range:      # 🔴 默认关 ⇒ 表头逐字节不变；开启时追加 A1 列（列序=定义序）
+        cols = cols + _HR_COLS
     recs: list[dict] = []
     pool: list[np.ndarray] = []
     pos_pool: list[np.ndarray] = []
@@ -444,6 +562,9 @@ def main() -> int:
                 rec["eng_wr_ticks"] = wr
                 rec["probe_rich_ticks"] = rich
                 rec["ms_per_tick_window"] = round(ms_t, 2)
+                if hr_tracker is not None:      # A1：update+stats 仅采样 tick（同 s3）
+                    hr_tracker.update(e, hr_labels)
+                    rec.update(hr_tracker.stats())
                 recs.append(rec)
                 w.writerow({k: (v if v is None else
                                 (round(v, 4) if isinstance(v, float) else v))
@@ -513,6 +634,14 @@ def main() -> int:
     pooled["pep64"] = _pool_set(pep64_pool, pep64_rd)
     pooled["diag"] = {"eng_wr_ticks_total": int(wr_total),
                       "probe_rich_ticks_total": int(rich_total)}
+    if hr_tracker is not None:      # A1 run 级读数 = 逐采样窗中位（NaN 窗剔除，逐窗披露在 CSV）
+        pooled["hr_run_median"] = {}
+        for c in _HR_COLS:
+            vals = [r[c] for r in recs
+                    if r.get(c) is not None and not (isinstance(r[c], float) and math.isnan(r[c]))]
+            pooled["hr_run_median"][c] = float(np.median(vals)) if vals else float("nan")
+            if len(vals) < len(recs):
+                pooled["hr_run_median"][f"{c}_n_windows"] = len(vals)
 
     # ---- dm-guard（硬门；seed 207 必开）
     dm = {"path": a.dm_guard, "n_mismatch": 0, "passed": None}
@@ -529,20 +658,25 @@ def main() -> int:
                 f"🔴 dm-guard 失败：{len(mism)} 处不等（见上）⇒ 探针观测与 P1-c "
                 "存档不同源/有漂移，停跑回报（T1 设计 §2.2-5）。")
 
+    sum_notes = [
+        "口径A = 球面大圆距离（单位=1 纬度格宽）；口径B = 引擎 Moore 直读（同 P1-c）",
+        "pea_* = K16 窗全部条目；pep_* = K16 窗 d>0 子集（🔴 主判据）；"
+        "pep64_* = K64 窗 d>0 子集（预注册次判）",
+        "被擦除集 = 每体独立 FIFO 环中除最近 4 条之外的条目（反事实 K16/K64）",
+        "相位披露：引擎写点在步 4.4（移动前），探针步末观测（移动后）⇒ ≤1 tick 差；"
+        "诊断列 eng_wr_ticks vs probe_rich_ticks 兜底",
+        "纯观测：不写引擎、不消费主 RNG；判读权归天平（本探针只出数）",
+    ]
+    if hr_tracker is not None:
+        sum_notes.append(
+            "hr_* = A1 活动范围列（s3 R308 核心口径端口：update/stats 仅采样 tick，"
+            "hr_move=相邻采样点直线累计；labels=一次性连通分量标注，patch_mask 静态）")
     summary = {
         "probe": "p1c_erasure_probe", "argv": sys.argv[1:],
         "seed": a.seed, "ticks": a.ticks, "sample": a.sample,
         "extinct_at": extinct_at, "readback": rb, "per_sample": recs,
         "pooled": pooled, "dm_guard": dm,
-        "notes": [
-            "口径A = 球面大圆距离（单位=1 纬度格宽）；口径B = 引擎 Moore 直读（同 P1-c）",
-            "pea_* = K16 窗全部条目；pep_* = K16 窗 d>0 子集（🔴 主判据）；"
-            "pep64_* = K64 窗 d>0 子集（预注册次判）",
-            "被擦除集 = 每体独立 FIFO 环中除最近 4 条之外的条目（反事实 K16/K64）",
-            "相位披露：引擎写点在步 4.4（移动前），探针步末观测（移动后）⇒ ≤1 tick 差；"
-            "诊断列 eng_wr_ticks vs probe_rich_ticks 兜底",
-            "纯观测：不写引擎、不消费主 RNG；判读权归天平（本探针只出数）",
-        ],
+        "notes": sum_notes,
     }
     sp = out.with_name(out.stem + ".summary.json")
     with open(sp, "w", encoding="utf-8") as f:
