@@ -21,9 +21,19 @@ class _Sig:
         self._age = np.zeros(n, dtype=np.int32)
         self.duration = int(duration)
 
+    def write_many(self, cells, patterns):
+        """🔴 澜舟 R396 三拍②（G6）补：对齐真实 `world/signal_field.py:104` 的批量写。
+
+        引擎侧**唯一**写点是 `write_many`（`sphere_engine.py:3664`）⇒ stub 也必须只经
+        它写，否则 G6 的 fail-loud（"有写入格却零调用 ⇒ 抓手失效"）会在本文件里当场炸。
+        """
+        cells = np.asarray(cells, dtype=np.int64)
+        pats = np.asarray(patterns, dtype=np.uint8)
+        self._marks[cells] = pats
+        self._age[cells] = np.where(pats > 0, self.duration, 0).astype(np.int32)
+
     def write(self, cell, pat):
-        self._marks[cell] = np.uint8(pat)
-        self._age[cell] = self.duration
+        self.write_many([cell], [pat])
 
     def decay(self):
         """模拟引擎步内 `signals.tick()`：先衰减、过期清零（emission 写在其后）。"""
