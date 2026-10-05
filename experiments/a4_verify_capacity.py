@@ -59,6 +59,10 @@ from simulation.sphere_engine import SphereEngine  # noqa: E402
 # 🔴 13.8：P7 要求产物自证 `migrate_gene_slot == 23` ⇒ 必须从基因表取**常量**，
 #    不可抄字面量 23（抄了就永远"通过"，位号真错了也测不出来）。
 from simulation.genes import Gene  # noqa: E402
+# 🔴 F2 落裁（镜 19:46 审 / PI R383 697e171）：装置预设档单一真源（R278 §三）
+#    —— a4 此前**无任何装置口径入口**（rows/cols 吃 config 默认 60×120）⇒ C1 批
+#    下达不了 s2 装置。接入后：不传 --device ⇒ 逐位等于旧版（T1 基石）。
+from tools.device_presets import add_device_arg, resolve_device  # noqa: E402
 
 
 # D-19：provenance 统一走 simulation.provenance（硬校验，不再本地静默 None/"unknown"）
@@ -284,6 +288,237 @@ class SpatialReadings:
         }
 
 
+# 🔴 F6（镜 19:46 审 / PI 697e171）：钩子丢失 = fail-loud 文案（窗末 drain 与收尾共用）。
+#   丢失场景 = 快照续跑经 `cls(config)` 重建引擎 ⇒ `_rd_pred_kill_log` 静默回 None
+#   ⇒ 其后每窗零记录、侧车前半有数后半空 —— 旧的"or []"写法把它伪装成"本窗无杀"。
+_RD_HOOK_LOST_MSG = (
+    "🔴 C1 D-1 钩子丢失（_rd_pred_kill_log 为 None）：快照续跑会经 cls(config) "
+    "重建引擎 ⇒ 钩子静默回 None（F6）。rd 批与快照续跑互斥——请加 --fresh 重跑。"
+)
+
+
+class RdInstruments:
+    """C1 捕食信息价值批 · 分块死亡明细侧车（D-2 骨架；设计稿 §四）。
+
+    职责：
+    - 分块映射：flat cell → block_id ∈ [0, block_rows×block_cols)
+      ⚠️ 必须用 world.rows/cols 现算（**禁**复用主表读数段的 //120 硬编码，T13 锁）
+    - 每窗末处理 D-1 钩子日志 → 侧车一（*_rd_windows.csv）逐行
+      （钩子元组 = (id, 死亡格, tick)；F5 后含稳定身份，见 sphere_engine 两处 append）
+    - 收尾聚合 → 侧车二（*_rd_run.csv）一行/run
+    - risk 通道读数采样（臂 on 时；SmellField.at() 锚点）
+
+    默认不实例化（--rd-instruments 关 ⇒ 零开销，T1/T12 锁）。
+    """
+
+    def __init__(self, e, *, channel: str = "risk",
+                 block_rows: int = 4, block_cols: int = 4,
+                 sample_every: int = 250,
+                 windows_path: "Path | None" = None,
+                 run_path: "Path | None" = None) -> None:
+        self.channel = str(channel)
+        self.block_rows = int(block_rows)
+        self.block_cols = int(block_cols)
+        self.n_blocks = self.block_rows * self.block_cols
+        self.sample_every = int(sample_every)
+        self.windows_path = windows_path
+        self.run_path = run_path
+        # 世界几何（T13：必须从 world 取，禁 //120）
+        self._rows = int(e.world.rows)
+        self._cols = int(e.world.cols)
+        self._n_cells = int(e.world.n_cells)
+        # 预计算 flat → block_id 映射表（一次性 O(n_cells)）
+        self._block_map = self._build_block_map()
+        # 侧车一：逐窗行缓冲
+        self._win_fh = None
+        self._win_writer = None
+        self._win_idx = 0
+        # 侧车二：逐 run 聚合缓冲
+        self._run_rows = []  # list[dict]，收尾一次写
+        # 总 kill 计数（manifest 对账用）
+        self.total_kills = 0
+        # 窗边界采样用（occ 窗均估计）
+        self._prev_pop = None
+        self._prev_block_pop = None  # 块级 occ（per-block 窗均估计）
+
+    def _build_block_map(self) -> np.ndarray:
+        """flat cell index → block_id ∈ [0, n_blocks)。T4/T13 锚。"""
+        flat_idx = np.arange(self._n_cells, dtype=np.int64)
+        row = flat_idx // self._cols
+        col = flat_idx % self._cols
+        lat_band = (row * self.block_rows) // self._rows
+        lon_band = (col * self.block_cols) // self._cols
+        return (lat_band * self.block_cols + lon_band).astype(np.int32)
+
+    def install_hook(self, e) -> None:
+        """安装 D-1 钩子（载体侧）。T11a/T11b/T14 锁。"""
+        # fail-loud：Rust 路径不得装（D-1 只在 Python 捕食段）
+        if getattr(e, "_sim_core", None) is not None:
+            raise SystemExit(
+                "C1 D-1 钩子只在 Python 路径生效；"
+                "--rd-instruments + use_sim_core=True 不兼容（§八 D2 纪律）"
+            )
+        e._rd_pred_kill_log = []
+
+    def open_sidecars(self) -> None:
+        """打开侧车一 CSV 写器。"""
+        if self.windows_path is None:
+            return
+        self.windows_path.parent.mkdir(parents=True, exist_ok=True)
+        self._win_fh = self.windows_path.open("w", encoding="utf-8", newline="")
+        cols = (["seed", "arm", "win_idx", "win_start_tick", "win_end_tick"]
+                + [f"kills_{b}" for b in range(self.n_blocks)]
+                + [f"occ_{b}" for b in range(self.n_blocks)]
+                + [f"dens_{b}" for b in range(self.n_blocks)]
+                # 🔴 F7（镜 19:46 审 / PI 697e171）：`kills_cum_total` = 含本窗累计。
+                #   主表 d_pred 是**累计口径**（log-interval=1000t 粒度）⇒ 对账粒度
+                #   = 每 4 窗（250t×4）一行，**不可**逐窗对（见 §五 T5b 改稿）。
+                + ["win_kills_total", "kills_cum_total",
+                   "win_pop_start", "win_pop_end", "risk_read_n"])
+        self._win_writer = csv.DictWriter(self._win_fh, fieldnames=cols)
+        self._win_writer.writeheader()
+
+    def process_window(self, e, tick: int, *, seed: int, arm: str) -> None:
+        """窗末处理：排空 D-1 日志 → 写侧车一行。"""
+        log = getattr(e, "_rd_pred_kill_log", None)
+        # 🔴 F6（镜 19:46 审 / PI 697e171）：None = 钩子丢失（快照续跑重建引擎）
+        #   ⇒ fail-loud。**不得**再写 `or []`——那会把"后半程零记录"伪装成
+        #   "本窗无杀"（静默污染 J-A/J-B 的窗序列）。
+        if log is None:
+            raise SystemExit(_RD_HOOK_LOST_MSG)
+        # 分块 kills（F5 后元组 = (id, 死亡格, tick)；本窗只消费死亡格）
+        kills = np.zeros(self.n_blocks, dtype=np.int64)
+        if log:
+            flat_arr = np.array([cell for _, cell, _t in log], dtype=np.int64)
+            blocks = self._block_map[flat_arr]
+            np.add.at(kills, blocks, 1)
+        # 当前种群 + 块级 occupancy
+        P = len(e._id)
+        cur_pop = P
+        cur_block_pop = np.zeros(self.n_blocks, dtype=np.float64)
+        if P:
+            block_of_each = self._block_map[e._flat[:P]]
+            np.add.at(cur_block_pop, block_of_each, 1.0)
+        prev_pop = self._prev_pop if self._prev_pop is not None else cur_pop
+        prev_block_pop = (self._prev_block_pop
+                          if self._prev_block_pop is not None
+                          else cur_block_pop)
+        # 块级 occ 窗均估计 = (窗起 + 窗止)/2（§四-4-2 [口径]）
+        occ_block = (prev_block_pop + cur_block_pop) / 2.0
+        # 密度 = kills / max(occ × sample_every, 1)
+        dens = np.where(
+            occ_block > 0,
+            kills / (occ_block * self.sample_every),
+            np.nan,
+        )
+        # risk 读数采样数（臂 on 时 = P；off 时 = 0）
+        risk_read_n = P if self._smell_channel_active(e) else 0
+        # 写行
+        win_start = max(0, tick - self.sample_every + 1)
+        row = {
+            "seed": seed, "arm": arm,
+            "win_idx": self._win_idx,
+            "win_start_tick": win_start,
+            "win_end_tick": tick,
+            **{f"kills_{b}": int(kills[b]) for b in range(self.n_blocks)},
+            **{f"occ_{b}": round(float(occ_block[b]), 2)
+               for b in range(self.n_blocks)},
+            **{f"dens_{b}": (round(float(dens[b]), 6)
+                             if not np.isnan(dens[b]) else "")
+               for b in range(self.n_blocks)},
+            "win_kills_total": int(kills.sum()),
+            # 🔴 F7：含本窗的**累计**（主表 d_pred 差分对账锚；每 4 窗=1000t 一行）
+            "kills_cum_total": int(self.total_kills) + int(kills.sum()),
+            "win_pop_start": int(prev_pop),
+            "win_pop_end": int(cur_pop),
+            "risk_read_n": int(risk_read_n),
+        }
+        if self._win_writer is not None:
+            self._win_writer.writerow(row)
+            self._win_fh.flush()
+        self._run_rows.append({
+            "win_idx": self._win_idx, "kills": kills.copy(),
+            "occ_block": occ_block.copy(), "dens": dens.copy(),
+        })
+        self.total_kills += int(kills.sum())
+        self._win_idx += 1
+        self._prev_pop = cur_pop
+        self._prev_block_pop = cur_block_pop.copy()
+        # 排空日志（O(窗内死亡数) 内存）
+        log.clear()
+
+    def _smell_channel_active(self, e) -> bool:
+        """检查 rd-channel 是否在引擎 smell channels 中。"""
+        channels = tuple(getattr(e.config.smell, "channels", ()) or ())
+        return self.channel in channels
+
+    def close(self) -> None:
+        """关闭侧车一写器。"""
+        if self._win_fh is not None:
+            self._win_fh.close()
+            self._win_fh = None
+
+    def write_run_summary(self, *, seed: int, arm: str) -> None:
+        """写侧车二（逐 run 聚合，一行）。§四-4-3。"""
+        if self.run_path is None or not self._run_rows:
+            return
+        self.run_path.parent.mkdir(parents=True, exist_ok=True)
+        # AR1 per block（跨窗 dens 序列 lag-1 ρ）
+        ar1_vals = {}
+        for b in range(self.n_blocks):
+            dens_seq = np.array([r["dens"][b] for r in self._run_rows],
+                                dtype=np.float64)
+            valid = dens_seq[~np.isnan(dens_seq)]
+            if len(valid) >= 3:
+                ar1_vals[b] = float(np.corrcoef(valid[:-1], valid[1:])[0, 1])
+            else:
+                ar1_vals[b] = float("nan")
+        # 块排序稳定性（跨窗 Spearman）
+        stability = float("nan")
+        if len(self._run_rows) >= 3:
+            from scipy.stats import spearmanr as _spearman  # 惰性导入
+            rho_sum = 0.0
+            rho_n = 0
+            for i in range(len(self._run_rows) - 1):
+                d1 = self._run_rows[i]["dens"]
+                d2 = self._run_rows[i + 1]["dens"]
+                mask = ~(np.isnan(d1) | np.isnan(d2))
+                if mask.sum() >= 3:
+                    rho, _ = _spearman(d1[mask], d2[mask])
+                    if not np.isnan(rho):
+                        rho_sum += rho
+                        rho_n += 1
+            if rho_n > 0:
+                stability = rho_sum / rho_n
+        # CV per window（16 块 dens 的 CV，跨窗均值）
+        cv_vals = []
+        for r in self._run_rows:
+            d = r["dens"]
+            valid = d[~np.isnan(d)]
+            if len(valid) >= 2 and np.mean(valid) > 0:
+                cv_vals.append(float(np.std(valid, ddof=1) / max(np.mean(valid), 1e-9)))
+        cv_mean = float(np.mean(cv_vals)) if cv_vals else float("nan")
+        row = {
+            "seed": seed, "arm": arm,
+            "rd_n_windows": len(self._run_rows),
+            "rd_block_rows": self.block_rows,
+            "rd_block_cols": self.block_cols,
+            "rd_channel": self.channel,
+            "rd_total_kills": self.total_kills,
+            "rd_block_cv": round(cv_mean, 6) if not np.isnan(cv_mean) else "",
+            "rd_block_stability": (round(stability, 6)
+                                   if not np.isnan(stability) else ""),
+            **{f"rd_block_ar1_{b}": (round(ar1_vals[b], 6)
+                                     if not np.isnan(ar1_vals[b]) else "")
+               for b in range(self.n_blocks)},
+        }
+        cols = list(row.keys())
+        with self.run_path.open("w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols)
+            w.writeheader()
+            w.writerow(row)
+
+
 def _moments(x) -> tuple[float, float, float]:
     """样本标准差 / 偏度 / **超额**峰度（矩法）—— BC 双峰系数的输入（R135 第 -1 步①）。
 
@@ -430,13 +665,34 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
           asm_w_feed: float = 1.0, asm_w_hunger: float = 0.5,
           asm_w_flee: float = 1.0, asm_w_join: float = 0.5,
           # 🔴 R240 T8 气味场通道（空 = 关 ⇒ 旧行为逐位等价）
-          smell_channels: str = "") -> SphereEngine:
+          smell_channels: str = "",
+          # 🔴 F2 装置面（镜 19:46 审 / PI 697e171；**默认 None ⇒ 不覆盖 ⇒ 逐位等价**）
+          #   --device 决议值的落点；口径 = steady_k_probe.make_cfg 同源。
+          rows: int | None = None, cols: int | None = None,
+          pop: int | None = None,
+          bg_low_prod_frac: float | None = None,
+          bg_low_cap_mult: float | None = None) -> SphereEngine:
     c = SimConfig(seed=seed)
     c.simulation.ticks = ticks
     c.simulation.use_sim_core = False          # D2 须走 Python 路径（AGENTS.md）
     c.simulation.history_limit = 100           # 环形缓冲，限内存（不改变语义）
     c.population.initial_count = 200           # R4 manifest 真实口径
     c.population.max_count = max_count         # R41：标杆批口径 3240（⑤ 不饱和前提）
+    # 🔴 F2：世界尺度 + 初始投放（0 参 ⇒ 不触 ⇒ 逐位等价）
+    #   rows/cols 走构造后赋值（同 steady_k_probe.make_cfg:262 口径）；赋值绕过
+    #   __post_init__ ⇒ 显式复刻两条断言（F1 同型教训："赋值不校验"）。
+    if rows is not None:
+        c.world.rows = int(rows)
+    if cols is not None:
+        c.world.cols = int(cols)
+    if rows is not None or cols is not None:
+        assert c.world.rows >= 3, "至少要 3 行（上下极 + 至少一行赤道带）"
+        assert c.world.cols >= 4, "经度至少 4 列"
+    if pop is not None:
+        assert int(pop) <= int(max_count), (
+            f"initial_count {pop} > max_count {max_count}：引擎按 initial_count "
+            "**实际投放**（max_count 只卡繁殖）⇒ 开局即超上限，饱和前提被静默改变")
+        c.population.initial_count = int(pop)
     # PC-1（R134）：S1 软顶（目标窗形式，冒烟后修订）/ S2 关捕食（默认 = 旧行为）
     c.population.soft_cap_target = float(soft_cap_target)
     # ⚠️ 这里是**整体替换** PredationConfig ⇒ **必须**把 k 一并传进去，
@@ -593,6 +849,13 @@ def build(mode: str, codebook: bool, seed: int, ticks: int, *,
     c.resources.bg_production_zero = bool(bg_production_zero)
     if patch_regrowth_mult is not None:
         c.resources.patch_regrowth_mult = float(patch_regrowth_mult)
+    # 🔴 F2：背景低产能带两参（R320/R326 装置口径；None ⇒ 不覆盖 ⇒ 逐位等价）
+    #   ⚠️ 字段名不对称：`bg_low_cap_mult` → `resources.bg_cap_mult`
+    #   （同 steady_k_probe.make_cfg:271 口径，勿照名直写）。
+    if bg_low_prod_frac is not None:
+        c.resources.bg_low_prod_frac = float(bg_low_prod_frac)
+    if bg_low_cap_mult is not None:
+        c.resources.bg_cap_mult = float(bg_low_cap_mult)
     # 🔴 13.6 S1（2026-09-24）：地形几何三参数（**默认 = config 现状 ⇒ 不传逐位等价**）
     #   ⚠️ 这里用构造后赋值：`ResourceConfig.__post_init__` 的校验（count≥1 / radius≥1 /
     #      capacity_mult>1）只在构造期跑 ⇒ 赋值不触发校验。⇒ 本段**显式复刻**那三条断言，
@@ -718,6 +981,34 @@ def main() -> None:
                          "sigoff=信号禁用 / oracle=正向对照（D-8）。指定即开 ⑥探针+⑤观测")
     ap.add_argument("--max-count", type=int, default=5000,
                     help="种群上限（R41：⑤ 不饱和前提=3240；R19 口径=5000）")
+    # ---- 🔴 F2（镜 19:46 审 / PI R383 697e171）：装置预设档（R278 §三 防呆）----
+    #   `--device s2` 一次把装置字段摁到该档口径（480×960/pop 10000/rgm 1.195/纯零背景），
+    #   并打印"实际生效装置"回显（第三人眼校验点）。显式传的 --rows 等**优先于预设**。
+    #   默认 None ⇒ 不传时本模块完全不介入 ⇒ 与旧版逐位等价（T1 基石）。
+    #   ⚠️ 显式覆盖旗标与 resolve_device 的"显式优先"检测配套：旗标必须存在，否则
+    #     `--rows 300 --device s2` 会在 argparse 处直接报 unknown argument。
+    add_device_arg(ap)
+    ap.add_argument("--rows", type=int, default=None,
+                    help="世界行数（默认 None = config 默认 60；--device 预设可覆盖）")
+    ap.add_argument("--cols", type=int, default=None,
+                    help="世界列数（默认 None = config 默认 120；--device 预设可覆盖）")
+    ap.add_argument("--patches", type=int, default=None,
+                    help="斑块中心数（装置档口径 = resources.patch_count；"
+                         "默认 None = 沿用 --patch-count 的现有语义）")
+    ap.add_argument("--pop", type=int, default=None,
+                    help="初始投放（initial_count；默认 None = 既有 200 口径。"
+                         "⚠️ 若 > --max-count 会 fail-loud——引擎按 initial_count 实际投放，"
+                         "超上限会静默改变饱和前提）")
+    ap.add_argument("--rgm", type=float, default=None,
+                    help="斑块再生倍率（= --patch-mult 的装置档名；两者同义，"
+                         "显式 --rgm 优先）")
+    ap.add_argument("--bg-low-prod-frac", dest="bg_low_prod_frac", type=float,
+                    default=None,
+                    help="背景低产能格占比（R320/R326 口径；默认 None = 不覆盖）")
+    ap.add_argument("--bg-low-cap-mult", dest="bg_low_cap_mult", type=float,
+                    default=None,
+                    help="背景低产能格容量倍率（映射 resources.bg_cap_mult；"
+                         "默认 None = 不覆盖）")
     ap.add_argument("--measure", action="store_true",
                     help="显式开 ⑤观测+⑥探针（--arm 已隐含）")
     ap.add_argument("--no-measure", action="store_true",
@@ -1051,11 +1342,66 @@ def main() -> None:
                     help="join 显著度权重（(Ŝ_kin + density) × 该值）")
     # ── 🔴 R240 T8 气味场通道（空 = 关 ⇒ 旧行为逐位等价）──
     ap.add_argument("--smell-channels", dest="smell_channels", default=None,
-                    help="逗号分隔的气味通道（food,signal,kin,risk；空=关）。"
+                    # F9(a) 勘误（镜 19:46 审）：旧 help 写 "signal" —— 非法通道
+                    # （SmellConfig.__post_init__ assert）；合法集 = _KNOWN_CHANNELS
+                    # = food,prey,risk,kin。
+                    help="逗号分隔的气味通道（food,prey,risk,kin 的子集；空=关）。"
                          "ASM 仲裁档需含 food,risk,kin 三通道。"
                          "⚠️ 默认 None（未传）≠ 空串：续跑时只有**显式传了**才与快照对账"
                          "（distribution 同款；未传 = 沿用快照自带）")
+    # ---- C1 捕食信息价值批（D-2 侧车骨架；本线 = [本地开发·性能线] 轻舟）----------
+    # 默认全关 ⇒ 主表/manifest 逐字节等价（T1/T12 锁）。
+    ap.add_argument("--rd-instruments", dest="rd_instruments", action="store_true",
+                    default=False,
+                    help="C1：开分块死亡明细侧车（两表 + manifest rd 节）。"
+                         "默认关 ⇒ 零行为改动（T1/T11a）")
+    ap.add_argument("--rd-channel", dest="rd_channel", default="risk",
+                    help="C1 读数通道名（默认 risk；未来批 pheromone 同代码路径，T3 锁）")
+    ap.add_argument("--rd-block-rows", dest="rd_block_rows", type=int, default=4,
+                    help="C1 分块行数（默认 4 ⇒ 4×4=16 块；§八-4 锁定）")
+    ap.add_argument("--rd-block-cols", dest="rd_block_cols", type=int, default=4,
+                    help="C1 分块列数（默认 4 ⇒ 4×4=16 块；§八-4 锁定）")
+    ap.add_argument("--rd-sample-every", dest="rd_sample_every", type=int, default=250,
+                    help="C1 窗宽（默认 250 tick；§八 锁 250t）")
     args = ap.parse_args()
+    # ---- 🔴 F2：装置预设档决议（R278 §三；紧接 parse_args —— 任何下游读取 args 前）----
+    #   不传 --device ⇒ resolve_device 删掉 device 键并返回 {} ⇒ 零介入（逐位等价）。
+    #   传了 ⇒ 未显式给的装置字段被摁到预设值 + stderr 打印"实际生效装置"整行。
+    _device_applied = resolve_device(
+        args, sys.argv[1:],
+        logger=lambda m: print(m, file=sys.stderr))
+    # ---- 防呆（F2 面）：initial_count > max_count ⇒ 引擎会**实际投放** initial_count
+    #   个个体（sphere_engine 构造期按 initial_count 建种群），max_count 只卡繁殖 ⇒
+    #   pop 超上限会静默改变"⑤ 不饱和前提"⇒ 早拒。
+    if args.pop is not None and int(args.pop) > int(args.max_count):
+        ap.error(
+            f"--pop {args.pop} > --max-count {args.max_count}："
+            "引擎按 initial_count 实际投放（max_count 只卡繁殖）⇒ 开局即超上限，"
+            "饱和前提被静默改变。请显式抬高 --max-count。"
+        )
+    # ---- C1 fail-loud：--rd-instruments + Rust 路径 ⇒ 硬拒（D-1 钩子只在 Python）----
+    # T11c 锁：Rust 侧不接线 ⇒ 开了也拿不到数据 ⇒ 不如早报错。
+    if args.rd_instruments and args.mode == "on":
+        # --mode on 不一定 = Rust（取决于 build() 里 use_sim_core），但 C1 本批
+        # 全 Python 路径（§八 D2 纪律 use_sim_core=False）⇒ mode=on 不会触 Rust。
+        # 此处仅做防御性提示；真正拦截在引擎构造后（e._sim_core 检查）。
+        pass
+    # ---- C1 fail-loud：rd 开 ⇒ 必须有 smell 通道含 risk（或对应 rd-channel）----
+    if args.rd_instruments:
+        _rd_ch = str(args.rd_channel).strip()
+        _smell_ch = [s.strip() for s in str(args.smell_channels or "").split(",")
+                     if s.strip()]
+        if _rd_ch and _rd_ch not in _smell_ch:
+            ap.error(
+                f"--rd-instruments + --rd-channel {_rd_ch} 需要 "
+                f"--smell-channels 含 {_rd_ch}（SmellField.at() 读数前置）"
+            )
+    # ---- C1 fail-loud：分块几何合理性 ----
+    if args.rd_instruments:
+        if args.rd_block_rows < 1 or args.rd_block_cols < 1:
+            ap.error("--rd-block-rows/--rd-block-cols 必须 ≥ 1")
+        if args.rd_sample_every < 1:
+            ap.error("--rd-sample-every 必须 ≥ 1")
     # ── 🔴 13.8 工具侧 fail-loud（设计稿 §3.5 的 M2 前置版）────────────────────
     # 引擎侧 M2 已拦"enabled ∧ 无季节"，但**工具侧也要拦**：否则命令行给
     # `--migration` 忘了 `--tilt-deg`，报错信息指向"引擎构造失败"，运维会误以为
@@ -1158,9 +1504,18 @@ def main() -> None:
                   photo_max=args.photo_max,
                   # 🔴 13.5（2026-09-24）：食物绑定 + 能量标定（默认 = 现状 ⇒ 关档逐位等价）
                   bg_production_zero=bool(args.bg_production_zero),
-                  patch_regrowth_mult=args.patch_regrowth_mult,
+                  # 🔴 F2：--rgm 为装置档名（= --patch-mult 同义）；显式 --rgm 优先
+                  patch_regrowth_mult=(args.rgm if args.rgm is not None
+                                       else args.patch_regrowth_mult),
+                  # 🔴 F2 装置面（--device 决议值；None ⇒ 不覆盖 ⇒ 逐位等价）
+                  rows=args.rows, cols=args.cols, pop=args.pop,
+                  bg_low_prod_frac=args.bg_low_prod_frac,
+                  bg_low_cap_mult=args.bg_low_cap_mult,
                   # 13.6 S1 地形几何（默认 = config 现状）
-                  patch_count=args.patch_count,
+                  # 🔴 F2：--patches（装置档名，= resources.patch_count）优先于
+                  #   旧 --patch-count——两者同 dest 底，装置批用 --patches。
+                  patch_count=(args.patches if args.patches is not None
+                               else args.patch_count),
                   patch_radius=args.patch_radius,
                   patch_capacity_mult=args.patch_capacity_mult,
                   # 13.7 季节（默认 None/None ⇒ 不覆盖 ⇒ 逐位等价）
@@ -1374,6 +1729,41 @@ def main() -> None:
         sr = SpatialReadings(e, sidecar=_spatial_path,
                              carry_ok=not resumed)
 
+    # ---- C1 D-2 侧车骨架（--rd-instruments 关 ⇒ rd 恒 None ⇒ 零开销，T1/T12）----
+    rd = None
+    if args.rd_instruments:
+        # 🔴 F6（镜 19:46 审 / PI 697e171）：rd 批**禁续跑**——续跑三重失配：
+        #   ① 快照重建引擎 ⇒ 钩子静默回 None（后程零记录）；② win_idx 从 0 重编
+        #   与 tick 对不上；③侧车一以 "w" 覆写 ⇒ 续跑前窗口全丢。与其静默错，
+        #   不如早拒（run 级 fail-loud）。
+        if resumed:
+            raise SystemExit(
+                "C1 --rd-instruments 与快照续跑互斥（F6）：钩子丢失/窗口编号/侧车"
+                "覆写三重失配。本批禁续跑 ⇒ 请加 --fresh 或换新 --out 前缀重跑。"
+            )
+        # fail-loud：Rust 路径硬拒（D-1 钩子只在 Python 捕食段）
+        if getattr(e, "_sim_core", None) is not None:
+            raise SystemExit(
+                "C1 --rd-instruments 不兼容 Rust 路径（D-1 钩子只在 Python）"
+            )
+        _rd_win_path = out.parent / f"{out.stem}_rd_windows.csv"
+        _rd_run_path = out.parent / f"{out.stem}_rd_run.csv"
+        rd = RdInstruments(
+            e, channel=args.rd_channel,
+            block_rows=args.rd_block_rows, block_cols=args.rd_block_cols,
+            sample_every=args.rd_sample_every,
+            windows_path=_rd_win_path, run_path=_rd_run_path,
+        )
+        rd.install_hook(e)
+        rd.open_sidecars()
+        # 首窗 occ 估计基线（全局 + 块级）
+        _init_P = len(e._id)
+        rd._prev_pop = _init_P
+        _init_bp = np.zeros(rd.n_blocks, dtype=np.float64)
+        if _init_P:
+            np.add.at(_init_bp, rd._block_map[e._flat[:_init_P]], 1.0)
+        rd._prev_block_pop = _init_bp
+
     fields = ["tick", "N", "g14", "g15", "g16", "trust",
               # R135 第 -1 步①（2026-09-20）：g16 **分布矩**——
               # 此前只有均值 ⇒ **判不了双峰**（双峰与单峰可同均值）。
@@ -1453,9 +1843,16 @@ def main() -> None:
     for t in range(start_tick + 1, args.ticks + 1):
         e.step()
         sr.observe(e)          # 13.6 S2：逐 tick 标记"被占据过的格"（纯观测）
+        # ---- C1 D-2：rd 窗末处理（独立于 log_interval；T1/T12 门控）----
+        if rd is not None and t % rd.sample_every == 0:
+            rd.process_window(e, t, seed=args.seed, arm=arm)
         if t % args.log_interval == 0 or e.extinct:
             P = len(e._id)
-            r = (e._flat[:P] // 120) if P else np.zeros(0)
+            # 🔴 F2（镜 19:46 审 / PI 697e171）：原为 `// 120` 硬编码 mini 列数 ⇒
+            #   480×960 档下 mean_row/polar_frac **静默错值**。改 world.cols 现算。
+            r = (e._flat[:P] // e.world.cols) if P else np.zeros(0)
+            # 极区切点 = 行数 10%（60 行 ⇒ 6 ⇒ 原 r<=5/r>=54 逐位同口径）
+            _row_cut = max(1, e.world.rows // 10)
             # R140 P0：死因**时间序列**（累计口径，差分可得区间值）。
             # 键名按 `DeathCause` 成员名归一化（枚举 str() 形如 "DeathCause.STARVATION"）。
             _dct = {str(k).split(".")[-1].upper(): int(v)
@@ -1487,7 +1884,10 @@ def main() -> None:
                 "max_gen": int(e._max_generation),          # R77：历史高水位（不回落）
                 "max_gen_cur": max_generation_current(e),   # R77：当刻最深（只看存活）
                 "mean_row": round(float(r.mean()), 3) if P else "",
-                "polar_frac": round(float(((r <= 5) | (r >= 54)).mean()), 4) if P else "",
+                # 🔴 F2：极区带 = 上下各 rows//10 行（60 行档 = 与原 5/54 切点逐位同值）
+                "polar_frac": round(float(((r < _row_cut)
+                                           | (r >= e.world.rows - _row_cut)).mean()), 4)
+                if P else "",
                 # D-16：
                 # R121 §3.4：n_states 随 signal_alphabet（CSV 列口径）
                 "codebook_conv": (
@@ -1568,6 +1968,17 @@ def main() -> None:
                 pickle.dump(np.random.get_state(), fh2)
             sr.save_sidecar(e)     # 13.6 S2：侧车与快照**同节拍**（续跑口径一致）
     fh.close()
+    # ---- C1 D-2：rd 侧车收尾（关档 ⇒ rd is None ⇒ 零开销）----
+    if rd is not None:
+        # 最后一个不完整窗（若 tick 不是 sample_every 的倍数）也排空
+        _log = getattr(e, "_rd_pred_kill_log", None)
+        # 🔴 F6：收尾排空处同样 fail-loud（不得静默跳过 = 前半有数后半空的来源）
+        if _log is None:
+            raise SystemExit(_RD_HOOK_LOST_MSG)
+        if len(_log) > 0:
+            rd.process_window(e, args.ticks, seed=args.seed, arm=arm)
+        rd.close()
+        rd.write_run_summary(seed=args.seed, arm=arm)
 
     rows = list(csv.DictReader(out.open(encoding="utf-8")))
     tail = [r for r in rows if int(r["tick"]) >= 10000]
@@ -1701,6 +2112,27 @@ def main() -> None:
             # 🔴 R240 T8（2026-09-28 补接）：气味通道 = arbitration 档 salience 的**前置**
             #    ⇒ 必须可从产物自证（C4）；缺席 ⇒ 外复核无法判"Ŝ 三通道是否真在跑"。
             "smell_channels": [str(s) for s in e.config.smell.channels],
+            # ---- C1 捕食信息价值批（D-2 manifest rd 节；§四-4-4）----
+            # 🔴 F8（镜 19:46 审 / PI 697e171）：**整节条件写入** —— rd 关 ⇒ 本节
+            #   一个键都不落 ⇒ manifest 与"无此代码"逐位等价（T1）。原先"全
+            #   False/0/空"的无条件写法会在 rd 关态多出 7 个键 ⇒ 破坏 T1（自相矛盾）。
+            **({
+                "rd_instruments": True,
+                "rd_channel": str(args.rd_channel),
+                "rd_block_rows": int(args.rd_block_rows),
+                "rd_block_cols": int(args.rd_block_cols),
+                "rd_sample_every": int(args.rd_sample_every),
+                "rd_hook_installed": getattr(e, "_rd_pred_kill_log", None) is not None,
+                "rd_n_kill_log_total": rd.total_kills if rd is not None else 0,
+            } if args.rd_instruments else {}),
+            # ---- 🔴 F2 装置档回读（仅 --device 实际介入时写；不传 ⇒ 零键 ⇒ 与旧版
+            #   逐字节同）—— R321/R326 教训："探针默认 ≠ 预设档"必须从产物自证。
+            **({
+                "device": str(args.device),
+                "device_applied": dict(_device_applied),
+                "world_rows": int(e.config.world.rows),
+                "world_cols": int(e.config.world.cols),
+            } if _device_applied else {}),
             # 🔴 R247：`HungerModConfig` 经 asdict 进 fingerprint ⇒ 快照/续跑配置指纹
             #    已含 HM；续跑混臂由上方 switches 冲突表拦（同 13.4 家族）。
             # 🔴 P7：基因位号必须自证（= 23）—— 位号错位是"接了却没接对"的隐形来源
