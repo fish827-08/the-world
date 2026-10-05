@@ -99,11 +99,16 @@ def owner_identity(owner: str, root: str = DEFAULT_ROOT) -> tuple:
 
     接受：角色键（`collab`）/ 花名（`板桥`、`轻舟 ⚡`）/ 板面署名（`[协作]`）/
     组合写法取第一段（`PI·fish(1)`→fish(1)，`轻舟/澜舟`→轻舟）。
+    括注先剥（澜舟 10-05 治理观察②）：`砚（窗宽口径 R225 锁）`→`砚`——只剥**全角**
+    `（…）`，半角 `(1)` 是花名真身的一部分（`fish(1)` 在册），剥了会查不到 ⇒ 不容错。
     花名未定或邮箱不合规 ⇒ 抛错（fail-loud，不猜邮箱）。
     """
     raw = (owner or "").strip()
     if not raw:
         raise GitIdError("负责人为空 —— 给 --owner <花名|角色键|板面署名>")
+    raw = re.sub(r"[（][^（）]*[）]", "", raw).strip()   # 剥全角括注（先于分词，括注内可含空格）
+    if not raw:
+        raise GitIdError(f"负责人 {owner!r} 剥去括注后为空 —— 花名应裸写，括注只作备注")
     table = roster_identities(root)
     hits = None
     for part in re.split(r"[/／,，、]|\s+", raw):

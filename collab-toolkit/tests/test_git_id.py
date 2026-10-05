@@ -218,3 +218,21 @@ def test_cli_owner_prints_pair(capsys):
     assert git_id.main(["owner", "砚"]) == 0
     assert capsys.readouterr().out.strip() == "砚\tyan@the-world.local"
     assert git_id.main(["owner", "幽灵"]) == 1
+
+
+def test_owner_identity_strips_fullwidth_annotation():
+    """澜舟 10-05 治理观察②：`砚（窗宽口径 R225 锁）`/`澜舟（实施）` 剥全角括注后查表。"""
+    assert git_id.owner_identity("澜舟（实施）") == ("澜舟", "lanzhou@the-world.local")
+    assert git_id.owner_identity("砚（窗宽口径 R225 锁）") == ("砚", "yan@the-world.local")
+    assert git_id.owner_identity("板桥 （工具线）") == ("板桥", "banqiao@the-world.local")
+    # 半角括号是花名真身（fish(1) 在册）⇒ 不剥：PI·fish(1) 仍解析为 fish(1)
+    assert git_id.owner_identity("PI·fish(1)") == ("fish(1)", "pi@the-world.local")
+    # 括注剥离先于分词：组合+括注仍取首个可查花名
+    assert git_id.owner_identity("澜舟/砚（口径）") == ("澜舟", "lanzhou@the-world.local")
+
+
+def test_owner_identity_annotation_only_fails_loud():
+    """剥完括注什么都不剩 ⇒ fail-loud（不猜花名）。"""
+    for bad in ("（实施）", "（只有备注）"):
+        with pytest.raises(git_id.GitIdError):
+            git_id.owner_identity(bad)
