@@ -8,6 +8,8 @@
 纪律：🔴 **零机时**——不跑引擎、不消费 RNG、不改任何文件、不动已锁口径（R225）。
 做法：直接驱动 s3 探针的**真实仪表代码** `_M0Instruments._track_runs`，
 喂入四个手工构造的发射场景（真发射人·次已知），对照 G3 直方图合计。
+写入一律经 stub 的 `signals.write_many`（= 引擎唯一写点，B1）⇒ 与 `task/G6-EMITRATE`
+的类级挂钩同装同跑，两枝合并后本核对件仍可复跑（不是只在本枝自证）。
 
 关键结构事实（读码所得，脚本量化）：`hist_run` 仅在**同一 vid 隔 tick 后再发一次**
 时把上一条串入桶（`s3_memory_probe.py` `_track_runs` 的 else 分支）⇒
@@ -47,6 +49,20 @@ class _Signals:
         self._age = np.zeros(N_CELLS, dtype=np.int32)
         self.duration = DUR
 
+    def write_many(self, cells, patterns):
+        """🔴 B1（PI 21:4x 班 · 镜阻塞项）：照 `tests/test_r358_m0_instruments.py` 的 stub 做法。
+
+        引擎唯一写入点 = `world/signal_field.py:104 write_many(cells, patterns)`
+        （调用点 `sphere_engine.py:3664`）⇒ stub 也**只经它写**。`task/G6-EMITRATE` 的
+        `_M0Instruments.attach` 会自检 `signals.write_many` 存在性并在 MRO 里找定义类装
+        类级挂钩 ⇒ 本 stub 缺该法则两枝同合后本核对件**当场炸**（`RuntimeError: 🔴 M0 G6
+        装配失败`），GAP-A 的证据就此不可复跑。写语义与真实件一致（`pat>0 ⇒ age=duration`）。
+        """
+        cells = np.asarray(cells, dtype=np.int64)
+        pats = np.asarray(patterns, dtype=np.uint8)
+        self._marks[cells] = pats
+        self._age[cells] = np.where(pats > 0, self.duration, 0).astype(np.int32)
+
 
 class _FakeEng:
     """只提供 `_M0Instruments` 只读访问的字段（attach 自检口径不变）。"""
@@ -73,8 +89,7 @@ def measure(sched: dict[int, list[int]], ticks: int) -> dict:
         sig._age[hit] = np.maximum(sig._age[hit] - 1, 0)     # 本步未重写 ⇒ age 递减
         for vid, ts in sched.items():
             if t in ts:
-                sig._marks[CELL[vid]] = 5
-                sig._age[CELL[vid]] = DUR                     # `_age == duration` = 新写
+                sig.write_many([CELL[vid]], [5])       # 唯一写入点 ⇒ G6 挂钩数得到（B1）
         inst.after_step(eng, t, sampled=False)
     h = inst.hist_run
     return {
@@ -120,7 +135,8 @@ def main() -> int:
     print(f"实测比值跨度 {min(ratios):.0%} → {max(ratios):.0%}（同装置族、同 ticks）"
           "⇒ 连'固定系数换算'都不成立。")
     print("⇒ 需求单：`docs/tasks/需求单-GAP-A-EMIT-发射率专列-20261004.md`"
-          "（真值抓手 = 引擎 `_emit_count`，探针侧零引擎改动可出 G6 发射率列）。")
+          "（真值抓手 = `signals.write_many` 的类级挂钩旁路计数，探针侧零引擎改动可出 G6 "
+          "发射率列；🔴 不是引擎 `_emit_count`——需求单 §二 实测它在 M1 装置下恒为 0）。")
 
     if args.selftest:
         assert min(ratios) == 0.0, f"S1/S2 应归零，实得 {ratios}"
