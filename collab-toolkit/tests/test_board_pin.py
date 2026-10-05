@@ -16,6 +16,18 @@ REAL_LOCK_TOOL = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "tools", "share_lock.py"))
 
 
+@pytest.fixture(autouse=True)
+def _git_env_sandbox():
+    """board_post 硬闸 apply_to_process 改进程 env ⇒ 每例前后清 GIT_CONFIG_*（防泄漏，R116）。"""
+    saved = {k: v for k, v in os.environ.items() if k.startswith("GIT_CONFIG_")}
+    for k in saved:
+        del os.environ[k]
+    yield
+    for k in [k for k in os.environ if k.startswith("GIT_CONFIG_")]:
+        del os.environ[k]
+    os.environ.update(saved)
+
+
 # ---------------- 纯函数 ----------------
 def test_split_join_roundtrip():
     pin = bpin.build_pin(["第一条", "第二条"])
@@ -95,7 +107,7 @@ def test_post_preserves_pin_block(repo_with_pin, tmp_path):
     msg = tmp_path / "post.md"
     msg.write_text("**主题**：置顶兼容测试\n", encoding="utf-8")
     rc = bp.main(["--root", repo_with_pin, "--slot", "collab", "--task", "测试",
-                  "--message-file", str(msg), "--role", "[协作]",
+                  "--message-file", str(msg), "--role", "[协作]", "--owner", "板桥",
                   "--remote", "origin", "--branch", "main",
                   "--credential-helper", "", "--lock-tool", REAL_LOCK_TOOL])
     assert rc == 0

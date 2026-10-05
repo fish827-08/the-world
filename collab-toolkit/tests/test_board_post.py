@@ -9,6 +9,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import board_post as bp  # noqa: E402
+import git_id  # noqa: E402
+
+BANQIAO = ("板桥", "banqiao@the-world.local")
 
 REAL_LOCK_TOOL = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "tools", "share_lock.py"))
@@ -86,6 +89,9 @@ def repo_pair(tmp_path):
     git(work, "commit", "-m", "init")
     git(work, "push", "origin", "HEAD:main")
     git(str(bare), "symbolic-ref", "HEAD", "refs/heads/main")  # 让后续 clone 检出 main
+    # SIGN-BOARD-ENFORCE：主路径身份来源 = 本树署名文件（板桥在册）；
+    # 树级 config 的 t@t 从此只是摆设——硬闸不再继承它（连犯根因）。
+    git_id.write_sign_file(str(work), *BANQIAO)
     return str(work)
 
 
@@ -108,6 +114,9 @@ def test_end_to_end_post(repo_pair, tmp_path):
     msg.write_text("**主题**：端到端测试帖\n\n**内容**：你好，板。", encoding="utf-8")
     rc = bp.main(_post_args(repo_pair, msg))
     assert rc == 0
+    # 硬闸验收例①：正确署名放行，且作者位 = 本人（不继承树级 config 的 t@t）
+    assert git(repo_pair, "log", "-1", "--format=%an").stdout.strip() == BANQIAO[0]
+    assert git(repo_pair, "log", "-1", "--format=%ae").stdout.strip() == BANQIAO[1]
     board = (tmp_path / "work" / "_share" / "讨论板.md").read_text(encoding="utf-8")
     assert "初始帖" in board and "端到端测试帖" in board
     assert "### [协作] · " in board  # 自动署名
@@ -227,7 +236,7 @@ def test_lock_busy_aborts(repo_pair, tmp_path):
 
 
 # ---------------- 署名注入（卡 WORKTREE-SIGN / R371①） ----------------
-@pytest.fixture()
+@pytest.fixture(autouse=True)
 def _git_env_sandbox():
     """进出各清一次 GIT_CONFIG_*：`apply_to_process` 改的是进程级 os.environ，
     🔴 不清就会泄漏到后续测试文件（全量连跑时 test_git_id 的行为层断言随顺序变红）。
@@ -305,7 +314,8 @@ def test_board_post_in_linked_worktree_lands_on_main(repo_pair, tmp_path):
     msg.write_text(
         "**主题**：worktree 内发帖\n\n**内容**：重定向主树验证。",
         encoding="utf-8")
-    rc = bp.main(_post_args(wt, msg))
+    # wt 是全新 checkout（无 .qoder-sign.env）⇒ 走 --owner 硬闸身份来源
+    rc = bp.main(_post_args(wt, msg, owner="板桥"))
     assert rc == 0
     board_main = os.path.join(repo_pair, "_share", "讨论板.md")
     assert "worktree 内发帖" in open(board_main, encoding="utf-8").read()
@@ -314,3 +324,59 @@ def test_board_post_in_linked_worktree_lands_on_main(repo_pair, tmp_path):
     head = git(repo_pair, "rev-parse", "HEAD").stdout.strip()
     remote = git(repo_pair, "ls-remote", "origin", "refs/heads/main").stdout.split()[0]
     assert head == remote
+
+
+# ---------------- 发帖署名硬闸（卡 SIGN-BOARD-ENFORCE；R371/R393① 机制补口） ----------------
+def test_header_role_parse():
+    assert bp.header_role("### [协作] · 2026-10-05 12:00（Asia/Shanghai）\n\nx") == "协作"
+    assert bp.header_role("### [PI·fish(1)] · 2026-10-05 12:00\nx") == "PI·fish(1)"
+    assert bp.header_role("**主题**：无头") is None
+
+
+def test_resolve_own_identity_requires_source(tmp_path):
+    """无署名文件又无 --owner ⇒ 拦（不再继承树级/全局 config 残留署名——连犯根因）。"""
+    with pytest.raises(bp.PostError) as e:
+        bp.resolve_own_identity(str(tmp_path / "empty"), None)
+    assert e.value.code == 2
+
+
+def test_resolve_own_identity_offroster_sign_file_blocked(tmp_path):
+    """署名文件身份不在册（真人 gitee 账号同型）⇒ 拦；硬闸只认花名册（R370）。"""
+    git_id.write_sign_file(str(tmp_path), "小鱼",
+                           "14550830+little-fishy@user.noreply.gitee.com")
+    with pytest.raises(bp.PostError) as e:
+        bp.resolve_own_identity(str(tmp_path), None)
+    assert e.value.code == 2
+
+
+def test_gate_blocks_impersonation_of_roster_member(repo_pair, tmp_path):
+    """验收例②：本人板桥（署名文件），帖署名头 [轻舟] ⇒ 冒充在册他人拦 rc=2，板面/HEAD 不动。"""
+    board = os.path.join(repo_pair, "_share", "讨论板.md")
+    before = open(board, encoding="utf-8").read()
+    head = git(repo_pair, "rev-parse", "HEAD").stdout.strip()
+    msg = tmp_path / "post.md"
+    msg.write_text(
+        "### [轻舟] · 2026-10-05 12:00（Asia/Shanghai）\n\n**主题**：冒充测试帖",
+        encoding="utf-8")
+    assert bp.main(_post_args(repo_pair, msg)) == 2
+    assert open(board, encoding="utf-8").read() == before
+    assert git(repo_pair, "rev-parse", "HEAD").stdout.strip() == head
+
+
+def test_gate_blocks_missing_identity_no_sign_file(repo_pair, tmp_path):
+    """验收例③：新 worktree（无署名文件）且不给 --owner ⇒ 不明身份拦 rc=2（主树无卡同型）。"""
+    wt = str(tmp_path / "wt-noid")
+    git(repo_pair, "worktree", "add", "-b", "feature/noid", wt, "HEAD")
+    msg = tmp_path / "post.md"
+    msg.write_text("**主题**：无署名测试帖", encoding="utf-8")
+    assert bp.main(_post_args(wt, msg)) == 2
+
+
+def test_gate_owner_accepts_role_alias_with_annotation(repo_pair, tmp_path):
+    """验收例①变体：--owner `协作（工具线）`（角色键+括注）剥注解析=板桥，与头 [协作] 一致 ⇒ rc=0。"""
+    wt = str(tmp_path / "wt-alias")
+    git(repo_pair, "worktree", "add", "-b", "feature/alias", wt, "HEAD")
+    msg = tmp_path / "post.md"
+    msg.write_text("**主题**：owner 别名帖", encoding="utf-8")
+    assert bp.main(_post_args(wt, msg, owner="协作（工具线）")) == 0
+    assert git(repo_pair, "log", "-1", "--format=%an").stdout.strip() == BANQIAO[0]
