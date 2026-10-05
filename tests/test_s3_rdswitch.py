@@ -8,9 +8,11 @@
   ④ 续跑指纹：rd/alphabet 进 `_config_fingerprint_check` 逐字段核对 ⇒ 跨档续跑硬报错；
   ⑤ `_summary_meta`：默认摘 / 非默认留 / **不改 namespace**（拷贝语义，防后续 a.rd_mode 炸）；
   ⑥ `--alphabet 8` ∧ mem_on ⇒ 「记忆位恒 0」警告（rc=0，**告警不拦**——属可测性质，
-     见 R345 v1.2 P1-a：memv2 下 `_work_memory` 不写 ⇒ mem_bit≡0）。
+     见 R345 v1.2 P1-a：memv2 下 `_work_memory` 不写 ⇒ mem_bit≡0）；
+  ⑦ S1 读回守（镜阻塞项）：真跑 `--rd-mode off --alphabet 4` ⇒ summary
+     `*_effective` == CLI；默认档 == on/16（删 :1612 接线 M4 必红）。
 
-运行成本：全部走微缩档（60×120），T1 两条 30t、T6 两条 10t、T3/T4 各建一次引擎。
+运行成本：全部走微缩档（60×120），T1 两条 30t、T6/T7 各两条 10t、T3/T4 各建一次引擎。
 """
 from __future__ import annotations
 
@@ -67,6 +69,11 @@ def _diff(ref: list[dict], got: list[dict]) -> list[tuple]:
 def _meta(out: Path) -> dict:
     with open(out.with_suffix(".summary.json"), "r", encoding="utf-8") as jf:
         return json.load(jf)["meta"]
+
+
+def _runs(out: Path) -> list[dict]:
+    with open(out.with_suffix(".summary.json"), "r", encoding="utf-8") as jf:
+        return json.load(jf)["runs"]
 
 
 # ---------------------------------------------------------------- ① 默认 = 显式默认
@@ -161,3 +168,29 @@ def test_T6_alphabet8_mem_on_warns_mem_off_silent(tmp_path):
               tmp_path / "d.csv")
     assert r2.returncode == 0, r2.stderr
     assert "记忆位恒 0" not in r2.stderr, "mem_off 臂不应出该告警（v1 记忆位非恒 0）"
+
+
+# ---------------------------------------------------------------- ⑦ S1 读回守
+
+def test_T7_cli_vs_effective_readback(tmp_path):
+    """S1（镜阻塞）：真跑改档 ⇒ summary `*_effective` == CLI；默认档 == on/16。
+
+    变异 M4（删 `:1612` 接线）⇒ 引擎按默认档跑完、meta/回显仍显示 off/4，本测试
+    断 `*_effective` 即变红（读回的是**构造后引擎 config**，不是 CLI/入参回声）。
+    """
+    out = tmp_path / "e.csv"
+    r = _run([*DEV, "--ticks", "10", "--rd-mode", "off", "--alphabet", "4"], out)
+    assert r.returncode == 0, r.stderr
+    runs = _runs(out)
+    # 默认 seeds（3）× arms（both）= 6 条；不锁死条数，按臂集合钉覆盖
+    assert {s["arm"] for s in runs} == {"mem_on", "mem_off"}, f"缺臂：{runs}"
+    for s in runs:
+        assert s["rd_enabled_effective"] is False, f"rd 生效值未读回：{s}"
+        assert s["signal_alphabet_effective"] == "4", f"alphabet 生效值未读回：{s}"
+    # 反向钉住：默认档同一读回通道 ⇒ on/16
+    out2 = tmp_path / "f.csv"
+    r = _run([*DEV, "--ticks", "10"], out2)
+    assert r.returncode == 0, r.stderr
+    for s in _runs(out2):
+        assert s["rd_enabled_effective"] is True, f"默认档 rd 生效值≠on：{s}"
+        assert s["signal_alphabet_effective"] == "16", f"默认档 alphabet 生效值≠16：{s}"

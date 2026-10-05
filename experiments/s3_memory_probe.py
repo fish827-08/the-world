@@ -1232,7 +1232,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
             prior_rows=None, out_path=None, on_row=None, hr_tracker=None,
-            g22_init=None, m0=None, rd_on=True, alphabet="16"):
+            g22_init=None, m0=None, rd_on=True, alphabet="16", eff_out=None):
     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
 
     🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
@@ -1244,6 +1244,11 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
     rd／alphabet（🔴 S3-RDSWITCH）：`rd_on=True` + `alphabet="16"` **默认即旧口径**
     （rd 恒开、字母表 16）⇒ 默认路径逐字节等于旧版；改档用于对齐 M1 骨架候选
     （rd off / alphabet 8）。续跑时两参数进 `_config_fingerprint_check` 逐字段核对。
+
+    🔴 S1（镜审阻塞，2026-10-05）：`eff_out`（可选 dict）⇒ 把**引擎生效值**
+    `rd_enabled`／`signal_alphabet` 读回给调用方进 summary —— 防「CLI 改档但
+    最后一公里接线被删 ⇒ 按默认档跑完而 meta/回显仍显示改档值」（设计总档案
+    §P1-a：读回构造后的 config，不看 CLI 传了什么）。`None`（默认）⇒ 不读不动。
     mem_on 决定记忆 v2 开关（其余逐字段对齐 ⇒ 单变量）。
     weight_gene（R275 T2）：在 **mem_on 臂**额外打开 `memory_weight_gene`
     （g22 被 13.11 路径消费）⇒ S3.5 记忆基因演化。默认 False ⇒ 逐位等于旧版。
@@ -1310,6 +1315,12 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             seed, rows, cols, pop, patches, rgm, mem_on,
             bg_low_prod_frac, bg_low_cap_mult, weight_gene, g22_init,
             rd_on=rd_on, alphabet=alphabet)
+    # 🔴 S1 读回守（镜阻塞项）：生效值取自**构造/加载后的引擎 config**（不看 CLI／
+    #   入参）⇒ "CLI→run_one" 最后一公里一旦断线（如 :1612 接线被删而按默认档跑），
+    #   summary 里的 `*_effective` 即与 CLI 声明不符 ⇒ 测试/复审可当场钉住。
+    if eff_out is not None:
+        eff_out["rd_enabled"] = bool(eng.config.resource_dynamics.enabled)
+        eff_out["signal_alphabet"] = str(eng.config.signal_alphabet)
     try:
         return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
                           labels, n_patch_total, init_cap_full, init_patch_cap,
@@ -1876,6 +1887,7 @@ def main():
                     _hr.ptb_every = int(a.perturb_every)
                     _hr.ptb_frac = float(a.perturb_frac)
                 t0 = time.time()
+                _eff: dict = {}      # 🔴 S1：run_one 回写的引擎生效值（读回守）
                 rows_out, stop = run_one(
                     sd, a.rows, a.cols, a.pop, a.patches, a.ticks, a.sample,
                     a.rgm, mem_on, a.bg_low_prod_frac, a.bg_low_cap_mult,
@@ -1883,7 +1895,8 @@ def main():
                     save_every=a.save_every, snapshot_dir=a.snapshot_dir,
                     resume_sample=_res, prior_rows=None, out_path=a.out,
                     on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init, m0=_m0,
-                    rd_on=(a.rd_mode == "on"), alphabet=a.alphabet)
+                    rd_on=(a.rd_mode == "on"), alphabet=a.alphabet,
+                    eff_out=_eff)
                 # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
                 fout.flush()
                 os.fsync(fout.fileno())
@@ -1912,6 +1925,9 @@ def main():
                         last_r["never_visited_patch_cell_frac"],
                     "l1_visited_patch_frac": last_r["l1_visited_patch_frac"],
                     "cap_lost_frac": last_r["cap_lost_frac"],
+                    # 🔴 S1 读回守：引擎生效值（== CLI 才是真落地；M4 删接线必露馅）
+                    "rd_enabled_effective": _eff.get("rd_enabled"),
+                    "signal_alphabet_effective": _eff.get("signal_alphabet"),
                     "wall_s": round(time.time() - t0, 1),
                 }
                 if _m0 is not None:   # 🔴 R396 三拍②（G6）：run 级首/末段发射率读数
