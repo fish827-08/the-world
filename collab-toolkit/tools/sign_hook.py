@@ -133,7 +133,7 @@ def expected_from_sign_file(tl: str) -> tuple:
 
 
 def owners_from_card_file(repo_root: str, card: str) -> list:
-    """`_share/任务卡.md` 该卡的「负责」原文（可能是 `轻舟/澜舟`、`PI·fish(1)`）。"""
+    """`_share/任务卡.md` 该卡的「负责」原文（可能是 `轻舟/澜舟`、`板桥+砚`、`PI·fish(1)`）。"""
     p = os.path.join(repo_root, TASK_CARD_REL)
     if not os.path.isfile(p):
         return []
@@ -143,7 +143,7 @@ def owners_from_card_file(repo_root: str, card: str) -> list:
                 continue
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if len(cells) >= 3 and cells[0] == card:
-                return [c for c in re.split(r"[/／]", cells[2]) if c]
+                return [c.strip() for c in re.split(r"[/／+＋]", cells[2]) if c.strip()]
     return []
 
 

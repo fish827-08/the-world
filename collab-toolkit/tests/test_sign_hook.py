@@ -47,6 +47,7 @@ CARD_TABLE = """# 任务卡
 |---|---|---|---|---|---|---|---|---|---|
 | C1 | claimed | 板桥 | 冒烟 |  |  |  |  |  |  |
 | C2 | claimed | 轻舟/澜舟 | 双人卡 |  |  |  |  |  |  |
+| C4 | claimed | 板桥+砚 | 加号双人卡 |  |  |  |  |  |  |
 | C3 | pending | 不存在的人 | 坏负责列 |  |  |  |  |  |  |
 """
 
@@ -115,6 +116,7 @@ def test_owners_from_card_file(tmp_path):
     (d / "任务卡.md").write_text(CARD_TABLE, encoding="utf-8")
     assert sh.owners_from_card_file(str(tmp_path), "C1") == ["板桥"]
     assert sh.owners_from_card_file(str(tmp_path), "C2") == ["轻舟", "澜舟"]
+    assert sh.owners_from_card_file(str(tmp_path), "C4") == ["板桥", "砚"]  # 加号分隔（FILE-REORG 卡形态）
     assert sh.owners_from_card_file(str(tmp_path), "NOPE") == []
     assert sh.owners_from_card_file(str(tmp_path / "ghost"), "C1") == []
 
