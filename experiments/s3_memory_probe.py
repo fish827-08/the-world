@@ -83,6 +83,8 @@ import os
 import pickle
 import sys
 import time
+import types
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -429,16 +431,87 @@ class _HomeRangeTracker:
 #   落列（每采样点）：G0 `g15_mean` ｜ G1 `g1_entropy` + `marks_hist_0..15` ｜
 #   G3 `sig_run_len_hist_1..8` + 审计三列 ｜ G4 `g4_mem_bit_*` ｜ G5 `g5_dir_diff`/
 #   `g5_move_diff`/`g5_n_*`。**默认关**（关 ⇒ 表头与行逐字节等于旧版）。
+#   🔴 R396 三拍②（GAP-A 需求单 §3.2）追加 G6 发射计量五列 —— G3 是"再发者的连串
+#   形态学"**不是发射计量**（`tools/audit_gap_a_emit.py` 实测 Σhist/真发射人·次
+#   = 0%/0%/25%/50% 漂移 ⇒ M1「发射率不降」当时无列可读）。
+_G6_NUM_COLS = ["g6_emit_events_cum", "g6_emit_person_ticks_cum",
+                "g6_emit_events_window", "g6_emit_rate_window",
+                "g6_emit_rate_cum"]
 _M0_COLS = (["g15_mean", "g1_entropy"]
             + [f"marks_hist_{i}" for i in range(16)]
             + [f"sig_run_len_hist_{i}" for i in range(1, 9)]
             + ["g3_fresh_cells", "g3_ambig_n", "g3_orphan_n",
                "g4_mem_bit_frac", "g4_mem_bit_on", "g4_mem_bit_n",
-               "g5_dir_diff", "g5_move_diff", "g5_n_sig", "g5_n_nosig"])
+               "g5_dir_diff", "g5_move_diff", "g5_n_sig", "g5_n_nosig"]
+            + _G6_NUM_COLS)
+
+# ---- 🔴 G6 类级挂钩底座（R396 三拍②）------------------------------------------------
+#   为什么不能"包一层 signals.write_many"了事：`world/signal_field.py:20` 用
+#   `__slots__` ⇒ **实例上既不能新增属性、也不能遮蔽类方法**（`sig.write_many = f`
+#   直接 AttributeError）。⇒ 只能在**定义 `write_many` 的类**上装/卸。
+#   三条自证：① 挂钩体只做"数一下入参长度 + 原样转调"（不读 cells、不写任何状态、
+#   不碰 RNG）；② `run_one` 的 `finally` 必卸 ⇒ 同进程后续 run/测试不受影响；
+#   ③ 不 acquire 就不动类 ⇒ `--m0-instruments` 关 ⇒ 逐字节等价无从被破坏。
+#   落点类由 MRO 查找（不硬写 `SignalField`）⇒ 单元测试的 stub 信号场同样可装；
+#   "找不到定义类"或"不是普通函数"= 写入路径变了 ⇒ fail-loud。
+#   记账 = **按类**（`_G6_TAPS[cls] = (原方法, weakref(持有仪表))`）：
+#     · 串行 run ⇒ 后一个仪表**接管**前一个（前者的行早已落盘 ⇒ 改指不产生错计）；
+#     · 持有者用 **weakref** ⇒ 忘记 detach 的仪表一旦被回收，挂钩自动退回纯转调，
+#       不会把计数偷偷记到别的对象上；真正的"静默零列"风险由 `_g6_tick` 的
+#       fail-loud（有写入格却零调用）兜底 —— 那才是会骗人的失效形态。
+_G6_TAPS: dict = {}             # 类 -> (原方法, weakref(持有仪表实例))
+
+
+def _g6_defining_class(obj):
+    for klass in type(obj).__mro__:
+        if "write_many" in vars(klass):
+            return klass
+    return None
+
+
+def _g6_holder(cls):
+    ent = _G6_TAPS.get(cls)
+    return ent[1]() if ent is not None else None
+
+
+def _g6_make_tap(cls, orig):
+    def _tap(self, cells, patterns, *rest, **kw):
+        tgt = _g6_holder(cls)
+        if tgt is not None:
+            tgt._count_emit(patterns)
+        return orig(self, cells, patterns, *rest, **kw)
+    return _tap
+
+
+def _g6_tap_acquire(inst, cls) -> None:
+    ent = _G6_TAPS.get(cls)
+    if ent is None:
+        raw = vars(cls)["write_many"]
+        if type(raw) is not types.FunctionType:
+            raise RuntimeError(
+                f"🔴 M0 G6：{cls.__name__}.write_many 不是普通函数（={type(raw).__name__}）"
+                f"⇒ 类级挂钩不接（classmethod/staticmethod/内置实现需另设计抓手）。")
+        _G6_TAPS[cls] = (raw, weakref.ref(inst))
+        cls.write_many = _g6_make_tap(cls, raw)
+        return
+    prev = ent[1]()
+    if prev is not None and prev is not inst:
+        prev._g6_superseded = True
+    _G6_TAPS[cls] = (ent[0], weakref.ref(inst))
+
+
+def _g6_tap_release(inst, cls) -> None:
+    ent = _G6_TAPS.get(cls)
+    if ent is None:
+        return
+    holder = ent[1]()
+    if holder is None or holder is inst:      # 持有者就是我（或已回收）⇒ 还原
+        cls.write_many = ent[0]
+        _G6_TAPS.pop(cls, None)
 
 
 class _M0Instruments:
-    """M0 仪表：G0/G1/G3/G4/G5 —— 探针侧旁路，**只读**引擎（不消费 RNG、不写引擎）。
+    """M0 仪表：G0/G1/G3/G4/G5 + 🔴 G6 发射计量 —— 探针侧旁路，**只读**引擎（不消费 RNG、不写引擎）。
 
     逐采样点语义（交付说明与判读报告须连带引用）：
       · G0 `g15_mean` = 活体 `Gene.SIGNAL_STRENGTH` 均值（空池 ⇒ NaN，同 g22 口径）；
@@ -454,6 +527,26 @@ class _M0Instruments:
       · G5 `g5_dir_diff` = 「有信号 vs 无信号」个体下一步去向分布的总变差距离
         （9 档：8 邻 + 静止）；`g5_move_diff` = |P(静止|无) − P(静止|有)|；
         `g5_n_sig`/`g5_n_nosig` = 两档人·次。
+      · 🔴 G6（R396 三拍②）= **发射计量**（补 M1「发射率不降」的可算列）：
+        真值抓手 = `world/signal_field.py:104 write_many(cells, patterns)` 的
+        **入参长度** —— 全代码库引擎侧唯一调用点 `sphere_engine.py:3664`
+        `self.signals.write_many(e_flat, patterns)`，且 `e_flat = self._flat[emitters]`
+        （`:3634`）**逐发射者一项**（含同格重复）⇒ `len(patterns)` = 该 tick 精确
+        **发射人·次**（`can_afford` 已在 `:3631` 滤掉付不起成本者；随机信号臂与码本臂
+        走同一调用 ⇒ 口径一致）。实现 = `attach()` 内包一层转调 ⇒
+        **零引擎改动、不消费 RNG、不改任何引擎状态**。
+        列义：`g6_emit_events_cum` = 本段累计发射人·次 ｜
+        `g6_emit_person_ticks_cum` = 累计"个体·tick" = Σₜ N(步末活体) ｜
+        `g6_emit_events_window` = 本采样窗 Δevents ｜
+        `g6_emit_rate_window` = Δevents / Δperson_ticks（分母 0 ⇒ **NaN 不补 0**）｜
+        `g6_emit_rate_cum` = 累计口径（交叉看窗噪声用）。
+        ⚠️ 三条如实披露：① 计数含 `pattern==0` 的"清格写"（`"16"` 档 state=0 可达），
+        run 级 `emit_zero_pattern_n` 单列披露，判读侧可减扣；② 分母 = **步末**活体数
+        （与主表 `pop` 同轴），非步初；③ **续跑分段** ⇒ 计数器每段从 0 起（同 G3 口径），
+        跨段累计不可比。窗宽口径（首/末段各占采样点数比例）**归砚锁定**，本侧只出读数。
+        🔴 否定抓手（GAP-A 需求单 §二）：引擎 `_emit_count` 累加位于
+        `if self._oracle_on:` 之内（`sphere_engine.py:3665/3667`）⇒ `arm=main`
+        （= D0/M1 装置）**恒为 0**，绝不可作发射真值。
 
     🔴 测量时点（与引擎源码逐点对齐；改引擎需复核本类）：
       · G5 的 has_sig 与引擎决策**同式同源**（读 `_marks` + 查 `_nb_table`/`_pole_nb`，
@@ -478,6 +571,19 @@ class _M0Instruments:
         self.last_flat = None      # 上步末位置（= 本步移动/决策前位置）
         self.last_ids = None
         self.g5 = None
+        # ---- 🔴 G6 发射计量（R396 三拍②）----
+        self.g6_calls = 0              # write_many 被调次数（逐 tick 有发射才调）
+        self.g6_events = 0             # 累计发射人·次 = Σ len(patterns)
+        self.g6_zero_patterns = 0      # 其中 pattern==0（清格写）项数（披露用）
+        self.g6_person_ticks = 0       # 累计个体·tick = Σₜ N(步末)
+        self.g6_events_prev = 0        # 上一采样点累计值（差分基线）
+        self.g6_pt_prev = 0
+        self.g6_nan = False            # Rust 路径 ⇒ 整列 NaN（禁当真值）
+        self.g6_t_last = -1            # 防重复累计（同一 tick 调两次 after_step 即炸）
+        self._g6_tapped = False        # 类级挂钩已装在本实例上
+        self._g6_cls = None            # 挂钩所在类对象（还原用）
+        self._g6_cls_name = None       # 挂钩落点类名（披露/审计用）
+        self._g6_superseded = False    # 被后来的仪表实例接管过（披露，不硬炸）
 
     # ---- 装配 + fail-loud 自检（列产不出来必须当场炸，不许静默 NaN）----
 
@@ -498,16 +604,76 @@ class _M0Instruments:
             print(f"  ⚠️ M0 G4：signal_alphabet={getattr(eng, '_alpha', None)!r} ≠ '8' "
                   f"⇒ mem_bit 通路不在（g4_* 恒 n/a）；G4 数据须装置切 \"8\""
                   f"（P1-a 前提）。", file=sys.stderr)
+        self._install_emit_tap(eng)
+
+    # ---- 🔴 G6：发射真值旁路（只读入参长度后原样转调 ⇒ 零状态改动、零 RNG）----
+
+    def _install_emit_tap(self, eng) -> None:
+        if self._g6_tapped:
+            raise RuntimeError(
+                "🔴 M0 G6 装配失败：同一仪表实例 attach 被调了两次 ⇒ 计数会翻倍")
+        if not callable(getattr(eng.signals, "write_many", None)):
+            raise RuntimeError(
+                "🔴 M0 G6 装配失败：signals.write_many 不存在"
+                "（发射真值抓手失效 = 写入路径变了，不许静默出零列）")
+        cls = _g6_defining_class(eng.signals)
+        if cls is None:
+            raise RuntimeError(
+                f"🔴 M0 G6 装配失败：{type(eng.signals).__name__} 的 MRO 里找不到 "
+                f"`write_many` 的定义类 ⇒ 挂钩无处可装（禁静默出零列）。")
+        self._g6_cls_name = cls.__name__
+        if bool(getattr(eng, "_use_sim_core", False)):
+            self.g6_nan = True
+            print("  🔴 M0 G6：use_sim_core=True ⇒ Rust 路径是否经 "
+                  "signals.write_many **未核** ⇒ g6_* 全部置 NaN（禁当真值；"
+                  "本探针 run_one 已强制 Python 路径，出现本告警说明该约束被改）。",
+                  file=sys.stderr)
+            return
+        self._g6_cls = cls
+        _g6_tap_acquire(self, cls)
+        self._g6_tapped = True
+
+    def detach(self) -> None:
+        """还类级挂钩（`run_one` 的 finally 必调 ⇒ 不污染同进程后续 run/测试；幂等）。"""
+        if self._g6_tapped:
+            _g6_tap_release(self, self._g6_cls)
+            self._g6_tapped = False
+            self._g6_cls = None
+
+    def _count_emit(self, patterns) -> None:
+        """由类级挂钩回调：只数入参长度，不碰 cells/patterns 本身。"""
+        self.g6_calls += 1
+        n = int(np.size(patterns))
+        self.g6_events += n
+        self.g6_zero_patterns += n - int(np.count_nonzero(patterns))
 
     # ---- 每 tick（G3 归因 + 维护"上步末"快照；只读）----
 
     def after_step(self, eng, t: int, sampled: bool) -> None:
         fresh = self._fresh_cells(eng)
+        self._g6_tick(eng, t, fresh)
         if sampled:                # G5 用更新前快照（上步末位置）＋本步末 marks
             self.g5 = self._compute_g5(eng)
         self._track_runs(eng, t, fresh)
         self.last_flat = np.asarray(eng._flat).copy()
         self.last_ids = np.asarray(eng._id).copy()
+
+    # ---- 🔴 G6 每 tick：人·tick 分母 + 挂钩失效自检（fail-loud）----
+
+    def _g6_tick(self, eng, t: int, fresh: np.ndarray) -> None:
+        if int(t) <= self.g6_t_last:
+            raise RuntimeError(
+                f"🔴 M0 G6：after_step 的 tick 未前进（t={t} ≤ 上次 "
+                f"{self.g6_t_last}）⇒ 人·tick 分母会重复累计。调用顺序变了，停跑。")
+        self.g6_t_last = int(t)
+        self.g6_person_ticks += int(np.asarray(eng._flat).size)
+        # 有格被写入（`age==duration`）却一次 `write_many` 都没数到 ⇒ 挂钩被绕过
+        # 或写入路径改了 ⇒ **绝不允许静默出一列零值**（GAP-A 需求单 §二那类失效）。
+        if self.g6_calls == 0 and int(fresh.size) > 0 and not self.g6_nan:
+            raise RuntimeError(
+                f"🔴 M0 G6：t={t} 观测到新写入格 {int(fresh.size)} 个，但 "
+                f"signals.write_many 调用计数仍为 0 ⇒ 发射抓手失效（引擎写入点换了？"
+                f"挂钩未装在 {self._g6_cls_name!r}？）。停跑，不出列。")
 
     @staticmethod
     def _fresh_cells(eng) -> np.ndarray:
@@ -634,7 +800,80 @@ class _M0Instruments:
         d["g5_move_diff"] = g5.get("g5_move_diff", float("nan"))
         d["g5_n_sig"] = g5.get("g5_n_sig", 0)
         d["g5_n_nosig"] = g5.get("g5_n_nosig", 0)
+        d.update(self._g6_cols())
         return d
+
+    # ---- 🔴 G6 采样列（窗 = 上一个采样点 → 本采样点）----
+
+    def _g6_cols(self) -> dict:
+        if self.g6_nan:
+            return {k: float("nan") for k in _G6_NUM_COLS}
+        d_ev = self.g6_events - self.g6_events_prev
+        d_pt = self.g6_person_ticks - self.g6_pt_prev
+        if d_ev < 0 or d_pt < 0:
+            raise RuntimeError(
+                f"🔴 M0 G6：窗差分为负（Δevents={d_ev} Δperson_ticks={d_pt}）"
+                f"⇒ 计数器被外部改动或采样顺序异常。停跑。")
+        self.g6_events_prev, self.g6_pt_prev = self.g6_events, self.g6_person_ticks
+        return {
+            "g6_emit_events_cum": int(self.g6_events),
+            "g6_emit_person_ticks_cum": int(self.g6_person_ticks),
+            "g6_emit_events_window": int(d_ev),
+            # 分母 0 ⇒ NaN（灭绝窗/零长窗不补 0，防"看起来正常"的假读数）
+            "g6_emit_rate_window": (float(d_ev) / float(d_pt)) if d_pt else float("nan"),
+            "g6_emit_rate_cum": (float(self.g6_events) / float(self.g6_person_ticks)
+                                 if self.g6_person_ticks else float("nan")),
+        }
+
+    def emit_pooled(self, rows, window_frac: float = 0.25) -> dict:
+        """run 级首/末段发射率（M1「发射率不降」的**读数**；判据与窗宽口径**归砚**）。
+
+        `rows` = 本 run（本段）全部采样行；段内取**合并比**（ΣΔevents / ΣΔperson_ticks，
+        即人·tick 加权）而非逐窗均值 ⇒ 短窗噪声不放大。
+        🔴 不裁定：`ratio < 1` 是不是"降"由预注册说，本函数只出数。
+        """
+        n = len(rows)
+        out = {"emit_rate_n_samples": int(n),
+               "emit_rate_window_frac": float(window_frac),
+               "emit_tap_class": self._g6_cls_name,
+               "emit_zero_pattern_n": int(self.g6_zero_patterns)}
+        if self.g6_nan or n == 0:
+            for k in ("emit_rate_first", "emit_rate_last", "emit_rate_ratio"):
+                out[k] = float("nan")
+            out["emit_rate_note"] = ("nan:g6_tap_unavailable" if self.g6_nan
+                                     else "nan:no_sample_rows")
+            return out
+        k = max(1, int(round(n * float(window_frac))))
+        if k > n:
+            k = n
+
+        def _seg_rate(i0: int, i1: int) -> float:
+            base_ev = rows[i0 - 1]["g6_emit_events_cum"] if i0 else 0
+            base_pt = rows[i0 - 1]["g6_emit_person_ticks_cum"] if i0 else 0
+            d_ev = int(rows[i1]["g6_emit_events_cum"]) - base_ev
+            d_pt = int(rows[i1]["g6_emit_person_ticks_cum"]) - base_pt
+            if d_ev < 0 or d_pt < 0:
+                raise RuntimeError(
+                    f"🔴 M0 G6 emit_pooled：段 [{i0},{i1}] 累计量倒退 ⇒ CSV 行序坏了。")
+            return (float(d_ev) / float(d_pt)) if d_pt else float("nan")
+
+        first = _seg_rate(0, k - 1)
+        last = _seg_rate(n - k, n - 1)
+        out["emit_rate_first"] = first
+        out["emit_rate_last"] = last
+        out["emit_rate_ratio"] = (float(last) / float(first)
+                                  if first and not math.isnan(first)
+                                  and not math.isnan(last) else float("nan"))
+        if math.isnan(first) or math.isnan(last):
+            out["emit_rate_note"] = "nan:zero_person_ticks_in_segment"
+        elif first == 0.0:
+            out["emit_rate_note"] = "ratio_undef:first_segment_rate_zero"
+        if 2 * k > n:
+            out["emit_rate_note"] = (out.get("emit_rate_note", "") +
+                                     " |seg_overlap:window_frac_too_large").strip(" |")
+        out["emit_events_total"] = int(rows[-1]["g6_emit_events_cum"])
+        out["emit_person_ticks_total"] = int(rows[-1]["g6_emit_person_ticks_cum"])
+        return out
 
 
 def _dump_pairs(hr, path: str, seed, arm) -> int:
@@ -1048,11 +1287,17 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
          rows_out), eng = _build_fresh_run(
             seed, rows, cols, pop, patches, rgm, mem_on,
             bg_low_prod_frac, bg_low_cap_mult, weight_gene, g22_init)
-    return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
-                      labels, n_patch_total, init_cap_full, init_patch_cap,
-                      init_cap_sum, visited_mask, patch_ever_visited, first_visit,
-                      save_every, snapshot_dir, tag, on_row=on_row,
-                      hr_tracker=hr_tracker, m0=m0)
+    try:
+        return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
+                          labels, n_patch_total, init_cap_full, init_patch_cap,
+                          init_cap_sum, visited_mask, patch_ever_visited, first_visit,
+                          save_every, snapshot_dir, tag, on_row=on_row,
+                          hr_tracker=hr_tracker, m0=m0)
+    finally:
+        # 🔴 G6：类级挂钩**必卸**（正常返回/异常/中断都走到）——泄漏会把计数挂到
+        # 同进程后续 run 上 ⇒ 装/卸必须成对。`detach()` 幂等，未装过则空转。
+        if m0 is not None:
+            m0.detach()
 
 
 def _fail_save_every(save_every, sample, snapshot_dir):
@@ -1297,6 +1542,18 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
     return rows_out, stop
 
 
+def _summary_meta(a):
+    """🔴 G6（R396 三拍②）：仪表**关**时不把 G6 新 CLI 项写进 meta ⇒ summary 逐字节等于旧版。
+
+    新工具四律里"默认关逐字节等价"covering 表头/行，这里把它一并扩到 summary ——
+    否则历史批的 meta 字段集与新批不同，事后对账会误判"装置变了"。
+    """
+    m = dict(vars(a))
+    if not getattr(a, "m0_instruments", False):
+        m.pop("m0_emit_window_frac", None)
+    return m
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rows", type=int, default=DEVICE["rows"])
@@ -1363,15 +1620,28 @@ def main():
     ap.add_argument("--m0-instruments", action="store_true",
                     help="每采样点追加 M0 仪表列：g15_mean / g1_entropy + "
                          "marks_hist_0..15 / sig_run_len_hist_1..8 + g3_* 审计 / "
-                         "g4_mem_bit_* / g5_dir_diff,g5_move_diff,g5_n_*。"
+                         "g4_mem_bit_* / g5_dir_diff,g5_move_diff,g5_n_* / "
+                         "🔴 g6_emit_*（G6 发射计量，R396 三拍②）。"
                          "**只读引擎状态、不消费 RNG**；G4 需 signal_alphabet='8'"
                          "（否则告警为 n/a）")
+    # ---- 🔴 R396 三拍②（G6）：run 级首/末段窗宽（读数形态；口径归砚）----
+    ap.add_argument("--m0-emit-window-frac", type=float, default=0.25,
+                    help="summary 里 `emit_rate_first/last` 各取「采样点数 × 该比例」"
+                         "（默认 0.25 = GAP-A 需求单 §3.2 建议值）。🔴 正式窗宽口径"
+                         "**归砚跑前锁定**，本项只提供读数形态、不含判据；"
+                         "仅 --m0-instruments 开时生效（关 ⇒ summary 逐字节不变）")
     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
     add_device_arg(ap)
     a = ap.parse_args()
     # 防呆：把 --device 决议回写进 a，并回显"实际生效装置"整行（第三人眼校验）
     resolve_device(a, sys.argv[1:], logger=lambda m: print(m, file=sys.stderr))
 
+    # ---- 🔴 R396 三拍②（G6）：窗宽防呆（越界 ⇒ 首末段重叠或空窗，读数无意义）----
+    if a.m0_instruments and not 0.0 < a.m0_emit_window_frac <= 0.5:
+        print(f"🔴 --m0-emit-window-frac({a.m0_emit_window_frac}) 必须在 (0, 0.5]"
+              f"（>0.5 ⇒ 首末段重叠，「末段 vs 首段」失去意义；≤0 ⇒ 空窗）。中止。",
+              file=sys.stderr)
+        sys.exit(2)
     # ---- v3 前置校验：快照节拍必须与采样节拍同步（否则续跑行网格静默错位）----
     if a.save_every and a.save_every != a.sample:
         print(f"🔴 --save-every({a.save_every}) 必须 == --sample({a.sample})"
@@ -1567,7 +1837,7 @@ def main():
                 summary = [s for s in summary
                            if not (str(s.get("seed")) == str(sd)
                                    and s.get("arm") == arm)]
-                summary.append({
+                _sum_row = {
                     "seed": sd, "arm": arm,
                     "stop": stop, "K_final": last_r["pop"],
                     "bg_resid_frac": last_r["bg_resid_frac"],
@@ -1576,11 +1846,15 @@ def main():
                     "l1_visited_patch_frac": last_r["l1_visited_patch_frac"],
                     "cap_lost_frac": last_r["cap_lost_frac"],
                     "wall_s": round(time.time() - t0, 1),
-                })
+                }
+                if _m0 is not None:   # 🔴 R396 三拍②（G6）：run 级首/末段发射率读数
+                    _sum_row.update(
+                        _m0.emit_pooled(rows_out, a.m0_emit_window_frac))
+                summary.append(_sum_row)
                 # 🔴 summary 同样逐 run 原子重写（防同类丢失）
                 tmp_json = out_json + ".tmp"
                 with open(tmp_json, "w", encoding="utf-8") as jf:
-                    json.dump({"meta": vars(a), "runs": summary}, jf,
+                    json.dump({"meta": _summary_meta(a), "runs": summary}, jf,
                               ensure_ascii=False, indent=2)
                     jf.flush()
                     os.fsync(jf.fileno())
