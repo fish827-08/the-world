@@ -158,7 +158,7 @@ def cmd_diff(args) -> int:
     root = os.path.abspath(args.root)
     with open(args.before, encoding="utf-8") as f:
         before = json.load(f)
-    exclude = list(args.exclude) if args.exclude else list(DEFAULT_EXCLUDE)
+    exclude = list(DEFAULT_EXCLUDE) + list(args.exclude or [])
     after = scan(root)
     nb = new_broken(before, after, exclude)
     print(f"[ref_check] 对表 {args.before} → 当前树：新增断链 {len(nb)} 个"
