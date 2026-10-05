@@ -301,19 +301,49 @@ def auto_inject_identity(root: str) -> None:
         print(f"[署名注入] 跳过（{type(e).__name__}: {e}）")
 
 
+# ---------------- worktree 兼容（挂账修复 2026-10-05，PI 点名：:315 判 isdir(.git) 必拒） ----------------
+def resolve_post_root(root: str) -> tuple:
+    """发言实际用的工作树根：主树 ⇒ 原样；linked worktree ⇒ 解析回**主工作树**。
+
+    零号规则：发言=落 main 分支的板。worktree 里追加讨论板 = 落进该卡分支，
+    合并前他人不可见 ⇒ 等同没发言。旧守卫 `isdir(.git)` 在 worktree（.git 为
+    gitdir 指针文件）直接误拒"不是 git 仓库"，逼使用者手工 7 步上板（镜 10-05 实证）。
+    返回 (root_for_7steps, note|None)；解析不出 ⇒ PostError（不猜路径，fail-loud）。
+    """
+    g = os.path.join(root, ".git")
+    if os.path.isdir(g):
+        return root, None
+    if os.path.isfile(g):
+        try:
+            with open(g, "rb") as f:
+                txt = os.fsdecode(f.read()).strip().replace("\\", "/")
+        except OSError as e:
+            raise PostError(f"读不到 .git 指针文件: {g}（{type(e).__name__}: {e}）")
+        m = re.match(r"gitdir:\s*(.+?/\.git)/worktrees/[^/]+/?$", txt, re.I)
+        if m:
+            main_root = m.group(1)[:-len("/.git")] or "/"
+            if os.path.isdir(os.path.join(main_root, ".git")):
+                return main_root, (f"[worktree→主树] 当前={root} 是 linked worktree，"
+                                   f"发言改在主树执行（零号规则：帖须落 main 可见）：{main_root}")
+        raise PostError(f"无法从 worktree 指针解析主树（内容={txt!r}）"
+                        "——请显式改用 --root <主树路径> 重试；勿手工绕过 7 步")
+    raise PostError(f"不是 git 仓库: {root}")
+
+
 def cmd_post(args) -> int:
-    root = os.path.abspath(args.root)
+    orig_root = os.path.abspath(args.root)
+    locked = False
+    install_signal_guard()
+    auto_inject_identity(orig_root)   # 署名注入按**使用者所在树**（worktree 的 .qoder-sign.env 照常生效）
+    root, redirect_note = resolve_post_root(orig_root)
+    if redirect_note:
+        print(redirect_note)
     args.root = root
     board = os.path.join(root, args.board)
-    locked = False
     STATE["args"] = args
     STATE["journal"] = journal_path(root, args.slot)
-    install_signal_guard()
-    auto_inject_identity(root)
     try:
-        # ⓪ 环境检查
-        if not os.path.isdir(os.path.join(root, ".git")):
-            raise PostError(f"不是 git 仓库: {root}")
+        # ⓪ 环境检查（worktree 已在 resolve_post_root 重定向主树；此处不再判 isdir(.git)）
         if not os.path.isfile(board):
             raise PostError(f"讨论板不存在: {board}")
         if not os.path.isfile(args.lock_tool):

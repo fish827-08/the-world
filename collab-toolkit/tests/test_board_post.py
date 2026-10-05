@@ -262,3 +262,55 @@ def test_auto_inject_identity_without_file_changes_nothing(tmp_path, _git_env_sa
     """没有署名文件 ⇒ 绝不动身份（不静默改环境，行为与改前一致）。"""
     bp.auto_inject_identity(str(tmp_path / "empty"))
     assert "GIT_CONFIG_COUNT" not in os.environ
+
+
+# ---------------- worktree 兼容（挂账修复：:315 曾判 isdir(.git) 必拒 linked worktree） ----------------
+def test_resolve_post_root_main_passthrough(repo_pair):
+    """主工作树（.git 为目录）⇒ 原样返回、无重定向提示。"""
+    root, note = bp.resolve_post_root(repo_pair)
+    assert os.path.abspath(root) == os.path.abspath(repo_pair)
+    assert note is None
+
+
+def test_resolve_post_root_linked_worktree_redirects_to_main(repo_pair, tmp_path):
+    """linked worktree（.git 为 gitdir 指针文件）⇒ 解析回主工作树 + 提示（零号规则）。"""
+    wt = str(tmp_path / "wt")
+    git(repo_pair, "worktree", "add", "-b", "feature/wt", wt, "HEAD")
+    assert os.path.isfile(os.path.join(wt, ".git"))   # 旧守卫在此必误拒
+    root, note = bp.resolve_post_root(wt)
+    assert os.path.abspath(root) == os.path.abspath(repo_pair)
+    assert note and "worktree" in note
+
+
+def test_resolve_post_root_junk_pointer_fails_loud(tmp_path):
+    """指针文件内容解析不出主树 ⇒ PostError，绝不猜路径。"""
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / ".git").write_text("gitdir: /nowhere/else/.git/worktrees/x", encoding="utf-8")
+    with pytest.raises(bp.PostError):
+        bp.resolve_post_root(str(fake))
+
+
+def test_resolve_post_root_nonrepo_fails_loud(tmp_path):
+    with pytest.raises(bp.PostError):
+        bp.resolve_post_root(str(tmp_path / "nope"))
+
+
+def test_board_post_in_linked_worktree_lands_on_main(repo_pair, tmp_path):
+    """旧行为：worktree 下 isdir(.git) 假 ⇒ 硬失败"不是 git 仓库"，逼人手工 7 步。
+    新行为：自动重定向到主树执行，帖落 origin/main 可见；worktree 分支板面不动。"""
+    wt = str(tmp_path / "wt")
+    git(repo_pair, "worktree", "add", "-b", "feature/wt", wt, "HEAD")
+    msg = tmp_path / "post.md"
+    msg.write_text(
+        "**主题**：worktree 内发帖\n\n**内容**：重定向主树验证。",
+        encoding="utf-8")
+    rc = bp.main(_post_args(wt, msg))
+    assert rc == 0
+    board_main = os.path.join(repo_pair, "_share", "讨论板.md")
+    assert "worktree 内发帖" in open(board_main, encoding="utf-8").read()
+    board_wt = os.path.join(wt, "_share", "讨论板.md")
+    assert "worktree 内发帖" not in open(board_wt, encoding="utf-8").read()
+    head = git(repo_pair, "rev-parse", "HEAD").stdout.strip()
+    remote = git(repo_pair, "ls-remote", "origin", "refs/heads/main").stdout.split()[0]
+    assert head == remote
