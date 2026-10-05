@@ -17,7 +17,11 @@
     会触发 SIGTERM**（"进程守卫"）⇒ 本工具**全程不做任何删除**；收尾只写标记/挪移；
     另加**信号兜底**（被杀时打印现场 + 写日志）与**阶段日志**（幂等恢复依据）
 
-退出码：0 成功 / 1 环境或用法错误 / 2 锁占用 / 3 push 失败（提交已留本地）/ 4 对账失败
+退出码：0 成功 / 1 环境或用法错误 / 2 锁占用或署名硬闸拦截 / 3 push 失败（提交已留本地）/ 4 对账失败
+
+署名硬闸（SIGN-BOARD-ENFORCE，2026-10-05）：发帖提交的作者位必须 ∈ 花名册，且与帖署名头
+一致；身份来源只认 ①本树 .qoder-sign.env ②显式 --owner。两者皆无 ⇒ fail-loud（rc=2），
+不再继承树级/全局 config 的残留个人署名（R227/R371/R393① 连犯根因）。
 """
 from __future__ import annotations
 
@@ -301,25 +305,134 @@ def auto_inject_identity(root: str) -> None:
         print(f"[署名注入] 跳过（{type(e).__name__}: {e}）")
 
 
+# ---------------- 发帖署名硬闸（SIGN-BOARD-ENFORCE；R371/R393① 机制补口） ----------------
+HEADER_ROLE_RE = re.compile(r"^###\s*\[([^\]]+)\]")
+
+
+def header_role(message: str) -> str | None:
+    """帖署名头 `### [X] · 日期` 中的 X（不含方括号）；无头 ⇒ None。"""
+    m = HEADER_ROLE_RE.match(message)
+    return m.group(1).strip() if m else None
+
+
+def resolve_own_identity(orig_root: str, owner_arg: str | None) -> tuple:
+    """本人身份 = (花名, 邮箱, 来源说明)。只认两个来源，都不猜、不采纳他人署名头：
+    ① 所在树 .qoder-sign.env（worktree.py setup 生成，必须在册）② 显式 --owner。
+    皆无 / 在册校验不过 ⇒ PostError(code=2) fail-loud（连犯三证 4d4f9b6/2d8c677/a5981a0 根因）。
+    """
+    try:
+        sys.path.insert(0, _HERE)
+        import git_id
+    except Exception as e:
+        raise PostError(f"署名硬闸无法加载 git_id: {e}", code=2)
+    name, email = git_id.load_sign_file(orig_root)
+    if name and email:
+        try:
+            booked = git_id.owner_identity(name, root=orig_root)
+        except git_id.GitIdError as e:
+            raise PostError(f"署名硬闸：{git_id.SIGN_FILENAME} 身份不在花名册 —— {e}", code=2)
+        if booked != (name, email):
+            raise PostError(
+                f"署名硬闸：{git_id.SIGN_FILENAME} 与花名册不符（文件={name} <{email}>，"
+                f"在册={booked[0]} <{booked[1]}>）—— 请重新 `worktree.py setup` 生成", code=2)
+        return name, email, git_id.SIGN_FILENAME
+    if owner_arg:
+        try:
+            name, email = git_id.owner_identity(owner_arg, root=orig_root)
+        except git_id.GitIdError as e:
+            raise PostError(f"署名硬闸：--owner 无法解析 —— {e}", code=2)
+        return name, email, "--owner"
+    raise PostError(
+        "署名硬闸：本树无 .qoder-sign.env 且未给 --owner —— 拒绝以不明身份发帖"
+        "（不明身份会继承树级/全局 config 的残留个人署名；R227/R371 连犯根因）。"
+        "二选一：① `worktree.py setup <卡> --owner <花名>`（生成署名文件）；"
+        "② board_post … --owner <花名|角色键|板面署名>。"
+        "（R371 逐命令手打 -c 仍是双保险，本闸不废除）", code=2)
+
+
+def enforce_post_identity(orig_root: str, args, message: str) -> tuple:
+    """发帖前硬校验 + 进程级注入：作者位=本人 ∈ 花名册，且 ≠ 冒充署名头。
+
+    署名头可解析且与本人不一致 ⇒ 拦（冒充）；头不可解析（自由文本角色）⇒ 只提示，
+    作者位仍强制 = 本人（作者位才是权属依据，头文本不作身份来源——否则任何人可署他人）。
+    """
+    name, email, src = resolve_own_identity(orig_root, getattr(args, "owner", None))
+    hdr = header_role(message)
+    if hdr:
+        try:
+            sys.path.insert(0, _HERE)
+            import git_id
+            declared = git_id.owner_identity(hdr, root=orig_root)
+        except Exception:
+            declared = None
+        if declared is not None and declared != (name, email):
+            raise PostError(
+                f"署名硬闸：帖署名头 [{hdr}] 解析为 {declared[0]} <{declared[1]}>，"
+                f"与本人身份 {name} <{email}>（{src}）不一致 —— 冒充在册他人，拦。"
+                "若确为代贴，请以本人署名发帖并在正文注明代发。", code=2)
+        if declared is None:
+            print(f"[署名核验] 署名头 [{hdr}] 花名册查不到 —— 头文本放行，"
+                  f"作者位仍强制 = {name} <{email}>")
+    git_id.apply_to_process(name, email)
+    rc, out, _ = git_id._git(args.root, ["var", "GIT_AUTHOR_IDENT"])
+    if rc != 0 or not out.startswith(f"{name} <{email}>"):
+        raise PostError(
+            f"署名硬闸：git 实际作者位与本人不符（期望 {name} <{email}>，"
+            f"实际 {(out or '?')[:80]}）—— 环境异常，拦。", code=2)
+    print(f"[署名硬闸] 作者位 = {name} <{email}>（来源 {src}，git var 已核验）")
+    return name, email
+
+
+# ---------------- worktree 兼容（挂账修复 2026-10-05，PI 点名：:315 判 isdir(.git) 必拒） ----------------
+def resolve_post_root(root: str) -> tuple:
+    """发言实际用的工作树根：主树 ⇒ 原样；linked worktree ⇒ 解析回**主工作树**。
+
+    零号规则：发言=落 main 分支的板。worktree 里追加讨论板 = 落进该卡分支，
+    合并前他人不可见 ⇒ 等同没发言。旧守卫 `isdir(.git)` 在 worktree（.git 为
+    gitdir 指针文件）直接误拒"不是 git 仓库"，逼使用者手工 7 步上板（镜 10-05 实证）。
+    返回 (root_for_7steps, note|None)；解析不出 ⇒ PostError（不猜路径，fail-loud）。
+    """
+    g = os.path.join(root, ".git")
+    if os.path.isdir(g):
+        return root, None
+    if os.path.isfile(g):
+        try:
+            with open(g, "rb") as f:
+                txt = os.fsdecode(f.read()).strip().replace("\\", "/")
+        except OSError as e:
+            raise PostError(f"读不到 .git 指针文件: {g}（{type(e).__name__}: {e}）")
+        m = re.match(r"gitdir:\s*(.+?/\.git)/worktrees/[^/]+/?$", txt, re.I)
+        if m:
+            main_root = m.group(1)[:-len("/.git")] or "/"
+            if os.path.isdir(os.path.join(main_root, ".git")):
+                return main_root, (f"[worktree→主树] 当前={root} 是 linked worktree，"
+                                   f"发言改在主树执行（零号规则：帖须落 main 可见）：{main_root}")
+        raise PostError(f"无法从 worktree 指针解析主树（内容={txt!r}）"
+                        "——请显式改用 --root <主树路径> 重试；勿手工绕过 7 步")
+    raise PostError(f"不是 git 仓库: {root}")
+
+
 def cmd_post(args) -> int:
-    root = os.path.abspath(args.root)
+    orig_root = os.path.abspath(args.root)
+    locked = False
+    install_signal_guard()
+    auto_inject_identity(orig_root)   # 署名注入按**使用者所在树**（worktree 的 .qoder-sign.env 照常生效）
+    root, redirect_note = resolve_post_root(orig_root)
+    if redirect_note:
+        print(redirect_note)
     args.root = root
     board = os.path.join(root, args.board)
-    locked = False
     STATE["args"] = args
     STATE["journal"] = journal_path(root, args.slot)
-    install_signal_guard()
-    auto_inject_identity(root)
     try:
-        # ⓪ 环境检查
-        if not os.path.isdir(os.path.join(root, ".git")):
-            raise PostError(f"不是 git 仓库: {root}")
+        # ⓪ 环境检查（worktree 已在 resolve_post_root 重定向主树；此处不再判 isdir(.git)）
         if not os.path.isfile(board):
             raise PostError(f"讨论板不存在: {board}")
         if not os.path.isfile(args.lock_tool):
             raise PostError(f"锁工具不存在: {args.lock_tool}")
         message = ensure_signature(load_message(args.message_file), args.role)
         guard_utf8(message, "发言内容")   # F-R31：写前自检
+        enforce_post_identity(orig_root, args, message)   # SIGN-BOARD-ENFORCE：署名硬闸
         prev = journal_read(root, args.slot)   # 先读上次记录，再写本次
         journal_write("start", {"message_sha16": sha256_text(message),
                                 "message_chars": len(message)})
@@ -453,6 +566,9 @@ def main(argv=None) -> int:
     ap.add_argument("--message-file", required=True, help="发言内容文件（UTF-8 无 BOM）")
     ap.add_argument("--role", default=None,
                     help="板面角色（如 '[协作]'）；消息缺署名头时自动生成")
+    ap.add_argument("--owner", default=None,
+                    help="本人花名/角色键/板面署名（本树无 .qoder-sign.env 时的硬闸身份"
+                         "来源；走花名册校验，rc=2 fail-loud）")
     ap.add_argument("--ttl", type=int, default=900, help="锁 TTL 秒（默认 900）")
     ap.add_argument("--lock-tool",
                     default=os.path.join(DEFAULT_ROOT, "tools", "share_lock.py"),

@@ -178,6 +178,59 @@ def test_judge_missing_author_blocks_in_card_tree():
     assert sh.judge("", "", "C1", exp, ROSTER)["level"] == "block"
 
 
+# ---------------- 1d) 发帖提交升格（SIGN-BOARD-ENFORCE：暂存区新增讨论板帖 ⇒ 无卡也硬拦） ----------------
+QINGZHOU = ("轻舟", "qingzhou@the-world.local")
+LANZHOU = ("澜舟", "lanzhou@the-world.local")
+EMPTY_EXP = {"card_pairs": [], "file": None, "notes": [], "raw": ""}
+POST_BQ = [("协作", BANQIAO)]
+POST_QZ = [("轻舟", QINGZHOU)]
+POST_JUNK = [("审核队列表", None)]
+
+
+def _post_lvl(name, email, decls, exp=EMPTY_EXP, card=None):
+    return sh.judge(name, email, card, exp, ROSTER, post_decls=decls)["level"]
+
+
+def test_judge_post_impersonation_blocks_even_without_card():
+    """连犯三证同型（a5981a0：板桥帖署=澜舟）：主树无卡也拦。"""
+    assert _post_lvl(*BANQIAO, POST_QZ) == "block"
+    assert _post_lvl(*BANQIAO, POST_QZ, EXP_FILE_ONLY) == "block"
+    v = sh.judge("板桥", "banqiao@the-world.local", None, EXP_FILE_ONLY, ROSTER,
+                 post_decls=POST_QZ)
+    joined = "\n".join(f["msg"] for f in v["findings"])
+    assert "冒充在册他人" in joined
+
+
+def test_judge_post_author_matches_header_ok():
+    assert _post_lvl(*BANQIAO, POST_BQ, EXP_FILE_ONLY) == "ok"
+
+
+def test_judge_post_non_roster_author_blocks_without_card():
+    """2d8c677 同型（真人 gitee 账号发帖）：无卡也拦——不静默放行。"""
+    assert _post_lvl("小鱼", "14550830+little-fishy@user.noreply.gitee.com",
+                     POST_BQ) == "block"
+
+
+def test_judge_post_unknown_header_warns_only():
+    """头花名册查不到 ⇒ 头文本放行（作者位才是权属依据），只警告。"""
+    assert _post_lvl(*BANQIAO, POST_JUNK, EXP_FILE_ONLY) == "warn"
+
+
+def test_judge_post_missing_author_blocks_without_card():
+    assert _post_lvl("", "", POST_BQ) == "block"
+
+
+def test_judge_pi_whitelist_still_passes_on_posts():
+    assert _post_lvl("fish(1)", "pi@the-world.local", POST_QZ) == "ok"
+
+
+def test_judge_non_post_main_tree_unchanged():
+    """非发帖提交（post_decls=None）主树口径不变：R393③ 警告级，不挡 fish/PI 维护。"""
+    assert _lvl(*YAN, None, EXP_FILE_ONLY) == "warn"
+    assert sh.judge("小鱼", "14550830+little-fishy@user.noreply.gitee.com",
+                    None, EMPTY_EXP, ROSTER)["level"] == "warn"
+
+
 # ---------------- 2) 安装器 ----------------
 def test_install_status_remove_cycle(tmp_path):
     root = tmp_path / "r"
@@ -291,3 +344,44 @@ def test_evaluate_in_current_tree_is_read_only_and_shaped():
     assert v["toplevel"] and v["branch"]
     assert v["level"] in ("ok", "warn", "block")
     assert set(v["expected"]) >= {"card_pairs", "file", "pairs", "source"}
+
+
+# ---------------- 4) 发帖升格端到端（真钩子，主树无卡；tmp 仓内自足） ----------------
+def test_staged_post_roles_and_real_hook_main_tree_post(repo):
+    """主树无卡发帖：作者≠署名头拦（a5981a0 同型）/作者不在册拦（2d8c677 同型）/一致放行。"""
+    root = repo["root"]
+    board = os.path.join(root, "_share", "讨论板.md")
+    with open(board, "w", encoding="utf-8") as f:
+        f.write("# 讨论板\n\n### [所有者] · 2026-09-17 20:00\n初始帖\n")
+    _git(root, ["add", "--", "_share/讨论板.md"])
+    r = _git(root, ["commit", "-m", "board init"],
+             env={**os.environ, **git_id.env_pairs("天平", "tianping@the-world.local")})
+    assert r.returncode == 0, r.stdout + r.stderr     # 头[所有者]=天平 ⇒ 天平发帖放行
+    assert sh.staged_post_roles(root) is None          # 无暂存 ⇒ 非发帖提交
+    # ① 冒充在册他人：头 [轻舟]，作者 澜舟 ⇒ 真钩子拦（旧口径主树只警告）
+    with open(board, "a", encoding="utf-8") as f:
+        f.write("\n---\n\n### [轻舟] · 2026-10-05 21:00（Asia/Shanghai）\n\n冒名帖\n")
+    _git(root, ["add", "--", "_share/讨论板.md"])
+    assert sh.staged_post_roles(root) == ["轻舟"]
+    r = _git(root, ["commit", "-m", "冒名帖"],
+             env={**os.environ, **git_id.env_pairs(*LANZHOU)})
+    assert r.returncode != 0
+    assert "冒充在册他人" in (r.stdout + r.stderr)
+    # ② 作者不在册（真人 gitee 账号）⇒ 拦
+    r = _git(root, ["commit", "-m", "真人帖"],
+             env={**os.environ, "GIT_CONFIG_COUNT": "2",
+                  "GIT_CONFIG_KEY_0": "user.name",
+                  "GIT_CONFIG_VALUE_0": "小鱼",
+                  "GIT_CONFIG_KEY_1": "user.email",
+                  "GIT_CONFIG_VALUE_1": "14550830+little-fishy@user.noreply.gitee.com"})
+    assert r.returncode != 0
+    assert "不在花名册" in (r.stdout + r.stderr)
+    # ③ 头与作者一致 ⇒ 放行（验收例①：[协作]解析=板桥，作者=板桥）
+    with open(board, "r+", encoding="utf-8") as f:
+        txt = f.read().replace("### [轻舟] · 2026-10-05 21:00", "### [协作] · 2026-10-05 21:00")
+        f.seek(0); f.write(txt); f.truncate()
+    _git(root, ["add", "--", "_share/讨论板.md"])
+    assert sh.staged_post_roles(root) == ["协作"]
+    r = _git(root, ["commit", "-m", "板桥自帖"],
+             env={**os.environ, **git_id.env_pairs(*BANQIAO)})
+    assert r.returncode == 0, r.stdout + r.stderr
