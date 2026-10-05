@@ -185,3 +185,36 @@ def test_cli_env_prints_sourceable_lines(capsys):
     assert git_id.main(["env", "--role", "collab"]) == 0
     out = capsys.readouterr().out
     assert 'export GIT_CONFIG_VALUE_0="板桥"' in out
+
+
+# ---------------- owner：花名册字典反查（卡 SIGN-HOOK / R393①） ----------------
+def test_owner_identity_accepts_all_spellings():
+    assert git_id.owner_identity("板桥") == ("板桥", "banqiao@the-world.local")
+    assert git_id.owner_identity("[协作]") == ("板桥", "banqiao@the-world.local")
+    assert git_id.owner_identity("collab") == ("板桥", "banqiao@the-world.local")
+    assert git_id.owner_identity("轻舟 ⚡") == ("轻舟", "qingzhou@the-world.local")
+    assert git_id.owner_identity("PI·fish(1)") == ("fish(1)", "pi@the-world.local")
+
+
+def test_owner_identity_fail_loud():
+    for bad in ("查无此人", "", None):
+        with pytest.raises(git_id.GitIdError) as e:
+            git_id.owner_identity(bad)
+        assert e.value.code == 1
+    with pytest.raises(git_id.GitIdError):        # [联网] 花名"待取" ⇒ 不猜邮箱
+        git_id.owner_identity("web")
+
+
+def test_roster_identities_covers_registry():
+    import onboard
+    table = git_id.roster_identities()
+    for key, v in onboard.ROLE_REGISTRY.items():
+        assert table[key.lower()] == (key, v["花名"], v["邮箱"])
+        if v["花名"]:
+            assert table[git_id._strip_decor(v["花名"]).lower()] == (key, v["花名"], v["邮箱"])
+
+
+def test_cli_owner_prints_pair(capsys):
+    assert git_id.main(["owner", "砚"]) == 0
+    assert capsys.readouterr().out.strip() == "砚\tyan@the-world.local"
+    assert git_id.main(["owner", "幽灵"]) == 1

@@ -72,6 +72,67 @@ def all_role_emails(root: str = DEFAULT_ROOT) -> dict:
     return {k: (v.get("花名"), v.get("邮箱")) for k, v in onboard.ROLE_REGISTRY.items()}
 
 
+def _strip_decor(s: str) -> str:
+    """去掉花名/署名里的装饰：`[协作]`→`协作`、`轻舟 ⚡`→`轻舟`。"""
+    return re.sub(r"\s+", "", (s or "").strip("[]【】 ")).strip()
+
+
+def roster_identities(root: str = DEFAULT_ROOT) -> dict:
+    """花名册字典（R393①）：`别名（小写去装饰）→ (角色键, 花名, 邮箱)`。
+
+    别名 = 角色键 + 花名 + 板面署名；邮箱不合规的角色（如 [联网] 待取花名）只登记不留空占位。
+    """
+    sys.path.insert(0, _HERE)
+    import onboard
+    out = {}
+    for key, v in onboard.ROLE_REGISTRY.items():
+        name, email = v.get("花名") or "", v.get("邮箱") or ""
+        for alias in (key, name, v.get("署名") or ""):
+            a = _strip_decor(alias).lower()
+            if a:
+                out.setdefault(a, (key, name, email))
+    return out
+
+
+def owner_identity(owner: str, root: str = DEFAULT_ROOT) -> tuple:
+    """卡上/人给的负责人串 → (花名, 邮箱)。
+
+    接受：角色键（`collab`）/ 花名（`板桥`、`轻舟 ⚡`）/ 板面署名（`[协作]`）/
+    组合写法取第一段（`PI·fish(1)`→fish(1)，`轻舟/澜舟`→轻舟）。
+    花名未定或邮箱不合规 ⇒ 抛错（fail-loud，不猜邮箱）。
+    """
+    raw = (owner or "").strip()
+    if not raw:
+        raise GitIdError("负责人为空 —— 给 --owner <花名|角色键|板面署名>")
+    table = roster_identities(root)
+    hits = None
+    for part in re.split(r"[/／,，、]|\s+", raw):
+        if not part:
+            continue
+        cand = table.get(_strip_decor(part).lower())
+        if cand is None:
+            for seg in re.split(r"[·・|]", part):
+                cand = table.get(_strip_decor(seg).lower())
+                if cand:
+                    break
+        if cand is None:
+            continue
+        hits = cand if hits is None else hits
+        break
+    if hits is None:
+        raise GitIdError(
+            f"花名册查不到负责人 {owner!r}；在册花名："
+            f"{', '.join(sorted({v[1] for v in table.values() if v[1]}))}")
+    key, name, email = hits
+    if not name or name == "待取":
+        raise GitIdError(f"角色 {key}（{name or '(无名)'}）花名未定 ⇒ 无法署名；"
+                         f"请先在花名册/onboard.ROLE_REGISTRY 定名")
+    if not EMAIL_RE.match(email):
+        raise GitIdError(f"角色 {key} 的邮箱字段不合规：{email!r}"
+                         f"（应为 <花名拼音>@the-world.local；R370）")
+    return name, email
+
+
 # ---------------- 注入（env）与落盘（署名文件） ----------------
 def env_pairs(name: str, email: str) -> dict:
     """git 官方 env 配置注入：等价于所有命令自动带 `-c user.name=… -c user.email=…`。"""
@@ -213,6 +274,12 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_owner(args) -> int:
+    name, email = owner_identity(args.owner, os.path.abspath(args.root))
+    print(f"{name}\t{email}")
+    return 0
+
+
 def cmd_env(args) -> int:
     name, email = role_identity(args.role, os.path.abspath(args.root))
     print(shell_lines(name, email), end="")
@@ -251,6 +318,11 @@ def main(argv=None) -> int:
     p.add_argument("--name", default=None)
     p.add_argument("--email", default=None)
     p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("owner", parents=[common],
+                       help="花名/板面署名/角色键 → 花名+邮箱（花名册字典反查）")
+    p.add_argument("owner")
+    p.set_defaults(fn=cmd_owner)
 
     p = sub.add_parser("env", parents=[common], help="打印 export 行（可 source）")
     p.add_argument("--role", required=True)
