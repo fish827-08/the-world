@@ -181,19 +181,81 @@ def test_plan_identity_role_wins():
     assert wt.plan_identity("板桥", "b@the-world.local", "collab")["action"] == "role"
     assert wt.plan_identity("板桥", "b@the-world.local")["action"] == "set"
     assert wt.plan_identity("板桥", None, None)["action"] == "bad"
+    # R393①：--owner 走花名册反查；与 --role 同时给 ⇒ 拒绝（不猜人要哪个）
+    assert wt.plan_identity(None, None, None, "板桥")["action"] == "owner"
+    assert wt.plan_identity(None, None, "collab", "板桥")["action"] == "bad"
 
 
-def test_setup_with_role_writes_sign_file_not_shared_config(repo, capsys):
-    """--role ⇒ 写**本树**署名文件（可 source），不碰同机共享的 local config。"""
+def test_setup_with_role_writes_tree_config_not_shared_config(repo, capsys):
+    """--role ⇒ 写本树署名文件 + **本树独占** config.worktree；主树身份一点不动。
+
+    🔴 R393① 之后判据升级：不是"谁都不写"，而是"只写自己那棵树"——
+    隔离证明 = 主工作树 `git config user.name` 前后一致（R371 竞写病灶不得复发）。
+    """
     wt_dir = os.path.join(repo, ".worktrees", "R359-T")
-    before = wt.current_identity(repo)          # 仓库现有身份（可能来自全局 config）
+    before = wt.current_identity(repo)          # 主树身份（可能来自全局 config）
     assert wt.main(["setup", "R359-T", "--root", repo, "--role", "collab"]) == 0
     out = capsys.readouterr().out
     assert "本树署名文件已生成" in out and "板桥" in out
     import git_id
     assert git_id.load_sign_file(wt_dir) == ("板桥", "banqiao@the-world.local")
-    # 🔴 共享 config 必须原样未动 —— R371 竞写病灶（A 设板桥、B 设砚，谁后写谁赢）不得复发
-    assert wt.current_identity(wt_dir) == before
+    assert wt.current_identity(wt_dir) == ("板桥", "banqiao@the-world.local")
+    assert wt.current_identity(repo) == before, "主树身份被覆写 ⇒ R371 竞写复发"
+
+
+def test_setup_owner_by_hua_ming(repo, capsys):
+    """R393①：`--owner <花名>` 按花名册字典反查邮箱并写本树署名（免逐命令 -c）。"""
+    wt_dir = os.path.join(repo, ".worktrees", "R393")
+    assert wt.main(["setup", "R393", "--root", repo, "--owner", "板桥"]) == 0
+    out = capsys.readouterr().out
+    assert "banqiao@the-world.local" in out and "免逐命令 -c" in out
+    assert wt.current_identity(wt_dir) == ("板桥", "banqiao@the-world.local")
+    import git_id
+    assert git_id.load_sign_file(wt_dir) == ("板桥", "banqiao@the-world.local")
+
+
+def test_setup_owner_accepts_board_signature_and_combos(repo, capsys):
+    """负责列里的写法（`[协作]` / `PI·fish(1)` / 带 emoji 的 `轻舟 ⚡`）都认。"""
+    for card, owner, want in (("K1", "[协作]", "板桥"),
+                              ("K2", "PI·fish(1)", "fish(1)"),
+                              ("K3", "轻舟 ⚡", "轻舟")):
+        assert wt.main(["setup", card, "--root", repo, "--owner", owner,
+                        "--no-tree-config"]) == 0
+        capsys.readouterr()
+        import git_id
+        assert git_id.load_sign_file(os.path.join(repo, ".worktrees", card))[0] == want
+
+
+def test_setup_owner_unknown_fails_loud(repo, capsys):
+    assert wt.main(["setup", "R9", "--root", repo, "--owner", "查无此人"]) == 1
+    assert "花名册查不到" in capsys.readouterr().err
+
+
+def test_setup_owner_and_role_are_mutually_exclusive(repo, capsys):
+    assert wt.main(["setup", "R9", "--root", repo, "--owner", "板桥",
+                    "--role", "collab"]) == 1
+    assert "二选一" in capsys.readouterr().err
+
+
+def test_setup_no_tree_config_keeps_shared_config(repo, capsys):
+    """--no-tree-config ⇒ 只写署名文件，不触发 config.worktree / 不碰 extensions 开关。"""
+    before = wt.current_identity(repo)
+    wt_dir = os.path.join(repo, ".worktrees", "R394")
+    assert wt.main(["setup", "R394", "--root", repo, "--owner", "板桥",
+                    "--no-tree-config"]) == 0
+    assert "--no-tree-config" in capsys.readouterr().out
+    assert wt.current_identity(wt_dir) == before        # 本树也没被写
+
+
+def test_apply_tree_identity_reports_switch_flip(repo):
+    """开关前后状态必须如实回报（实测：git 不会自动开 extensions.worktreeConfig）。"""
+    assert wt.main(["setup", "R395", "--root", repo, "--owner", "板桥",
+                    "--no-tree-config"]) == 0
+    wt_dir = os.path.join(repo, ".worktrees", "R395")
+    res = wt.apply_tree_identity(wt_dir, "板桥", "banqiao@the-world.local")
+    assert res["ok"] is True, res
+    assert res["scope_after"] == "true"
+    assert wt.current_identity(wt_dir) == ("板桥", "banqiao@the-world.local")
 
 
 def test_setup_with_undecided_role_fails_loud(repo, capsys):

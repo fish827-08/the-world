@@ -15,9 +15,12 @@
 | `tools/board_check.py` | 板面体检（大小/署名/时钟/置顶/锁/断链/**F-R24**）+ 协作成本度量（`metrics`）+ **任务卡池四条异常（B3）** |
 | `tools/onboard.py` | 新会话开场提示词生成器（6 角色，角色表同步花名册） |
 | `templates/新人入门包模板.md` | 派工包/开场提示词模板 |
-| `tools/worktree.py` | **隔离工作树三命令（B1）**：`setup/enter/clean`，目录 `.worktrees/`、显式指主仓 `.venv`、**不实现 prune** |
+| `tools/worktree.py` | **隔离工作树三命令（B1）**：`setup/enter/clean`，目录 `.worktrees/`、显式指主仓 `.venv`、**不实现 prune**；`setup --owner <花名>` 写**本树独占**署名（R393①，免逐命令 `-c`） |
 | `tools/task_card.py` | **任务卡状态机（B2）**：`add/claim/done/verify/status/stale`，存 `_share/任务卡.md`（一行一卡 + 字符上限） |
-| `tests/` | 99 例 pytest（纯标准库，无需安装依赖） |
+| `tools/git_id.py` | 署名注入与提交前校验（R371①/R393①）：`show/env/verify/owner`；花名册字典反查（花名/板面署名/角色键 → 花名+邮箱） |
+| `tools/sign_hook.py` | **提交署名闸门判定器（R393②③）**：作者位 ∈ 花名册 且（在 `.worktrees/<卡号>` 里）= 该卡负责人；主树/无卡降级为**警告**；`check [--root] [--json]` |
+| `tools/install_git_hook.py` | 闸门钩子安装器（R393②）：`install/status/remove`；marker 幂等、**他人钩子拒绝覆盖**、卸载也备份 |
+| `tests/` | 159 例 pytest（纯标准库，无需安装依赖） |
 
 ## 快速上手
 
@@ -46,8 +49,16 @@ python collab-toolkit/tools/onboard.py --role collab --net
 
 # 隔离工作树（B1：并发开发各占一室，主工作区 checkout 该分支会被 git 拒绝）
 python.exe collab-toolkit/tools/worktree.py setup R359-B1
+python.exe collab-toolkit/tools/worktree.py setup R359-B1 --owner 板桥   # R393①：本树署名自动带上
 python.exe collab-toolkit/tools/worktree.py enter R359-B1    # 打印隔离目录
 python.exe collab-toolkit/tools/worktree.py clean R359-B1   # 清理；提交保留在分支
+
+# 署名闸门（R393②：每机每仓装一次；.git/hooks 不进版本库）
+python.exe collab-toolkit/tools/install_git_hook.py install   # 署错名 ⇒ 提交不出去
+python.exe collab-toolkit/tools/install_git_hook.py status
+python.exe collab-toolkit/tools/install_git_hook.py remove    # 卸载（自动备份原钩子）
+python.exe collab-toolkit/tools/sign_hook.py check            # 手动体检当前树作者位
+python.exe collab-toolkit/tools/git_id.py owner 砚            # 花名册字典反查花名→邮箱
 
 # 任务卡（B2：把"做到哪了"变成机器可读的一行卡，写 _share/ 自带锁）
 python.exe collab-toolkit/tools/task_card.py add R359-B2 --goal "目标" --accept "验收"
