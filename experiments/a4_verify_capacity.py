@@ -1402,6 +1402,25 @@ def main() -> None:
             ap.error("--rd-block-rows/--rd-block-cols 必须 ≥ 1")
         if args.rd_sample_every < 1:
             ap.error("--rd-sample-every 必须 ≥ 1")
+        # 🔴 C-A（镜队列④阻塞 / PI R391 采②）：≥3 窗 ⇒ write_run_summary 收尾走
+        #   `scipy.stats.spearmanr`（:479 惰性导入）。缺 scipy 时若不拦，崩溃落在
+        #   **跑完之后的收尾段**（侧车二/manifest/provenance 全丢 = 最坏位置）。
+        #   启动期 fail-fast，不把崩溃留到最后一公里。窗数上界 = ceil(ticks/sample)：
+        #   实跑窗 = floor(ticks/sample)（整窗）+ 最多 1（末尾残窗，仅当剩杀非空）。
+        _plan_windows = -(-int(args.ticks) // int(args.rd_sample_every))
+        if _plan_windows >= 3:
+            try:
+                import scipy.stats  # noqa: F401
+            except ImportError:
+                ap.error(
+                    f"--rd-instruments 计划窗数 ceil(ticks/rd-sample-every)="
+                    f"{_plan_windows} ≥3：收尾块排序稳定性需要 scipy（spearmanr），"
+                    f"但本环境无 scipy。若放任，崩溃会发生在**跑完收尾段**"
+                    f"（侧车二/manifest/provenance 全丢）。"
+                    f"⇒ 二选一：装 scipy（pip install scipy）／减窗到 ≤2"
+                    f"（--ticks ≤ {2 * int(args.rd_sample_every)} 或调大 "
+                    f"--rd-sample-every）。"
+                )
     # ── 🔴 13.8 工具侧 fail-loud（设计稿 §3.5 的 M2 前置版）────────────────────
     # 引擎侧 M2 已拦"enabled ∧ 无季节"，但**工具侧也要拦**：否则命令行给
     # `--migration` 忘了 `--tilt-deg`，报错信息指向"引擎构造失败"，运维会误以为

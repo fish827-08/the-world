@@ -27,14 +27,19 @@
 
 ⚠️ 本文件 = 脚手架（骨架 + 关键用例）；T5/T6/T10 的完整统计测试需等砚预注册数值后补全。
 ⚠️ F2/F8 的 subprocess 用例各起一次 a4 主进程（mini 5t），秒级。
+🔴 镜审三阻塞（R391）：C-A = ≥3 窗 scipy 启动期 fail-fast（TestCAFailFast，双互补例）；
+C-B = 两处 append 记账对账守（T11b 默认档 site-1 + wound 档 site-2）；
+C-C = T13 独立期望值（mini/61×125/480×960 三档手算常量表，弃同义反复）。
 """
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -120,21 +125,71 @@ class TestBlockGeometry:
         assert rd._block_map[(rows - 1) * cols] == 12  # (rows-1, 0)
         assert rd._block_map[rows * cols - 1] == 15  # (rows-1, cols-1)
 
-    def test_t13_no_hardcoded_120(self):
-        """T13：分块公式不硬编码 120（mini 世界 cols=120 与 480 世界 cols=960
-        必须同口径）。验算：block_map 用 world.rows/cols 现算。"""
+    def test_t13_mini_hand_constant_table(self):
+        """T13（C-C 修）：**独立期望值**——手算常量表，不重写公式（旧例用 rd._cols
+        重算同一式 = 同义反复，变异 M4 0 红）。mini 60×120 / 4×4：
+        行带宽 15（界 14|15, 29|30, 44|45）、列带宽 30（界 29|30, 59|60, 89|90）。"""
         e = _engine_mini()
+        assert (e.world.rows, e.world.cols) == (60, 120), "档位漂移：本表只对 60×120"
         rd = _make_rd(e)
-        # 手算：用 world.rows/cols 公式
-        cols = rd._cols
-        rows = rd._rows
-        flat_idx = np.arange(rd._n_cells, dtype=np.int64)
-        row = flat_idx // cols
-        col = flat_idx % cols
-        lat_band = (row * rd.block_rows) // rows
-        lon_band = (col * rd.block_cols) // cols
-        expected = lat_band * rd.block_cols + lon_band
-        np.testing.assert_array_equal(rd._block_map, expected)
+        # (row, col) → 手算 block = lat_band*4 + lon_band（期望全为字面量）
+        cases = {
+            (0, 0): 0, (0, 29): 0, (0, 30): 1, (0, 59): 1,
+            (0, 60): 2, (0, 89): 2, (0, 90): 3, (0, 119): 3,
+            (14, 0): 0, (15, 0): 4, (29, 0): 4, (30, 0): 8,
+            (44, 0): 8, (45, 0): 12, (59, 0): 12, (59, 119): 15,
+        }
+        for (r, c), want in cases.items():
+            got = int(rd._block_map[r * 120 + c])
+            assert got == want, f"({r},{c}) ⇒ {got} ≠ 手算 {want}"
+        # 聚合锚：每块 15×30 = 450 格（独立于映射公式的分布校验）
+        counts = np.bincount(rd._block_map, minlength=rd.n_blocks)
+        assert counts.tolist() == [450] * 16
+
+    def test_t13_nondivisible_61x125_hand_table(self):
+        """T13（C-C 修）：**非整除档**手算表（档宽盲区补例）——rows=61 不被 4 整除、
+        cols=125 不被 4 整除。整数除法 `(row*4)//61` 的带界与"先 rows//4 再除"的
+        朴素方案**不同**：lat1 起于 row=16（非 15）、lat3 含 row=60（朴素方案越界）。
+        手算：lat 带起 0/16/31/46（宽 16/15/15/15）；lon 带起 0/32/63/94（宽 32/31/31/31）。"""
+        stub = SimpleNamespace(world=SimpleNamespace(
+            rows=61, cols=125, n_cells=61 * 125))
+        rd = _make_rd(stub)
+        cases = {
+            (0, 0): 0, (0, 31): 0, (0, 32): 1,
+            (15, 0): 0, (16, 0): 4, (16, 31): 4, (16, 32): 5,
+            (30, 62): 5, (31, 0): 8, (31, 63): 10,
+            (45, 93): 10, (46, 0): 12, (46, 94): 15,
+            (60, 0): 12, (60, 124): 15,
+        }
+        for (r, c), want in cases.items():
+            got = int(rd._block_map[r * 125 + c])
+            assert got == want, f"({r},{c}) ⇒ {got} ≠ 手算 {want}"
+        # 聚合锚（手算）：lat0 行宽 16；lon0 列宽 32
+        counts = np.bincount(rd._block_map, minlength=rd.n_blocks)
+        assert counts.tolist() == [512, 496, 496, 496,
+                                   480, 465, 465, 465,
+                                   480, 465, 465, 465,
+                                   480, 465, 465, 465]
+        assert int(counts.sum()) == 61 * 125
+
+    def test_t13_480x960_pure_mapping(self):
+        """T13（C-C 修）：**正式档 480×960** 纯映射（stub 世界，不真跑 480×960）——
+        cols=960 ≠ 120 ⇒ 旧 `//120` 硬编码在本档必错。带 = rows 120 / cols 240。"""
+        stub = SimpleNamespace(world=SimpleNamespace(
+            rows=480, cols=960, n_cells=480 * 960))
+        rd = _make_rd(stub)
+        cases = {
+            (0, 0): 0, (0, 239): 0, (0, 240): 1, (0, 479): 1,
+            (0, 480): 2, (0, 719): 2, (0, 720): 3, (0, 959): 3,
+            (119, 0): 0, (120, 0): 4, (239, 0): 4, (240, 0): 8,
+            (359, 0): 8, (360, 0): 12, (479, 0): 12, (479, 959): 15,
+        }
+        for (r, c), want in cases.items():
+            got = int(rd._block_map[r * 960 + c])
+            assert got == want, f"({r},{c}) ⇒ {got} ≠ 手算 {want}"
+        counts = np.bincount(rd._block_map, minlength=rd.n_blocks)
+        assert counts.tolist() == [120 * 240] * 16
+        assert int(counts.sum()) == 480 * 960
 
 
 # ---- T11：D-1 钩子三连 --------------------------------------------------
@@ -186,6 +241,35 @@ class TestD1Hook:
                    and isinstance(t[2], int) for t in log)
         ticks = [t[2] for t in log]
         assert min(ticks) >= 1 and max(ticks) <= 100
+        # 🔴 C-B（镜队列④阻塞 / R391）：钩子记账 vs 引擎计数器**对账守**——两处
+        #   append 点与 `_ec_prey_kill_n += 1` 同处递进 ⇒ 恒等。M1 型变异（摘
+        #   任一 append）⇒ 本行必红（此前只断 len>0 ⇒ 33 passed/0 红）。
+        #   默认档 wound 关 ⇒ 本档覆盖 site-1（成功一击）；site-2（血条致死）
+        #   由下条 wound 档覆盖。
+        assert len(log) == int(e._ec_prey_kill_n), (
+            f"钩子记账失配：len(log)={len(log)} vs "
+            f"_ec_prey_kill_n={int(e._ec_prey_kill_n)}（append 与计数脱钩 = M1 型变异）"
+        )
+
+    def test_cb_wound_death_site_two_accounting(self):
+        """C-B 补：**血条致死 site-2** 记账对账守（默认档 wound 关 ⇒ site-2 不开火，
+        仅上条挡不住摘 site-2 append 的变异）。wound_base=1.0（config 上限）⇒ 伤口
+        1–2 次即致死；seed 221/100t 在 M-site2 摘除实验中实测 len(log)=35 vs
+        kill_n=54（=19 个 site-2 击杀、wounds=64）⇒ 本档对 site-2 强区分。"""
+        e = build("off", False, 221, 100, max_count=500,
+                  wound_enabled=True, wound_base=1.0)
+        rd = _make_rd(e)
+        rd.install_hook(e)
+        for _ in range(100):
+            e.step()
+        log = e._rd_pred_kill_log
+        # 覆盖自证：致伤分支确实开火（若恒 0 ⇒ 本档退化为只覆盖 site-1，
+        # 须换配置——fail-loud，不许静默失去 site-2 覆盖）
+        assert e._duel["wounds"] > 0, "本档未发生任何致伤 ⇒ site-2 未被覆盖"
+        assert len(log) == int(e._ec_prey_kill_n), (
+            f"钩子记账失配：len(log)={len(log)} vs "
+            f"_ec_prey_kill_n={int(e._ec_prey_kill_n)}（site-2 append 与计数脱钩）"
+        )
 
     def test_t11c_rust_fail_loud(self):
         """T11c：Rust 路径 + rd ⇒ SystemExit。"""
@@ -553,3 +637,45 @@ class TestManifestGating:
         proc, _ = _run_a4(tmp_path, ["--device", "s2"], name="bad")
         assert proc.returncode != 0
         assert "--pop" in proc.stderr
+
+
+# ---- C-A：≥3 窗 scipy 依赖启动期 fail-fast ---------------------------------
+
+_HAS_SCIPY = importlib.util.find_spec("scipy") is not None
+
+# ceil(6/2) = 3 窗（t=2/4/6）⇒ 收尾块排序稳定性走 scipy（spearmanr）
+_CA_ARGS = ["--rd-instruments", "--smell-channels", "food,risk,kin",
+            "--ticks", "6", "--rd-sample-every", "2"]
+
+
+class TestCAFailFast:
+    """C-A（镜队列④阻塞 / PI R391 采②）：≥3 窗计划 + 无 scipy ⇒ **启动期** rc=2
+    （不留到跑完收尾段崩——那会丢侧车二/manifest/provenance）。双互补例。"""
+
+    def test_ca_no_scipy_fail_fast_rc2(self, tmp_path):
+        """无 scipy 档：rc=2（argparse 错）且**跑都没跑**——主表/侧车一均不存在。
+        区分度：收尾段崩（旧行为）⇒ rc=1 且侧车一已在、主表已写满。"""
+        if _HAS_SCIPY:
+            pytest.skip("本机有 scipy ⇒ fail-fast 分支不可达（互补例见下条）")
+        proc, out = _run_a4(tmp_path, _CA_ARGS, name="ca_nosp")
+        assert proc.returncode == 2, (
+            f"应启动期 argparse 拒跑 rc=2，实得 {proc.returncode}："
+            f"{proc.stderr[-800:]}")
+        assert "scipy" in proc.stderr, "报错须点名 scipy（可诊断性）"
+        assert not out.with_name(out.stem + "_rd_windows.csv").exists(), \
+            "侧车一已落盘 ⇒ 是收尾段崩（rc 仍≠0 但位置最坏），不是启动期拦"
+        assert not out.exists(), "主表已写 ⇒ 已起跑，非启动期拦截"
+
+    def test_ca_with_scipy_three_windows_complete(self, tmp_path):
+        """有 scipy 档（互补）：同命令 ⇒ rc=0 正常收尾；侧车二行 rd_n_windows≥3
+        （证明 fail-fast 只拦缺依赖，不误伤 ≥3 窗正常路径）。"""
+        if not _HAS_SCIPY:
+            pytest.skip("本机无 scipy ⇒ 本档不可达（fail-fast 例见上条）")
+        proc, out = _run_a4(tmp_path, _CA_ARGS, name="ca_ok")
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        run_csv = out.with_name(out.stem + "_rd_run.csv")
+        assert run_csv.exists(), "≥3 窗跑通 ⇒ 侧车二必须在"
+        with run_csv.open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        assert int(rows[0]["rd_n_windows"]) >= 3, rows
+        assert _summary_of(out)["switches"]["rd_hook_installed"] is True
