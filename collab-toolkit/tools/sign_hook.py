@@ -20,6 +20,9 @@
 - 有卡 + 作者位 = `pi@the-world.local`（PI/fish 白名单）⇒ 放行 + 提示（合并/裁定动作本属 PI）
 - 无卡 / 主树 ⇒ 只警告（rc=0），打印应然与实然
 - 卡负责人 与 本树署名文件 不一致 ⇒ 警告（双锁漂移：卡转人了或树建错了）
+- 🔴 **发帖提交**（暂存区新增 `_share/讨论板.md` 帖，SIGN-BOARD-ENFORCE）⇒ 无卡/主树也**硬拦**：
+  作者名不在花名册（含真人 gitee 账号）rc=2；作者位 ≠ 帖署名头解析（在册他人）rc=2；
+  头花名册查不到 ⇒ 只警告（头文本自由，作者位才是权属依据）。非发帖的主树维护提交不受影响。
 
 退出码：0 放行（含警告）/ 1 用法或环境错误 / 2 拦截。
 
@@ -126,6 +129,36 @@ def author_ident(root: str) -> tuple:
     return (m.group(1).strip(), m.group(2).strip()) if m else (out, "")
 
 
+# ---------------- 发帖提交探测（SIGN-BOARD-ENFORCE：讨论板新帖 ⇒ 硬闸升格） ----------------
+POST_BOARD_PATH = "_share/讨论板.md"
+POST_ADD_HEADER_RE = re.compile(r"^\+\s*###\s*\[([^\]]+)\]\s*·", re.M)
+
+
+def staged_post_roles(root: str) -> list | None:
+    """暂存区里 讨论板 **新增帖** 的署名头角色列表；None ⇒ 本提交不是发帖（不升格）。
+
+    只看 `+` 行（改他人旧帖/删除不算新帖）；路径限定讨论板。git 失败/无 diff ⇒
+    保守返回 None（宁漏不误伤非发帖提交；发帖主路径的 fail-loud 在 board_post 硬闸）。
+    """
+    rc, out, _ = _git(root, ["-c", "core.quotepath=false", "diff", "--cached",
+                             "--", POST_BOARD_PATH])
+    if rc != 0 or not out.strip():
+        return None
+    return [r.strip() for r in POST_ADD_HEADER_RE.findall(out)]
+
+
+def post_declarations(tl: str, roles: list) -> list:
+    """把新增帖署名头解析成 (角色原文, 花名册解析结果|None)；judge 保持纯函数。"""
+    import git_id
+    decls = []
+    for role in roles:
+        try:
+            decls.append((role, tuple(git_id.owner_identity(role, tl))))
+        except Exception:
+            decls.append((role, None))
+    return decls
+
+
 # ---------------- 应然署名 ----------------
 def expected_from_sign_file(tl: str) -> tuple:
     import git_id
@@ -183,27 +216,36 @@ def _match(got: tuple, pairs: list) -> bool:
 
 
 def judge(name: str, email: str, card: str | None, expected: dict,
-          roster_names: set) -> dict:
+          roster_names: set, post_decls: list | None = None) -> dict:
     """→ {"level": ok|warn|block, "findings": [...], "fix": [...]}。
 
-    findings 每条 {level, msg}；只有 `hard`（**有卡**）时才产 block 条目。
+    findings 每条 {level, msg}；`hard`（**有卡**）或 **发帖提交**（post_decls 非 None，
+    SIGN-BOARD-ENFORCE：暂存区新增讨论板帖）时产 block 条目。
     """
     hard = card is not None
+    post = post_decls is not None
     findings = []
 
     def add(level, msg):
         findings.append({"level": level, "msg": msg})
 
-    downgraded = "（无卡/主树 ⇒ 警告级不阻断，R393③）" if not hard else ""
-    lvl_block = "block" if hard else "warn"
+    if not hard and not post:
+        downgraded = "（无卡/主树 ⇒ 警告级不阻断，R393③）"
+    elif post and not hard:
+        downgraded = "（发帖提交 ⇒ 无卡也硬拦，SIGN-BOARD-ENFORCE）"
+    else:
+        downgraded = ""
+    lvl_block = "block" if (hard or post) else "warn"
     card_pairs = [tuple(p) for p in expected.get("card_pairs", [])]
     file_pair = expected.get("file")
     pairs = card_pairs or ([tuple(file_pair)] if file_pair else [])
     source = "任务卡负责人" if card_pairs else ("署名文件" if file_pair else None)
 
     if not name and not email:
-        add("warn", "读不到作者位（git var GIT_AUTHOR_IDENT 失败）" + downgraded)
-        lvl = "block" if hard else "warn"
+        add(lvl_block if (hard or post) else "warn",
+            "读不到作者位（git var GIT_AUTHOR_IDENT 失败）"
+            + ("" if (hard or post) else downgraded))
+        lvl = "block" if (hard or post) else "warn"
         return {"level": lvl, "findings": findings,
                 "fix": FIX_HINTS if lvl == "block" else []}
 
@@ -225,8 +267,23 @@ def judge(name: str, email: str, card: str | None, expected: dict,
             add("ok", f"作者位 = 应然（{name} <{email}>，来源 {source}）")
     elif hard:
         add("warn", f"卡 {card} 既无「负责」行也无本树署名文件 ⇒ 无应然值可对照（只查了花名册）")
+    elif post:
+        add("warn", "发帖提交无卡无署名文件 ⇒ 应然只按'作者∈花名册 且 =署名头'核"
+                    "（手工 `-c` 发帖的双保险口径，R371）")
     else:
         add("warn", "无卡且无署名文件 ⇒ 无应然值可对照" + downgraded)
+    if post:
+        for role, decl in post_decls:
+            if decl is None:
+                add("warn", f"帖署名头 [{role}] 花名册查不到 ⇒ 头文本放行"
+                            "（作者位已按花名册核过；R370：非在册角色不得长期占用）")
+            elif not _match(got, [decl]):
+                add("block", f"发帖署名头 [{role}] 解析为 {decl[0]} <{decl[1]}>，"
+                             f"作者位却是 {name} <{email}> —— 冒充在册他人，拦"
+                             "（连犯三证 4d4f9b6/2d8c677/a5981a0 同型）。"
+                             "确为代贴请以本人署名发帖并在正文注明代发")
+            else:
+                add("ok", f"发帖署名头 [{role}] = 作者位（{name} <{email}>）")
     for note in expected.get("notes", []):
         add("warn", note)
     if card_pairs and file_pair and not _match(tuple(file_pair), card_pairs):
@@ -278,8 +335,11 @@ def evaluate(root: str | None = None) -> dict:
     card = card_of(tl, branch, main)
     exp = expected_identities(tl, card, main)
     name, email = author_ident(base)
-    v = judge(name, email, card, exp, roster_names(tl))
+    roles = staged_post_roles(tl)
+    decls = post_declarations(tl, roles) if roles is not None else None
+    v = judge(name, email, card, exp, roster_names(tl), post_decls=decls)
     v.update({"toplevel": tl, "branch": branch, "card": card,
+              "post_decls": decls,
               "author": {"name": name, "email": email},
               "expected": {**exp, "pairs": (exp["card_pairs"] or
                                             ([exp["file"]] if exp["file"] else [])),
