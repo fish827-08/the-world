@@ -257,6 +257,53 @@ def test_t6c_empty_rows_nan_with_note():
     assert out["emit_rate_note"] == "nan:no_sample_rows"
 
 
+# ---------------- T6d/T6e（A1：窗式 = 已锁 index 式 floor，PI 复审裁定 21:4x）----------------
+
+def _spike_rows(n, spikes):
+    """行 i：events 增量恒 1；person_ticks 增量默认 1，`spikes` 指定的行改为 100。
+
+    尖峰用来把"段边界落在哪一行"变成可读出的数：若边界把尖峰行**包含进段内**，
+    该段分母多出 99 ⇒ 比值明显偏离 1.0。
+    """
+    ev = pt = 0
+    rows = []
+    for i in range(n):
+        ev += 1
+        pt += spikes.get(i, 1)
+        rows.append({"g6_emit_events_cum": ev, "g6_emit_person_ticks_cum": pt})
+    return rows
+
+
+def test_t6d_window_is_floor_index_not_round():
+    """n=30 · frac=0.25 ⇒ k=int(7.5)=**7**（floor），首段行 0..6、末段行 23..29。
+
+    尖峰放在**边界外一行**（row 7 = k 的下一个下标）与**边界基线行**（row 22 =
+    末段前一行）⇒ floor 式两段都干净（=1.0）；round 式 k=8 会把 row 7 吃进首段、
+    把 row 22 吃进末段 ⇒ 两段同时变 8/107 ⇒ 必红。
+    """
+    rows = _spike_rows(30, {7: 100, 22: 100})
+    out = _M0Instruments().emit_pooled(rows, window_frac=0.25)
+    assert out["emit_rate_n_samples"] == 30
+    assert out["emit_rate_first"] == pytest.approx(1.0)       # k=8 ⇒ 8/107=0.0748
+    assert out["emit_rate_last"] == pytest.approx(1.0)        # k=8 ⇒ 8/107=0.0748
+    assert out["emit_rate_ratio"] == pytest.approx(1.0)       # k=8 两段同偏 ⇒ ratio=1（假正常）
+    assert out["emit_events_total"] == 30
+    assert out["emit_person_ticks_total"] == 228              # 7+100+14+100+7
+
+
+def test_t6e_window_below_one_sample_is_nan_not_k1():
+    """n·frac < 1 ⇒ k=0 ⇒ 出 NaN，**不补 k=1**（补 1 即自造口径，与锁定文本分叉）。"""
+    rows = [{"g6_emit_events_cum": e, "g6_emit_person_ticks_cum": pt}
+            for e, pt in zip((2, 4, 6), (10, 20, 30))]          # n=3 ⇒ int(0.75)=0
+    out = _M0Instruments().emit_pooled(rows, window_frac=0.25)
+    assert out["emit_rate_n_samples"] == 3
+    for key in ("emit_rate_first", "emit_rate_last", "emit_rate_ratio"):
+        assert math.isnan(out[key]), key                       # k=1 时 first=0.2 ⇒ 必红
+    assert out["emit_rate_note"] == "nan:window_below_one_sample"
+    assert out["emit_events_total"] == 6                       # 总量键不丢（summary 键集稳定）
+    assert out["emit_person_ticks_total"] == 30
+
+
 # ---------------- T7 ----------------
 
 def test_t7_tap_installs_and_restores():

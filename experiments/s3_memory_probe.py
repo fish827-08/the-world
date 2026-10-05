@@ -831,6 +831,10 @@ class _M0Instruments:
         `rows` = 本 run（本段）全部采样行；段内取**合并比**（ΣΔevents / ΣΔperson_ticks，
         即人·tick 加权）而非逐窗均值 ⇒ 短窗噪声不放大。
         🔴 不裁定：`ratio < 1` 是不是"降"由预注册说，本函数只出数。
+        窗长口径 = **PI 复审裁定（10-05 21:4x，A1）**：照预注册已锁文本的 **index 式**
+        `k = int(n * window_frac)`（floor）。⚠️ 不用 `round`：round 式在 `n ≡ 6 (mod 8)`
+        （如 n=30 ⇒ int 7 / round 8）与锁定文本分叉，判据稳性不押 n 命中。
+        `k == 0`（n 太小、不足一个采样点）⇒ **出 NaN 不补 1**（补 1 = 自造口径）。
         """
         n = len(rows)
         out = {"emit_rate_n_samples": int(n),
@@ -843,7 +847,16 @@ class _M0Instruments:
             out["emit_rate_note"] = ("nan:g6_tap_unavailable" if self.g6_nan
                                      else "nan:no_sample_rows")
             return out
-        k = max(1, int(round(n * float(window_frac))))
+        k = int(n * float(window_frac))          # 已锁 index 式（floor），非 round
+        if k <= 0:
+            # n·window_frac < 1 ⇒ 窗不足一个采样点。不补 k=1（补 1 = 自造口径，
+            # 与已锁文本分叉），直接出 NaN。
+            for key in ("emit_rate_first", "emit_rate_last", "emit_rate_ratio"):
+                out[key] = float("nan")
+            out["emit_rate_note"] = "nan:window_below_one_sample"
+            out["emit_events_total"] = int(rows[-1]["g6_emit_events_cum"])
+            out["emit_person_ticks_total"] = int(rows[-1]["g6_emit_person_ticks_cum"])
+            return out
         if k > n:
             k = n
 
