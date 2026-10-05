@@ -16,13 +16,13 @@
 | 脚本 | 出处（该脚本是这份结论的复算入口） |
 |---|---|
 | `_judge_s2g2.py` | `docs/设计文档/预注册-S2判据②-新装置档-20261002.md` |
-| `_judge_smell4.py` | `docs/R335-气味场四通道批判读-20261002.md` |
-| `_judge_r324.py` | `docs/R324-四条线正式判读与归档-20261002.md` |
+| `_judge_smell4.py` | `docs/判读归档/R335-气味场四通道批判读-20261002.md` |
+| `_judge_r324.py` | `docs/判读归档/R324-四条线正式判读与归档-20261002.md` |
 | `_s3_judge.py` | `docs/实验记录.md` |
 | `_s2_final_judge.py` | `docs/实验记录.md` |
 | `_judge2_snr_probe.py` | `docs/设计文档/预注册-S2判据②-新装置档-20261002.md`（**信噪比 <1 的诊断脚本**） |
-| `_branch_table.py` | `docs/R324-四条线正式判读与归档-20261002.md`（**唯一正确的支别判定**：`bg_production_zero`） |
-| `_analyze_dispersal.py` | `docs/R315-留守型出走型-基因分化检验-20261001.md` |
+| `_branch_table.py` | `docs/判读归档/R324-四条线正式判读与归档-20261002.md`（**唯一正确的支别判定**：`bg_production_zero`） |
+| `_analyze_dispersal.py` | `docs/判读归档/R315-留守型出走型-基因分化检验-20261001.md` |
 | `_run_s2g2.py` | `docs/tasks/run_smell_rd_01.sh` 引用的编排器原型（**注意：新编排器已修正其 R218 bug**） |
 | `_run_on169_172.py` | `_share/讨论板.md`（旗舰 60k on 臂编排） |
 | `_t1b_batch_proto.py` | `_share/讨论板.md`（T1b 批原型） |
