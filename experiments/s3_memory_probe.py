@@ -92,6 +92,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from simulation.sphere_engine import SphereEngine
 from simulation.genes import Gene            # R275 T2：g22 记忆权重基因统计
+# 🔴 S3-RDSWITCH：`--alphabet` 的 choices 用**单一真源**（与引擎构造期校验同表；
+#    本表在 config.py，engine 从其 import ⇒ 两处永不漂移）
+from simulation.config import SIGNAL_ALPHABET_IMPLEMENTED
 from experiments.steady_k_probe import (
     make_cfg, apply_post_build, save_ckpt, load_ckpt,
 )
@@ -107,7 +110,8 @@ from experiments.s2_depletion_probe import (
 #   bg_low_prod_frac=0.0 bg_low_cap_mult=0.0（R326 撤绿洲带；不挂 sparse）
 #   subpos-family：speed_max/gain/subdiv/k/max_count 与 S1_BASE 对齐
 #   （s2_depletion_probe.run_one 亦如此 → subpos=on + 这组参数）
-# 唯一变量 = memory_v2 两臂；rd 两臂均开。
+# 唯一变量 = memory_v2 两臂；rd 两臂均开（S3-RDSWITCH 起可由 --rd-mode/--alphabet
+# 改档，**默认值即此口径** ⇒ 默认路径逐字节等于旧版）。
 DEVICE = dict(
     rows=480, cols=960, patches=1700, pop=10000,
     speed_max=0.125, gain=0.125, subdiv=80, k=2.5, max_count=30000,
@@ -850,7 +854,7 @@ def _load_probe_sidecar(path):
 
 def _config_fingerprint_check(eng, seed, rows, cols, pop, patches, rgm,
                               mem_on, bg_low_prod_frac, bg_low_cap_mult,
-                              weight_gene) -> None:
+                              weight_gene, rd_on, alphabet) -> None:
     """fail-loud 逐字段核对（**慢**，但只在续跑时跑一次）。
 
     为什么不用 `config.fingerprint()` 一把比：本探针在 `make_cfg` 之后**又改了**三个
@@ -868,6 +872,7 @@ def _config_fingerprint_check(eng, seed, rows, cols, pop, patches, rgm,
         "rgm": float(cfg.resources.patch_regrowth_mult),
         "use_sim_core": bool(cfg.simulation.use_sim_core),
         "rd_enabled": bool(cfg.resource_dynamics.enabled),
+        "signal_alphabet": str(cfg.signal_alphabet),
         "bg_production_zero": bool(cfg.resources.bg_production_zero),
         "memory_v2": bool(cfg.info_structure.memory_v2),
         "memory_gradient": str(cfg.info_structure.memory_gradient),
@@ -877,7 +882,8 @@ def _config_fingerprint_check(eng, seed, rows, cols, pop, patches, rgm,
     want = {
         "seed": int(seed), "rows": int(rows), "cols": int(cols),
         "patches": int(patches), "rgm": float(rgm),
-        "use_sim_core": False, "rd_enabled": True, "bg_production_zero": True,
+        "use_sim_core": False, "rd_enabled": bool(rd_on),
+        "signal_alphabet": str(alphabet), "bg_production_zero": True,
         "memory_v2": bool(mem_on),
         "memory_gradient": "orientation" if mem_on else "none",
         "memory_weight_gene": bool(weight_gene and mem_on),
@@ -974,7 +980,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
             prior_rows=None, out_path=None, on_row=None, hr_tracker=None,
-            g22_init=None, m0=None):
+            g22_init=None, m0=None, rd_on=True, alphabet="16"):
     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
 
     🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
@@ -983,7 +989,10 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
       背景：行原本只在 `run_one` 返回后写出 ⇒ run 中途被杀（沙盒 ~74min 清理
       周期）⇒ **已跑的所有采样行永久丢失**，续跑也拿不回来（下一段仍要跑完才写）。
 
-    rd 恒开；mem_on 决定记忆 v2 开关（其余逐字段对齐 ⇒ 单变量）。
+    rd／alphabet（🔴 S3-RDSWITCH）：`rd_on=True` + `alphabet="16"` **默认即旧口径**
+    （rd 恒开、字母表 16）⇒ 默认路径逐字节等于旧版；改档用于对齐 M1 骨架候选
+    （rd off / alphabet 8）。续跑时两参数进 `_config_fingerprint_check` 逐字段核对。
+    mem_on 决定记忆 v2 开关（其余逐字段对齐 ⇒ 单变量）。
     weight_gene（R275 T2）：在 **mem_on 臂**额外打开 `memory_weight_gene`
     （g22 被 13.11 路径消费）⇒ S3.5 记忆基因演化。默认 False ⇒ 逐位等于旧版。
 
@@ -1022,7 +1031,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
                 f"命令行 --sample={int(sample)} ⇒ 行网格会静默错位，用同一个 --sample 再来")
         _config_fingerprint_check(
             eng, seed, rows, cols, pop, patches, rgm, mem_on,
-            bg_low_prod_frac, bg_low_cap_mult, weight_gene)
+            bg_low_prod_frac, bg_low_cap_mult, weight_gene, rd_on, alphabet)
         side = _load_probe_sidecar(_probe_sidecar_path(snapshot_dir, tag))
         init_cap_full = side["init_cap_full"]
         labels = _label_patches(eng.world, eng.resources._patch_mask)
@@ -1047,7 +1056,8 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
          visited_mask, patch_ever_visited, first_visit,
          rows_out), eng = _build_fresh_run(
             seed, rows, cols, pop, patches, rgm, mem_on,
-            bg_low_prod_frac, bg_low_cap_mult, weight_gene, g22_init)
+            bg_low_prod_frac, bg_low_cap_mult, weight_gene, g22_init,
+            rd_on=rd_on, alphabet=alphabet)
     return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
                       labels, n_patch_total, init_cap_full, init_patch_cap,
                       init_cap_sum, visited_mask, patch_ever_visited, first_visit,
@@ -1082,7 +1092,7 @@ def _peek_start_tick(snapshot_dir, tag) -> int:
 
 def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
                      bg_low_prod_frac, bg_low_cap_mult, weight_gene,
-                     g22_init=None):
+                     g22_init=None, rd_on=True, alphabet="16"):
     """首跑：建引擎 + 探针初始累积量（与旧版 `run_one` 逐行等价）。"""
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
@@ -1091,7 +1101,12 @@ def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
         bg_low_prod_frac=bg_low_prod_frac, bg_low_cap_mult=bg_low_cap_mult,
     )
     c.simulation.use_sim_core = False           # memory_v2 fail-loud ① 要求 Python 路径
-    c.resource_dynamics.enabled = True          # S3 主线：rd 开（= S2 处理臂）
+    # S3 主线默认 rd 开（= S2 处理臂）；--rd-mode off 对齐 M1 骨架候选档。
+    # 默认 True ⇒ 与旧版 `= True` 字面等价（同值写入，不改变任何后续行为）。
+    c.resource_dynamics.enabled = bool(rd_on)
+    # 🔴 S3-RDSWITCH：字母表档位（默认 "16" = config 默认 ⇒ 默认路径零 diff）。
+    # 引擎构造期会再校验一次（`sphere_engine` 只收 SIGNAL_ALPHABET_IMPLEMENTED）。
+    c.signal_alphabet = str(alphabet)
     # ---- 记忆两臂（单变量）----
     if mem_on:
         c.info_structure.memory_v2 = True
@@ -1132,14 +1147,16 @@ def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
     n_patch_total = int(uniq0.size)
 
     # 参数一致性自检（防静默换档）
-    assert bool(eng.config.resource_dynamics.enabled) is True, "rd 未开"
+    assert bool(eng.config.resource_dynamics.enabled) is bool(rd_on), "rd 开关未生效"
+    assert str(eng.config.signal_alphabet) == str(alphabet), "alphabet 开关未生效"
     assert bool(eng.config.resources.bg_production_zero) is True, "bgzero 未开"
     assert bool(eng.config.info_structure.memory_v2) is bool(mem_on), "memory_v2 未生效"
 
     # 🔴 R264 自检：S3 装置（bg_low ⇒ ¬bgzero）+ memv2 + rd 只有在**动态质心**开着才合法。
     #    若跑在旧 main（无该字段）或该字段被关 ⇒ 静态质心 + rd 搬移 = 质心静默失效（fail-loud
     #    在旧版会直接炸；新版 dynamic=False 时才炸）。此处显式告警，避免"跑了但结果无效"。
-    if mem_on:
+    #    S3-RDSWITCH：rd off 档无"rd 搬移"⇒ 该失效模式不成立，告警不适用（`and rd_on`）。
+    if mem_on and rd_on:
         _dyn = getattr(eng.config.info_structure, "memory_v2_dynamic_centroid", None)
         if _dyn is None:
             print("  🔴 警告：本 main 无 memory_v2_dynamic_centroid 字段 ⇒ 用的是**静态质心**；"
@@ -1297,6 +1314,29 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
     return rows_out, stop
 
 
+# ---- 🔴 S3-RDSWITCH（2026-10-05）：M1 装置互斥消解用两开关的默认值 ----
+#   rd on / alphabet "16" = 旧口径 ⇒ 默认不进 summary meta（见 `_summary_meta`）。
+_RD_MODE_DEFAULT = "on"
+_ALPHABET_DEFAULT = "16"
+
+
+def _summary_meta(a) -> dict:
+    """summary.json 的 `meta`：**默认值摘除**（保历史批逐字节可比），非默认值照写。
+
+    背景：`meta = vars(args)` 全量 ⇒ 新加 CLI 项**即使走默认、功能关着**也会写进 meta
+    ⇒ 与历史批（M1-SMOKE 8 份、p1c 批等）meta 不再逐字节可比，值班巡检的"装置档回显
+    对比"会读出差异。此处把"等于默认值"的 rd_mode/alphabet 摘掉：默认路径 ⇒ meta 与
+    旧版逐字节一致；显式改档 ⇒ 键在场、值即实际档（可追溯）。与澜舟 G6-EMITWINDOW
+    的 `_summary_meta()` 同名同式（预留了她 `m0_emit_window_frac` 行的并入位）。
+    """
+    meta = dict(vars(a))          # ⚠️ 必须**拷贝**：直接 pop `vars(a)` 会改 namespace，
+    if meta.get("rd_mode") == _RD_MODE_DEFAULT:      # 后续 `a.rd_mode` 读取即炸
+        meta.pop("rd_mode", None)
+    if meta.get("alphabet") == _ALPHABET_DEFAULT:
+        meta.pop("alphabet", None)
+    return meta
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rows", type=int, default=DEVICE["rows"])
@@ -1359,6 +1399,20 @@ def main():
                     help="把**初始** g22（记忆权重基因）钉到该值，之后**自由演化**。"
                          "默认 None = 不改（逐位等价）。用于双端扰动实验：从 0.1 / 0.9 两端出发，"
                          "看是否收敛回同一个最优值（稳定化选择）")
+    # ---- 🔴 S3-RDSWITCH（2026-10-05）：rd / alphabet 两开关 ----
+    #   消解 M1 装置互斥（s3 载体曾硬编码 rd on / 16，与 M1 骨架候选 rd off / 8 打架）。
+    #   默认值 = 旧口径（on / 16）⇒ 不传参逐字节等于旧版；choices 收紧 + 引擎构造期
+    #   再校验 ⇒ 非法档 fail-loud。两键**默认不进** summary meta（`_summary_meta`）。
+    ap.add_argument("--rd-mode", choices=("on", "off"), default=_RD_MODE_DEFAULT,
+                    help="rd（资源动力学）开关：`on` = 旧口径（S3 主线装置，rd 开）；"
+                         "`off` = 对齐 M1-SMOKE 骨架候选档（rd 关、bgzero 照常）。"
+                         "**默认 on = 逐字节等于旧版**。续跑时进指纹逐字段核对")
+    ap.add_argument("--alphabet", choices=SIGNAL_ALPHABET_IMPLEMENTED,
+                    default=_ALPHABET_DEFAULT,
+                    help="信号字母表（R113/R121/R123）：`16` = 旧口径（能量+食物+邻居 4 位）；"
+                         "`8` = B③（能量 2 位 + 记忆位 1 位）；`4` = 仅能量 2 位。"
+                         "**默认 16 = 逐字节等于旧版**。⚠️ `8` ∧ mem_on 臂下 memory_v2 不写"
+                         "`_work_memory` ⇒ 记忆位恒 0（告警不拦，属可测性质，见 P1-a 口径）")
     # ---- 🔴 R358 T4（A1/A2/A3）：M0 仪表（砚 C1 规格；默认关 ⇒ 逐字节等于旧版）----
     ap.add_argument("--m0-instruments", action="store_true",
                     help="每采样点追加 M0 仪表列：g15_mean / g1_entropy + "
@@ -1404,6 +1458,13 @@ def main():
             sys.exit(2)
 
     arms = ([True, False] if a.arms == "both" else [a.arms == "on"])
+    # 🔴 S3-RDSWITCH：alphabet "8" ∧ mem_on 臂 ⇒ 记忆位恒 0。告警**不拦**：这是可测性质
+    #   而非非法配置 —— memory_v2 不写 `_work_memory` ⇒ mem_bit 输入全 -1 ⇒ mem_bit≡0
+    #    （R345 v1.2 P1-a 实测 0% vs 28%）。要非零记忆位请走 mem_off 臂。
+    if a.alphabet == "8" and True in arms:
+        print("  ⚠️ --alphabet 8 ∧ mem_on 臂：memory_v2 下 `_work_memory` 不被写入 ⇒ "
+              "记忆位恒 0（G4=0% 属已知可测性质；测非零记忆位请用 mem_off 臂）。",
+              file=sys.stderr)
     header = ["seed", "arm", "tick", "pop", "global_sat",
               "abs_food", "abs_cap", "cap_lost_frac", "ms_per_tick",
               "n_patches", "patch_sat_mean", "patch_sat_var", "patch_sat_range",
@@ -1429,6 +1490,7 @@ def main():
     print(f"# S3 探针 v3：rows={a.rows} cols={a.cols} patches={a.patches} "
           f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} "
           f"arms={['on' if m else 'off' for m in arms]} "
+          f"rd_mode={a.rd_mode} alphabet={a.alphabet} "
           f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
           f"weight_gene={a.weight_gene} m0_instruments={a.m0_instruments} append={a.append} "
           f"resume_sample={a.resume_sample} save_every={a.save_every}")
@@ -1546,7 +1608,8 @@ def main():
                     a.weight_gene,
                     save_every=a.save_every, snapshot_dir=a.snapshot_dir,
                     resume_sample=_res, prior_rows=None, out_path=a.out,
-                    on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init, m0=_m0)
+                    on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init, m0=_m0,
+                    rd_on=(a.rd_mode == "on"), alphabet=a.alphabet)
                 # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
                 fout.flush()
                 os.fsync(fout.fileno())
@@ -1580,7 +1643,9 @@ def main():
                 # 🔴 summary 同样逐 run 原子重写（防同类丢失）
                 tmp_json = out_json + ".tmp"
                 with open(tmp_json, "w", encoding="utf-8") as jf:
-                    json.dump({"meta": vars(a), "runs": summary}, jf,
+                    # 🔴 S3-RDSWITCH：默认值摘除（`_summary_meta`）⇒ 默认路径 meta
+                    # 逐字节同旧版；显式改档时 rd_mode/alphabet 键在场可追溯。
+                    json.dump({"meta": _summary_meta(a), "runs": summary}, jf,
                               ensure_ascii=False, indent=2)
                     jf.flush()
                     os.fsync(jf.fileno())
