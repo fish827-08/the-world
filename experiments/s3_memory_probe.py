@@ -131,6 +131,20 @@ S1_BASE = DEVICE
 # 已用种子区间（R243 S0=45-52 / S1=53-76 / 新机复现=77-100）
 SEEDS_USED = set(range(42, 101))
 
+# 🔴 RPW-KNOB（PI 10-06 派工①／鱼令③）：C3 发送者获益通道 R2 声誉权重的**默认档**
+#   = config 默认 0.0（`simulation/config.py:604`）⇒ 默认路径不碰 `info_structure.enabled`
+#   ⇒ 与旧版逐字节等价；`rep_w`/`rep_w_solo` 两键在 `_summary_meta` 里按默认**同生同灭**摘除。
+_REP_W_DEFAULT = 0.0
+# solo 形制 = 只留 rep_w 的 D2 单变量骨架（六项显式关到中性；= a4 `mode="off"` 臂同式）。
+#   🔴 这六项是**口径**（改任一项就不再是单变量），列成常量供测试逐字钉住、变异必红。
+_SOLO_OFF_FIELDS = (
+    ("learning_bottleneck", False), ("arbitrary_codebook", False),
+    ("steels_alignment", False), ("perception_radius", 8),
+    ("perception_noise", 0.0), ("softmax_tau", 0.0),
+)
+# 锁定批档（鱼 10-06 直令）：只做**回显与提示**，不拿它当 choices 拦（0.0 必须可传 = 对照臂）。
+_REP_W_LOCKED_TIERS = (0.05, 0.2, 0.5)
+
 
 # ---------- R275 T2：g22（记忆权重基因）活体统计 ----------
 
@@ -1106,7 +1120,8 @@ def _load_probe_sidecar(path):
 
 def _config_fingerprint_check(eng, seed, rows, cols, pop, patches, rgm,
                               mem_on, bg_low_prod_frac, bg_low_cap_mult,
-                              weight_gene, rd_on, alphabet) -> None:
+                              weight_gene, rd_on, alphabet,
+                              rep_w=_REP_W_DEFAULT, rep_w_solo=False) -> None:
     """fail-loud 逐字段核对（**慢**，但只在续跑时跑一次）。
 
     为什么不用 `config.fingerprint()` 一把比：本探针在 `make_cfg` 之后**又改了**三个
@@ -1130,6 +1145,10 @@ def _config_fingerprint_check(eng, seed, rows, cols, pop, patches, rgm,
         "memory_gradient": str(cfg.info_structure.memory_gradient),
         "memory_weight_gene": bool(getattr(cfg.info_structure,
                                            "memory_weight_gene", False)),
+        # 🔴 RPW-KNOB：档位值 + 总开关位都进逐字段核对（solo 形制的六项中性字段由
+        #   `_build_fresh_run` 的装配期断言守，这里只保证"续跑没换档/没换形制"）。
+        "reputation_weight": float(cfg.info_structure.reputation_weight),
+        "info_structure_enabled": bool(cfg.info_structure.enabled),
     }
     want = {
         "seed": int(seed), "rows": int(rows), "cols": int(cols),
@@ -1139,6 +1158,8 @@ def _config_fingerprint_check(eng, seed, rows, cols, pop, patches, rgm,
         "memory_v2": bool(mem_on),
         "memory_gradient": "orientation" if mem_on else "none",
         "memory_weight_gene": bool(weight_gene and mem_on),
+        "reputation_weight": float(rep_w),
+        "info_structure_enabled": bool(rep_w_solo),
     }
     diff = {k: (want[k], got[k]) for k in want if got.get(k) != want[k]}
     if diff:
@@ -1232,7 +1253,8 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
             bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, weight_gene=False,
             save_every=0, snapshot_dir=None, resume_sample=False,
             prior_rows=None, out_path=None, on_row=None, hr_tracker=None,
-            g22_init=None, m0=None, rd_on=True, alphabet="16", eff_out=None):
+            g22_init=None, m0=None, rd_on=True, alphabet="16",
+            rep_w=_REP_W_DEFAULT, rep_w_solo=False, eff_out=None):
     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
 
     🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
@@ -1245,6 +1267,13 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
     （rd 恒开、字母表 16）⇒ 默认路径逐字节等于旧版；改档用于对齐 M1 骨架候选
     （rd off / alphabet 8）。续跑时两参数进 `_config_fingerprint_check` 逐字段核对。
 
+    rep_w／rep_w_solo（🔴 RPW-KNOB，PI 10-06 派工①）：C3 发送者获益通道的 R2 声誉权重档位。
+    `rep_w=0.0` + `rep_w_solo=False` **默认即旧口径**（一个字都不碰 `info_structure`）
+    ⇒ 默认路径逐字节等于旧版。🔴 档位 >0 必须配 `rep_w_solo=True`：引擎
+    `sphere_engine.py:3999` 写死 `rep_w = reputation_weight if enabled else 0.0`，而本探针
+    s3 装置 = A0 口径（`info_structure.enabled=False`，与 p1c 家族同源）⇒ 只设档位是**空转**
+    （三档会跑出三组逐位相同的 run）。solo = 开总开关但把其余六项 D2 机制显式关到中性
+    （`_SOLO_OFF_FIELDS`）⇒ 唯一变量是 rep_w。续跑时两参数进 `_config_fingerprint_check`。
     🔴 S1（镜审阻塞，2026-10-05）：`eff_out`（可选 dict）⇒ 把**引擎生效值**
     `rd_enabled`／`signal_alphabet` 读回给调用方进 summary —— 防「CLI 改档但
     最后一公里接线被删 ⇒ 按默认档跑完而 meta/回显仍显示改档值」（设计总档案
@@ -1288,7 +1317,8 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
                 f"命令行 --sample={int(sample)} ⇒ 行网格会静默错位，用同一个 --sample 再来")
         _config_fingerprint_check(
             eng, seed, rows, cols, pop, patches, rgm, mem_on,
-            bg_low_prod_frac, bg_low_cap_mult, weight_gene, rd_on, alphabet)
+            bg_low_prod_frac, bg_low_cap_mult, weight_gene, rd_on, alphabet,
+            rep_w, rep_w_solo)
         side = _load_probe_sidecar(_probe_sidecar_path(snapshot_dir, tag))
         init_cap_full = side["init_cap_full"]
         labels = _label_patches(eng.world, eng.resources._patch_mask)
@@ -1314,13 +1344,19 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
          rows_out), eng = _build_fresh_run(
             seed, rows, cols, pop, patches, rgm, mem_on,
             bg_low_prod_frac, bg_low_cap_mult, weight_gene, g22_init,
-            rd_on=rd_on, alphabet=alphabet)
+            rd_on=rd_on, alphabet=alphabet,
+            rep_w=rep_w, rep_w_solo=rep_w_solo)
     # 🔴 S1 读回守（镜阻塞项）：生效值取自**构造/加载后的引擎 config**（不看 CLI／
     #   入参）⇒ "CLI→run_one" 最后一公里一旦断线（如 :1612 接线被删而按默认档跑），
     #   summary 里的 `*_effective` 即与 CLI 声明不符 ⇒ 测试/复审可当场钉住。
     if eff_out is not None:
         eff_out["rd_enabled"] = bool(eng.config.resource_dynamics.enabled)
         eff_out["signal_alphabet"] = str(eng.config.signal_alphabet)
+        # 🔴 RPW-KNOB：声明值与生效值**都**回读（生效值与引擎 :3999 同式）
+        eff_out["reputation_weight"] = float(
+            eng.config.info_structure.reputation_weight)
+        eff_out["info_structure_enabled"] = bool(
+            eng.config.info_structure.enabled)
     try:
         return _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample,
                           labels, n_patch_total, init_cap_full, init_patch_cap,
@@ -1361,7 +1397,8 @@ def _peek_start_tick(snapshot_dir, tag) -> int:
 
 def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
                      bg_low_prod_frac, bg_low_cap_mult, weight_gene,
-                     g22_init=None, rd_on=True, alphabet="16"):
+                     g22_init=None, rd_on=True, alphabet="16",
+                     rep_w=_REP_W_DEFAULT, rep_w_solo=False):
     """首跑：建引擎 + 探针初始累积量（与旧版 `run_one` 逐行等价）。"""
     c, notes = make_cfg(
         seed, rows, cols, pop, patches, True,
@@ -1392,6 +1429,28 @@ def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
             print("  ⚠️ weight_gene=True 但本臂 memory_v2=False ⇒ g22 不被消费"
                   "（= 漂变对照，符合 S3.5 设计）。", file=sys.stderr)
 
+    # ---- 🔴 RPW-KNOB（PI 10-06 派工①／鱼令③）：C3 声誉权重档位 ----
+    #   `reputation_weight` 走**构造后赋值** ⇒ 不触发 `__post_init__` 的
+    #   `assert reputation_weight >= 0`（F1 同型教训：赋值绕过校验）⇒ 此处显式复刻。
+    _rw = float(rep_w)
+    if _rw < 0.0:
+        raise ValueError(f"🔴 RPW-KNOB：--rep-w 必须 ≥ 0（与 config.py:660 同式；构造后赋值"
+                         f"不触发 `__post_init__` ⇒ 探针层复刻）；收到 {rep_w!r}")
+    if rep_w_solo:
+        # solo 形制：开 D2 总开关（否则引擎 :3999 把档位清零 = 空转），同时把其余六项
+        #   显式关到中性 ⇒ 唯一变量 = rep_w。实测（`_rerun_logs/lh_rpw/inert_proof.py`）：
+        #   solo ∧ rep_w=0 与 s3 现装置**逐位相同**；而 `enabled=True` 走 config 默认
+        #   （学习瓶颈/码本/噪声/softmax 跟着开）与基线**不同** ⇒ 非单变量，故不取。
+        c.info_structure.enabled = True
+        for _k, _v in _SOLO_OFF_FIELDS:
+            setattr(c.info_structure, _k, _v)
+    c.info_structure.reputation_weight = _rw
+    #   🔴 锁定档只回显不拦（0.0 必须可传 = 对照臂）；非锁定档 ⇒  stderr 告警。
+    if _rw > 0.0 and _rw not in _REP_W_LOCKED_TIERS:
+        print(f"  ⚠️ RPW-KNOB：--rep-w={_rw} ∉ 锁定批档 {_REP_W_LOCKED_TIERS}"
+              f"（鱼 10-06 直令）⇒ 正式批用非锁定档须先经砚预注册 + PI 裁。",
+              file=sys.stderr)
+
     eng = SphereEngine(c)
     apply_post_build(eng, notes)
 
@@ -1420,6 +1479,29 @@ def _build_fresh_run(seed, rows, cols, pop, patches, rgm, mem_on,
     assert str(eng.config.signal_alphabet) == str(alphabet), "alphabet 开关未生效"
     assert bool(eng.config.resources.bg_production_zero) is True, "bgzero 未开"
     assert bool(eng.config.info_structure.memory_v2) is bool(mem_on), "memory_v2 未生效"
+    # 🔴 RPW-KNOB 读回守（与引擎 `sphere_engine.py:3999` **同式**；改引擎需复核此处）：
+    #   生效值取自**构造后的引擎 config**，不看 CLI／入参 ⇒ "最后一公里"断线（solo 接线被删
+    #   /总开关被回退）当场炸，绝不空跑出三组同值档。
+    _is = eng.config.info_structure
+    _eff_rw = float(_is.reputation_weight) if bool(_is.enabled) else 0.0
+    if _rw > 0.0 and _eff_rw <= 0.0:
+        raise RuntimeError(
+            f"🔴 RPW-KNOB 空转禁令：声明 --rep-w={_rw} 但引擎**生效值**={_eff_rw}"
+            f"（info_structure.enabled={_is.enabled} ⇒ `sphere_engine.py:3999` 把档位清零，"
+            f"跑出来的三档逐位相同 = 白跑）。出档差请带 `--rep-w-solo`（开总开关并把其余"
+            f"六项 D2 机制关到中性 = 单变量形制）；solo 是否用于正式批归 PI/砚裁定。")
+    if _eff_rw != _rw:
+        raise RuntimeError(
+            f"🔴 RPW-KNOB 读回不符：声明 rep_w={_rw} vs 引擎生效 {_eff_rw}"
+            f"（config 里的值={float(_is.reputation_weight)}）")
+    if rep_w_solo:
+        _bad = {k: getattr(_is, k) for k, v in _SOLO_OFF_FIELDS
+                if getattr(_is, k) != v}
+        if not bool(_is.enabled) or _bad:
+            raise RuntimeError(
+                f"🔴 RPW-KNOB solo 形制装配失败：enabled={_is.enabled}"
+                f"（须 True）、非中性字段={_bad}（须 {_SOLO_OFF_FIELDS}）"
+                f"⇒ 带 rep_w_solo 却没拿到单变量骨架，中止（不出混档数据）。")
 
     # 🔴 R264 自检：S3 装置（bg_low ⇒ ¬bgzero）+ memv2 + rd 只有在**动态质心**开着才合法。
     #    若跑在旧 main（无该字段）或该字段被关 ⇒ 静态质心 + rd 搬移 = 质心静默失效（fail-loud
@@ -1598,6 +1680,8 @@ def _summary_meta(a) -> dict:
     默认路径 ⇒ meta 与旧版逐字节一致；显式改档 ⇒ 键在场、值即实际档（可追溯）。
     🔴 合并件（S3-RDSWITCH × G6-EMITRATE，PI 解冲突）：两侧摘除条件**并集**，
        任一侧单独失效即破坏对应家族的逐字节等价，改此处必同时复跑两侧等价实证。
+    🔴 RPW-KNOB 加**第五摘除条件**（`rep_w == 0.0 ∧ ¬rep_w_solo` ⇒ 两键同摘）：
+       默认档 ⇒ meta 与旧版逐字节一致；显式改档 ⇒ 两键在场、值即实际档（R277 回显）。
     """
     meta = dict(vars(a))          # ⚠️ 必须**拷贝**：直接 pop `vars(a)` 会改 namespace，
     if meta.get("rd_mode") == _RD_MODE_DEFAULT:      # 后续 `a.rd_mode` 读取即炸
@@ -1606,6 +1690,10 @@ def _summary_meta(a) -> dict:
         meta.pop("alphabet", None)
     if not getattr(a, "m0_instruments", False):      # G6：仪表关 ⇒ 不写 G6 新 CLI 项
         meta.pop("m0_emit_window_frac", None)
+    # 🔴 RPW-KNOB（第五摘除条件）：默认档 ⇒ `rep_w`/`rep_w_solo` 都不写进 meta。
+    if meta.get("rep_w") == _REP_W_DEFAULT and not meta.get("rep_w_solo"):
+        meta.pop("rep_w", None)
+        meta.pop("rep_w_solo", None)
     return meta
 
 
@@ -1685,6 +1773,23 @@ def main():
                          "`8` = B③（能量 2 位 + 记忆位 1 位）；`4` = 仅能量 2 位。"
                          "**默认 16 = 逐字节等于旧版**。⚠️ `8` ∧ mem_on 臂下 memory_v2 不写"
                          "`_work_memory` ⇒ 记忆位恒 0（告警不拦，属可测性质，见 P1-a 口径）")
+    # ---- 🔴 RPW-KNOB（PI 10-06 派工①／鱼令③）：C3 声誉权重档位旋钮 ----
+    ap.add_argument("--rep-w", dest="rep_w", type=float, default=_REP_W_DEFAULT,
+                    help="R2 声誉权重 `info_structure.reputation_weight`（C3 发送者获益通道）。"
+                         "闭式 `sig_weight = trust × (0.5 + rep_w × trust)`"
+                         "（`sphere_engine.py:4129`）⇒ 默认 0.0 退化为原式 0.5×trust"
+                         "= **逐字节等于旧版**。🔴 锁定批档 = 0.05 / 0.2 / 0.5（鱼 10-06 直令，"
+                         "改档归砚预注册＋PI 裁；非锁定档只告警不拦）。⚠️ 引擎 `:3999` 用 "
+                         "`info_structure.enabled` 门控本值，而本探针 s3 装置 = A0 口径"
+                         "（enabled=False）⇒ **只设档位不生效**，须配 `--rep-w-solo`；"
+                         "声明 >0 而不带 solo ⇒ fail-loud（禁空转）。默认 0.0 ⇒ 不进 summary meta")
+    ap.add_argument("--rep-w-solo", dest="rep_w_solo", action="store_true",
+                    help="solo 形制：开 `info_structure.enabled` 总开关，同时把其余六项 D2 机制"
+                         "显式关到中性（学习瓶颈／任意性码本／Steels 对齐 = off，"
+                         "perception_radius=8、perception_noise=0、softmax_tau=0）⇒ **唯一变量"
+                         "是 rep_w**。实测 solo∧rep_w=0 与 s3 现装置逐位相同；不开 solo 而直接"
+                         "开总开关（走 config 默认）则同时激活四项机制 = 非单变量，故不取。"
+                         "默认关 ⇒ summary/meta 逐字节不变")
     # ---- 🔴 R358 T4（A1/A2/A3）：M0 仪表（砚 C1 规格；默认关 ⇒ 逐字节等于旧版）----
     ap.add_argument("--m0-instruments", action="store_true",
                     help="每采样点追加 M0 仪表列：g15_mean / g1_entropy + "
@@ -1710,6 +1815,19 @@ def main():
         print(f"🔴 --m0-emit-window-frac({a.m0_emit_window_frac}) 必须在 (0, 0.5]"
               f"（>0.5 ⇒ 首末段重叠，「末段 vs 首段」失去意义；≤0 ⇒ 空窗）。中止。",
               file=sys.stderr)
+        sys.exit(2)
+    # ---- 🔴 RPW-KNOB 前置校验（**打开 CSV 之前**就拦，不留半成品文件）----
+    if a.rep_w < 0.0:
+        print(f"🔴 --rep-w({a.rep_w}) 必须 ≥ 0（声誉权重非负，0=关闭；与 config.py:660 同式）。"
+              f"中止。", file=sys.stderr)
+        sys.exit(2)
+    if a.rep_w > 0.0 and not a.rep_w_solo:
+        print(f"🔴 --rep-w={a.rep_w} 必须配 --rep-w-solo：本探针 s3 装置是 A0 口径"
+              f"（`info_structure.enabled=False`），而引擎 `sphere_engine.py:3999` 写死"
+              f"`rep_w = reputation_weight if enabled else 0.0` ⇒ 只设档位是**空转**"
+              f"（三档会跑出三组逐位相同的 run = 白跑云机）。出档差须显式采用 solo 形制"
+              f"（开总开关＋其余六项 D2 机制关到中性 = 单变量）；solo 口径用于正式批"
+              f"归 PI/砚裁定。中止。", file=sys.stderr)
         sys.exit(2)
     # ---- v3 前置校验：快照节拍必须与采样节拍同步（否则续跑行网格静默错位）----
     if a.save_every and a.save_every != a.sample:
@@ -1778,7 +1896,12 @@ def main():
           f"rd_mode={a.rd_mode} alphabet={a.alphabet} "
           f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
           f"weight_gene={a.weight_gene} m0_instruments={a.m0_instruments} append={a.append} "
-          f"resume_sample={a.resume_sample} save_every={a.save_every}")
+          f"resume_sample={a.resume_sample} save_every={a.save_every}"
+          # 🔴 RPW-KNOB：默认档不追加（日志 banner 也保持逐字节；R277 装置档回显只在改档时加）
+          + ("" if (a.rep_w == _REP_W_DEFAULT and not a.rep_w_solo)
+             else f" rep_w={a.rep_w} rep_w_solo={a.rep_w_solo}"
+                  f" reputation_weight_effective={a.rep_w if a.rep_w_solo else 0.0}"
+                  f" locked={a.rep_w in _REP_W_LOCKED_TIERS}"))
 
     # ---- v2：run 级断点续跑准备（R264）----
     done = set()
@@ -1896,7 +2019,7 @@ def main():
                     resume_sample=_res, prior_rows=None, out_path=a.out,
                     on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init, m0=_m0,
                     rd_on=(a.rd_mode == "on"), alphabet=a.alphabet,
-                    eff_out=_eff)
+                    rep_w=a.rep_w, rep_w_solo=a.rep_w_solo, eff_out=_eff)
                 # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
                 fout.flush()
                 os.fsync(fout.fileno())
@@ -1933,6 +2056,17 @@ def main():
                 if _m0 is not None:   # 🔴 R396 三拍②（G6）：run 级首/末段发射率读数
                     _sum_row.update(
                         _m0.emit_pooled(rows_out, a.m0_emit_window_frac))
+                if a.rep_w != _REP_W_DEFAULT or a.rep_w_solo:
+                    # 🔴 RPW-KNOB（R277 回显）：默认档 ⇒ 一个键都不加（summary 逐字节不变）；
+                    #   改档 ⇒ 声明值与**生效值**并写（生效值与引擎 :3999 同式，M4 删接线必露馅）。
+                    _sum_row["rep_w_declared"] = float(a.rep_w)
+                    # 键名照砚锁定文本（预注册-E057 §一 载体旋钮行 @7605da1）
+                    _sum_row["reputation_weight_effective"] = (
+                        float(_eff["reputation_weight"])
+                        if _eff["info_structure_enabled"] else 0.0)
+                    _sum_row["info_structure_enabled_effective"] = bool(
+                        _eff["info_structure_enabled"])
+                    _sum_row["rep_w_solo"] = bool(a.rep_w_solo)
                 summary.append(_sum_row)
                 # 🔴 summary 同样逐 run 原子重写（防同类丢失）
                 tmp_json = out_json + ".tmp"
