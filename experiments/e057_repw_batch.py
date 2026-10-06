@@ -458,12 +458,45 @@ def do_verify(a: argparse.Namespace) -> int:
     return 0
 
 
+def default_python() -> str:
+    """跑批解释器候选（🔴 不能拿 `--data-dir` 的父目录去猜：数据仓走 worktree 时父目录是
+    `<data-repo>/.worktrees`，猜出来的路径必然不存在 —— 云机首次起跑就撞在这）。"""
+    exe = "python.exe" if os.name == "nt" else "python"
+    cands = [os.environ.get("E057_PY")]
+    for root in (ROOT, _main_repo_root()):
+        if root is None:
+            continue
+        cands += [str(root / ".venv" / d / exe) for d in ("bin", "Scripts")]
+    home = Path.home() / "world" / "the-world" / ".venv"
+    cands += [str(home / d / exe) for d in ("bin", "Scripts")]
+    for c in cands:
+        if c and Path(c).exists():
+            return c
+    raise EchoError("🔴 找不到可用解释器（候选：" + " ｜ ".join(x for x in cands if x)
+                    + "）⇒ 用 --python 显式给定或设 $E057_PY")
+
+
+def _main_repo_root() -> Path | None:
+    """linked worktree 的**主仓**根（`.venv` 只住在主仓，见 R249）。"""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=str(ROOT),
+                           capture_output=True, text=True)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    common = Path(r.stdout.strip())
+    if not common.is_absolute():
+        common = ROOT / common
+    return common.parent
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="E-057 rep_w 档扫批编排（BATCH-SCRIPT）")
     ap.add_argument("--data-dir", default=os.path.expanduser("~/world/the-world-data"),
                     help="数据仓根（产物落 <data-dir>/e057_repw 与 e057_logs）")
     ap.add_argument("--python", default=None,
-                    help="跑批解释器；默认取 $E057_PY，再默认 <data-dir 同级>/the-world/.venv/bin/python")
+                    help="跑批解释器；缺省按 $E057_PY → 本树/.venv → 主仓/.venv → ~/world/the-world/.venv 逐候选择优")
     ap.add_argument("--lanes", type=int, default=2, help="云机 lane 数（2 核 2 路，E-056 实证形制）")
     ap.add_argument("--min-free-gb", dest="min_free_gb", type=float, default=0.6)
     ap.add_argument("--strict-resume", dest="strict_resume", action="store_true",
@@ -486,11 +519,9 @@ def main(argv: list[str] | None = None) -> int:
             check_run_platform(a.min_free_gb)
         else:
             print("[WARN] --allow-non-cloud：跳过平台门（演练通道，非正式批）", file=sys.stderr)
-        py = a.python or os.environ.get("E057_PY") or \
-            str(Path(a.data_dir).parent / "the-world" / ".venv" / "bin" / "python")
-        a.python = py
-        if not Path(py).exists():
-            raise EchoError(f"🔴 解释器不存在：{py}（--python 显式给定）")
+        a.python = a.python or default_python()
+        if not Path(a.python).exists():
+            raise EchoError(f"🔴 解释器不存在：{a.python}（--python 显式给定）")
         return run_batch(a)
     except (PlanError, EchoError) as e:
         print(str(e), file=sys.stderr)

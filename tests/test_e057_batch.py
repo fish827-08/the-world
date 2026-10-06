@@ -262,6 +262,26 @@ def test_t18_manifest_row_has_four_elements(tmp_path):
     assert bad["error"] == "炸了"
 
 
+def test_t20_default_python_resolution(tmp_path, monkeypatch):
+    """解释器候选：云机首次起跑撞过「拿 data-dir 父目录猜 .venv」⇒ 逐候选验存在才可用。"""
+    import os
+
+    home = tmp_path / "home"
+    exe = "python.exe" if os.name == "nt" else "python"
+    sub = "Scripts" if os.name == "nt" else "bin"
+    good = home / "world" / "the-world" / ".venv" / sub / exe
+    good.parent.mkdir(parents=True)
+    good.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.delenv("E057_PY", raising=False)
+    monkeypatch.setattr(P, "ROOT", tmp_path / "无树的根")
+    monkeypatch.setattr(P, "_main_repo_root", lambda: None)
+    monkeypatch.setattr(P.Path, "home", staticmethod(lambda: home))
+    assert P.default_python() == str(good)
+    good.unlink()
+    with pytest.raises(P.EchoError, match="找不到可用解释器"):
+        P.default_python()
+
+
 def test_t19_no_engine_import_in_orchestrator():
     """不消费 RNG 的结构证明：编排模块的 import 面里没有引擎/仿真。"""
     import re
