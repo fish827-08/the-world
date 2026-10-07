@@ -66,7 +66,9 @@ class Books:
     def __init__(self, reg: ChannelRegistry, *, measure: Callable[[], dict[str, float]],
                  apply: Callable[[str, float], None],
                  grant: Callable[[], None], revoke: Callable[[], None],
-                 eff: float, eff_source: str = "") -> None:
+                 eff: float, eff_source: str = "",
+                 eventset: Callable[[tuple[str, ...]], float] | None = None,
+                 tick_start: Callable[[], None] | None = None) -> None:
         if not (eff > 0.0):
             raise ChannelViolation(f"eff 必须为正（质量↔能量折算点），收到 {eff}")
         if MASS_ACCOUNTS and not eff_source:
@@ -79,6 +81,8 @@ class Books:
         self._revoke = revoke
         self._eff = float(eff)
         self._eff_source = eff_source
+        self._eventset = eventset
+        self._tick_start = tick_start
         self._kind: dict[str, float] = {k: 0.0 for k in (INJ, TRF, DIS, ESC)}
         self._ledger: dict[str, float] = {}
         self._sigma0 = self._as_energy(self._snap())
@@ -132,6 +136,32 @@ class Books:
         """分载体实测账（能量当量）：mass 账户一律过 `eff_source` 注明的桥折算。"""
         cur = self._as_energy(self._snap())
         return {a: cur[a] - self._sigma0[a] for a in ACCOUNTS}
+
+    # ── A 路实测（事件集合侧；PI 22:0x 落裁③）───────────────────────
+    def measured_delta_sigma_eventset(self, domain: str = "ALL") -> float:
+        """只对本 tick 的**写点集合**求实测 Δ（原像来自世界数组，不来自 `_ledger`）。
+
+        用途：460,800 格正式档不可能每 tick 全量重求和（`e2a2193` 同族的实测口径），
+        故逐 tick 判 `close_eventset()`，每 N tick 判一次 `eventset_agreement()`。
+        🔴 未注入 `eventset` 闭包 ⇒ 当场报错，**不静默退化成全量**（那会让 A 路假绿）。
+        """
+        if self._eventset is None:
+            raise ChannelViolation(
+                "本 Books 未注入事件集合侧（A 路需要 eventset 闭包；不注入即不可用，"
+                "禁止悄悄退回全量重求和）"
+            )
+        return self._eventset(resolve_domain(domain))
+
+    def eventset_agreement(self, domain: str = "ALL") -> float:
+        """**PI 落裁③ 硬门**：全量实测 − 事件集合实测，差必须 = 0（每 N tick 判一次）。
+
+        非零 ⇒ 有写点没进事件集合（旁路写／apply 之外的直改），A 路当场不可信。
+        """
+        return self.measured_delta_sigma(domain) - self.measured_delta_sigma_eventset(domain)
+
+    def close_eventset(self, domain: str = "ALL") -> float:
+        """A 路的逐 tick 便宜判据：事件集合实测 − 通道账预测。"""
+        return self.measured_delta_sigma_eventset(domain) - self.predicted_delta(domain)
 
     # ── 通道账（只读 `_ledger`，不看世界真值）─────────────────────
     def predicted_delta(self, domain: str = "ALL") -> float:
@@ -215,8 +245,10 @@ class Books:
 
     # ── tick 边界 ─────────────────────────────────────────────────
     def begin_tick(self) -> None:
-        """tick 初：世界真值成为新基线，通道账清零。"""
+        """tick 初：世界真值成为新基线，通道账清零，事件集合（写点表）清空。"""
         self._sigma0 = self._as_energy(self._snap())
+        if self._tick_start is not None:
+            self._tick_start()
         for k in self._kind:
             self._kind[k] = 0.0
         self._ledger.clear()

@@ -167,3 +167,42 @@ PI 原卡①要的是"每 tick Σ(生物 energy+资源 grid+尸体池+归还账�
 **接口形状（引擎段唯一要接的两根线）**：`measure` = 对 `_energy/_stomach/resources._grid/
 _corpse_energy/_fruit_grid` 全量重求和；`apply` = 受守卫令牌放行的写入面。累加器本身仍按
 《通道枚举与A2三账口径》§五 的 7 只读口径走 sidecar，与本包不冲突。
+
+## 九、A 路实证（PI 22:0x 落裁③「事件集合求和 + 每 N tick 全量核对」）
+
+落裁③下来后，先在**合成世界**里把这条路的判据形做实（零引擎面），得出一条会影响 N 取值地位的结论。
+
+**实现**：`World.eventset_delta(accs)` = 只对**本 tick 被登记过写点的槽位**求实测 Δ。
+写点表 `_touch[(acc, slot)] = 写前原值` 由 `World.apply()`（受令牌守卫的那条唯一写路）在落笔前
+`setdefault` 记下——记的是**位置 + 状态原像**，与 `Books._ledger` 无数据通路（守卫测试
+`test_eventset_measurement_source_does_not_read_the_channel_ledger` 用 `co_names` 判属性访问，
+不用原始 source——我第一版用 source 结果被自己的 docstring 顶红，那是假阳性，已改）。
+`Books.begin_tick()` 同时重置全量基线 `_sigma0` 与写点表。四个量：
+
+| 判据 | 定义 | 用途 |
+|---|---|---|
+| `measured_delta_sigma(D)` | 全数组重求和 − 基线 | 全量核对侧（贵，每 N tick） |
+| `measured_delta_sigma_eventset(D)` | 写点槽位原像差之和 | A 路逐 tick 侧（便宜） |
+| `close_eventset(D)` | 事件集合实测 − 通道账预测 | **逐 tick** 硬门 |
+| `eventset_agreement(D)` | 全量实测 − 事件集合实测 | **每 N tick** 硬门（= PI 验收栏那条「差=0」） |
+
+干净 30 tick：**`agreement` 三量域逐位 = 0.0，且 `close_eventset == close == 0.0`**
+⇒ 判据形可直接搬进引擎段，不必另发明。
+
+🔴 **实测结论（改变 N 的地位）**：把一笔旁路写砸在**本 tick 没被写过的槽位**上
+（`world._c[0] += 0.5`，C 是 energy 账户），三个数同时成立——
+
+    close_eventset("ALL")      == 0.0    ← 🔴 A 路逐 tick 判据**照绿**（结构性失明）
+    close("ALL")               == 0.5    ← 全量判据红，红量 = 注入量（砚⑦方向检验形）
+    eventset_agreement("ALL")  == 0.5    ← 每 N tick 的核对才把它抓出来
+
+⇒ **`eventset_agreement` 不是保险丝，是必需项**：A 路的逐 tick 门只覆盖"写过的位置"，
+任何"在静止位置上凭空变能量"只有全量重求和能抓 ⇒ **N 的取值 = 这类漏账的最大隐身窗口**。
+建议 N 与「每 N tick 全量核对」的报告面一起进 manifest，可接受性由 镜/砚 判（不属我可裁）。
+**互补证据**：同一笔旁路写若砸在**本 tick 写过**的槽位上，事件集合侧照样看得见（原像差读当前数组值）
+⇒ 失明只发生在静止槽位上，与稀疏度正相关。⚠️ **正式档绝大多数格每 tick 净静 ⇒ 静止面极大**，
+这条在引擎段的实际权重**高于合成世界**，须由 镜 在稿里正面处理（不能只靠"事件集合"自称已闭合）。
+
+**变异检查**（新工具四律）：删掉 `World.apply` 的写点登记 ⇒ **3 failed**（逐位 0 测／失明测／互补测全红），
+还原 ⇒ **42 passed**。另 `Books` 未注入 `eventset` 闭包时 `measured_delta_sigma_eventset`/`close_eventset`
+**当场 `ChannelViolation`**，🔴 不许静默退回全量（那等于把 A 路伪装成已核对）。

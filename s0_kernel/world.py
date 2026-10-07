@@ -34,7 +34,7 @@ import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from .accounts import ACCOUNTS
+from .accounts import ACCOUNTS, to_energy
 from .books import Books
 from .channels import Channel, ChannelRegistry, ChannelViolation
 
@@ -108,12 +108,38 @@ class World:
         self._token = False
         self.tick = 0
         self.events: list[str] = []
+        # A 路（PI 22:0x 落裁③）用：**本 tick 被写过的槽位**及其写前原值。
+        #   记的是"位置 + 状态真值的原像"，**不是通道登记量** ⇒ 仍属实测侧；
+        #   与 `Books._ledger` 没有数据通路（源码级守卫见 tests/test_s0_kernel.py）。
+        self._touch: dict[tuple[str, int], float] = {}
+
+    # ── A 路：事件集合实测 ─────────────────────────────────────────
+    def begin_tick(self) -> None:
+        """tick 起点：清空事件集合槽位表（全量核对侧 `Books.rollover()` 另调）。"""
+        self._touch.clear()
+
+    def eventset_delta(self, accs: tuple[str, ...]) -> float:
+        """**只对本 tick 登记过写点的槽位**求实测 Δ（能量域）。
+
+        = PI 落裁③"A 路：事件集合求和 + 每 N tick 全量核对"里的那个事件集合侧。
+        🔴 它**看不见旁路写**（不经 `apply` 的 `world._g[0] += x` 不在槽位表里）
+        ⇒ 全量重求和必须**周期性**跑（每 N tick）；变异档 M1 正是这条前提的实证。
+        """
+        tot = 0.0
+        for (acc, slot), before in self._touch.items():
+            if acc not in accs:
+                continue
+            store = {"E": self._e, "S": self._s, "G": self._g, "C": self._c,
+                     "F": self._f}[acc]
+            tot += to_energy(store[slot] - before, acc, self.opt.eff)
+        return tot
 
     # ── 注入给 Books 的三个闭包 ────────────────────────────────────
     def books(self, reg: ChannelRegistry | None = None) -> Books:
         return Books(reg or default_registry(), measure=self.measure, apply=self.apply,
                      grant=self._grant, revoke=self._revoke, eff=self.opt.eff,
-                     eff_source=self.opt.eff_source)
+                     eff_source=self.opt.eff_source,
+                     eventset=self.eventset_delta, tick_start=self.begin_tick)
 
     def measure(self) -> dict[str, float]:
         """A2 实测侧：对**真实数组**求和（与账本无任何数据通路）。"""
@@ -133,6 +159,8 @@ class World:
             raise ChannelViolation(
                 f"{acc} 账户当前无持有者：调用世界前先用 holder() 声明这笔量落在哪个个体/格")
         store = {"E": self._e, "S": self._s, "G": self._g, "C": self._c, "F": self._f}[acc]
+        # 写点登记：只记"哪个槽位、写前是多少"（原像），不记通道声明的量 ⇒ 实测侧
+        self._touch.setdefault((acc, slot), store[slot])
         store[slot] += native_delta
 
     def _grant(self) -> None:

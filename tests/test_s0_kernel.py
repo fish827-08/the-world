@@ -333,3 +333,86 @@ def test_measure_returns_a_copy_not_a_view():
     snap = world.measure()
     snap["E"] += 100.0
     assert world.measure()["E"] == pytest.approx(sum(world.energy))
+
+
+# ══ A 路（PI 22:0x 落裁③：事件集合求和 + 每 N tick 全量核对）═══════════
+def test_eventset_agreement_is_exact_zero_on_clean_ticks():
+    """干净 tick：全量实测与事件集合实测**逐位相同**（差恰好 0.0，非容差）。
+
+    这是 PI 落裁③「全量 vs 事件集合 差=0」验收硬门的合成世界实证——引擎段照同一判据形。
+    """
+    world, books = closed_preset(WorldOptions(n=8))
+    for _ in range(30):
+        books.begin_tick()
+        world.step(books)
+        for d in ("ALL", "E", "ENERGY_ONLY"):
+            assert books.eventset_agreement(d) == 0.0, f"{d}：{books.events if hasattr(books,'events') else world.events[-3:]}"
+            assert books.close_eventset(d) == books.close(d) == 0.0
+
+
+def test_unledgered_write_on_untouched_slot_is_invisible_to_per_tick_eventset_gate():
+    """🔴 A 路的**结构性失明**（本文件最重要的一条实测结论）：
+
+    旁路写落在"本 tick 没被写过的槽位"上 ⇒
+      · 逐 tick 的 `close_eventset()` **照绿**（=0.0，假绿）
+      · 全量 `close()` 变红（=注入量，砚⑦方向检验形）
+      · 二者之差 `eventset_agreement()` = 注入量 ⇒ **每 N tick 全量核对是硬门，不是保险丝**
+    反之若旁路写砸在**本 tick 写过的槽位**上，事件集合侧照样看得见（原像差取当前数组值）。
+    """
+    world, books = closed_preset(WorldOptions(n=8))
+    books.begin_tick()
+    world.step(books)
+    # fail-loud 前提：C 池本 tick 确实没被写过（否则这条测的是别的东西）
+    assert ("C", 0) not in world._touch, "前提破裂：C 槽位本 tick 被写过"
+    world._c[0] += 0.5                       # 旁路写，不经 apply ⇒ 不进事件集合
+    assert books.close_eventset("ALL") == 0.0,   "失明证据：A 路逐 tick 判据绿着"
+    assert books.close("ALL") == 0.5,            "全量判据红，且红量 = 注入量（方向检验）"
+    assert books.eventset_agreement("ALL") == 0.5
+    assert books.eventset_agreement("E") == 0.0, "C 不在 {E} 量域——量域差异照旧成立"
+    assert books.eventset_agreement("ENERGY_ONLY") == 0.5, "C 是 energy 账户"
+
+
+def test_poke_on_touched_slot_is_caught_by_eventset_side():
+    """互补证据：砸在**本 tick 写过**的槽位 ⇒ 事件集合侧当场看见（原像差非零）。"""
+    world, books = closed_preset(WorldOptions(n=8))
+    books.begin_tick()
+    world.step(books)
+    touched = [k for k in world._touch if k[0] == "E"]
+    assert touched, "前提：本 tick 至少有一个 E 槽位被写过"
+    acc, slot = touched[0]
+    world._e[slot] += 0.25
+    assert ("E", slot) in world._touch
+    assert books.eventset_agreement(acc) == 0.0, "写过 ⇒ 事件集合与全量同红"
+    assert books.close(acc) == 0.25
+
+
+def test_eventset_side_requires_injection_no_silent_fallback_to_full_sum():
+    """没注入 eventset 闭包 ⇒ 当场报错；**不许**静默退回全量重求和（那等于把 A 路伪装成已核）。"""
+    world, _ = closed_preset(WorldOptions(n=4))
+    bare = Books(ChannelRegistry(CHANNEL_DEFS), measure=world.measure, apply=world.apply,
+                 grant=world._grant, revoke=world._revoke, eff=world.opt.eff,
+                 eff_source=world.opt.eff_source)
+    with pytest.raises(ChannelViolation, match="未注入事件集合侧"):
+        bare.measured_delta_sigma_eventset("ALL")
+    with pytest.raises(ChannelViolation, match="未注入事件集合侧"):
+        bare.close_eventset("ALL")
+
+
+def test_eventset_measurement_source_does_not_read_the_channel_ledger():
+    """源码级隔离：事件集合侧的"实测"来自**世界数组原像**，不得访问 `_ledger`/预测账。
+
+    用 `co_names`（属性访问名）判，不用原始 source——docstring 里提一嘴"不读 _ledger"
+    不该把守卫弄红（那正是我第一版守卫的假阳性）。
+    否则 A 路退化成"用账本验账本"（A1 构造恒等同族），PI 落裁③ 的核对意义全失。
+    """
+    forbidden = {"_ledger", "predicted", "predicted_delta", "per_channel", "_kind"}
+    for fn in (Books.measured_delta_sigma_eventset, Books.eventset_agreement):
+        hit = forbidden & set(fn.__code__.co_names)
+        assert not hit, f"{fn.__name__} 读了通道账：{hit}"
+    wforbidden = {"_ledger", "books", "predicted"}
+    assert not wforbidden & set(World.eventset_delta.__code__.co_names)
+    # 反向：全量实测侧同样不许读账本（既有守卫的延伸）
+    assert not forbidden & set(Books.measured_delta_sigma.__code__.co_names)
+    # `close_eventset` 是**会合点**（与 `close` 同族）：必须两侧都读，缺一即假绿
+    both = {"measured_delta_sigma_eventset", "predicted_delta"}
+    assert both <= set(Books.close_eventset.__code__.co_names)
