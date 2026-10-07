@@ -667,6 +667,11 @@ class SphereEngine:
          # ---- T1：memv2 写入热点优化（本线 = [本地开发·性能线] 轻舟）------------
          "_dirs8_const",       # (8,) 标准行（2..rows-3）8 邻方向常量（参考格标量构造）
          "_dirs4_const",       # (4,) 标准行 VN-4 方向常量（= _dirs8_const[VN_IDX]）
+         # ---- C1 捕食信息价值批（D-1 钩子；本线 = [本地开发·性能线] 轻舟）----------
+         # 🔴 __slots__ 硬约束：新属性必须登记。默认 None ⇒ 逐位等价（T11a/T14 锁）。
+         "_rd_pred_kill_log",  # list[(id, flat_cell, tick)] | None；载体装=[]，窗末排空
+         #   🔴 F5（镜 19:46 审 / PI 697e171）：元组含**稳定个体 id + 时刻**（非槽位号——
+         #   槽位在同 tick 后段压缩后不可跨窗 join）。
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -845,6 +850,9 @@ class SphereEngine:
         self._smell_stamp = None                            # R244 §二：每格"代"标记
         self._smell_gen = 1                                 # R244 §二：当前代（**从 1 起**：
         #   stamp 初始全 0 ⇒ 首 tick 全部视为"未算过"，不会误用零值缓存）
+
+        # ---- C1 D-1 钩子（默认 None ⇒ 逐位等价；载体按需装 = []）----
+        self._rd_pred_kill_log = None
 
         # 预计算统一邻居表（L6 Rust 下沉用）：**P0.1（T1）紧凑化** —— 直接复用 world 的
         # 紧凑缓存（`(n_cells, 8)` int64 ≈ 29.5 MB @480×960），不再自建
@@ -4664,6 +4672,12 @@ class SphereEngine:
                         self._ec_prey_e_sum += float(energy[prey])
                         self._ec_prey_kill_n += 1
                         self._duel["kills"] += 1
+                        if self._rd_pred_kill_log is not None:
+                            # 🔴 F5：记 (稳定 id, 死亡格, 当时 tick)——槽位号 prey 同 tick
+                            #   后段压缩即失效，不可作跨窗 join 键；id/tick 供 J-C 相关。
+                            self._rd_pred_kill_log.append(
+                                (int(self._id[prey]), int(self._flat[prey]),
+                                 int(self._tick)))
                         if not _corpse_on_tick:
                             # corpse 关 ⇒ 旧转移（守恒兜底；T4 反转的"进尸体"不可用）
                             _tr = float(energy[prey]) * pcfg.transfer_ratio
@@ -4691,6 +4705,11 @@ class SphereEngine:
                             self._ec_prey_e_sum += float(energy[prey])
                             self._ec_prey_kill_n += 1
                             self._duel["kills"] += 1
+                            if self._rd_pred_kill_log is not None:
+                                # 🔴 F5：同首处——3 元组 (id, 格, tick)
+                                self._rd_pred_kill_log.append(
+                                    (int(self._id[prey]), int(self._flat[prey]),
+                                     int(self._tick)))
                             if not _corpse_on_tick:
                                 _tr = float(energy[prey]) * pcfg.transfer_ratio
                                 energy[idx] += _tr
