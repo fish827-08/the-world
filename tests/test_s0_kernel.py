@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from s0_kernel.accounts import to_energy
 from s0_kernel.books import DOMAIN_ACCOUNTS, Books
 from s0_kernel.channels import DIS, ESC, INJ, TRF, Channel, ChannelRegistry, ChannelViolation
 from s0_kernel.closed_loop import MUTATIONS, WorldOptions, closed_preset, tolerance_preset
@@ -155,6 +156,21 @@ def test_cross_domain_bridge_must_declare_its_source():
     world = World(WorldOptions(eff_source=""))
     with pytest.raises(ChannelViolation, match="来源"):
         world.books()
+
+
+def test_to_energy_is_the_single_conversion_helper_and_rejects_unknown_accounts():
+    assert to_energy(1.0, "G", 0.5) == 0.5        # mass 账户折能量域
+    assert to_energy(1.0, "E", 0.5) == 1.0        # 能量账户不动
+    with pytest.raises(KeyError):
+        to_energy(1.0, "X", 0.5)
+
+
+def test_meta_echoes_the_bridge_for_manifest():
+    """轻舟约束 3 的同族预防：读数量级报告必须能回显生效系数与来源，跨树对账才不抓瞎。"""
+    _, books = closed_preset()
+    meta = books.meta()
+    assert meta["eat_efficiency"] == 0.5
+    assert "eat_efficiency" in meta["eff_source"]
 
 
 def test_clean_tick_passes_the_same_gate_that_mutations_fail():

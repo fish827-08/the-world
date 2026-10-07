@@ -34,13 +34,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from .accounts import ACCOUNTS, ENERGY_ACCOUNTS, MASS_ACCOUNTS
+from .accounts import ACCOUNTS, ENERGY_ACCOUNTS, MASS_ACCOUNTS, to_energy
 from .channels import DIS, ESC, INJ, TRF, ChannelRegistry, ChannelViolation
 
-#: 量域候选 ⇒ 成员集合。**三个都留着**，不替砚默认选。
+#: 量域 ⇒ 成员集合。**砚 10-07 20:56 ① 已裁 `ALL` = A2 正式**（全载体域 ΔΣ(E+S+G+C+F)）；
+#: 另两档保留为对照——`{E}` 对资源池侧漏账是**瞎的**（见 M1 的方向检验），留着当"为什么不能选它"的证据。
 DOMAIN_ACCOUNTS: dict[str, tuple[str, ...]] = {
-    "ALL": ACCOUNTS,                 # 五账户全闭合
-    "E": ("E",),                     # 只闭合活体能量（镜 §四 A2 原话的字面版）
+    "ALL": ACCOUNTS,                 # ← 砚① 已裁：A2 正式（分载体五列另见 carrier_report）
+    "E": ("E",),                     # 只闭合活体能量（镜 §四 A2 原话的字面版，已被①否为唯一口径）
     "ENERGY_ONLY": ENERGY_ACCOUNTS,  # 只闭合能量域账户（跳过胃/资源池的质量停留）
 }
 
@@ -94,7 +95,7 @@ class Books:
         return {a: float(snap.get(a, 0.0)) for a in ACCOUNTS}
 
     def _as_energy(self, snap: dict[str, float]) -> dict[str, float]:
-        return {a: (v * self._eff if a in MASS_ACCOUNTS else v) for a, v in snap.items()}
+        return {a: to_energy(snap[a], a, self._eff) for a in snap}
 
     # ── 唯一写入面 ─────────────────────────────────────────────────
     def channel(self, cid: str, src: str | None, dst: str | None, amount: float) -> None:

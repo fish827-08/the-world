@@ -24,8 +24,7 @@ ACCOUNT_UNITS: dict[str, str] = {
 ENERGY_ACCOUNTS: tuple[str, ...] = tuple(a for a in ACCOUNTS if ACCOUNT_UNITS[a] == "energy")
 MASS_ACCOUNTS: tuple[str, ...] = tuple(a for a in ACCOUNTS if ACCOUNT_UNITS[a] == "mass")
 
-#: 砚 20:28 复核门与立场帖 §四·待定 1：A2 量域两候选，本包两者都能出，不替砚裁。
-DOMAINS: tuple[str, ...] = ("E", "ALL")
+#: 量域集合真源在 `books.DOMAIN_ACCOUNTS`（砚① 已裁 `ALL` 为 A2 正式），此处不再并列一份。
 
 
 def to_energy(amount: float, account: str, eff: float) -> float:
