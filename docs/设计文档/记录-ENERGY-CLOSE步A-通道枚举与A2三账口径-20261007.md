@@ -81,7 +81,8 @@ D9|`:6015`（`_step_eat_fruit`）|吃果消化损耗 `(1−digest_ratio=0.7)×ea
 **E4**|`:5062` 压缩|`S_dead` 全额|**无**|非捕食死者的胃粮同样蒸发|
 **E5**|`:1774` 尸体溢出|`_corpse_overflow_e`|有计数未入账|挂账即可，零新增成本|
 **E6**|`:3323-3334` 未吸收|`digest×(1−_assim)×(1−_ar)`|**无**（代码 `:3309` 自认"S3 前补一个计数"）|`_ar` 见 §四 待定 3|
-**E7**|`:1800-1806` 容量满|`ret − put`|混在 `_corpse_decayed_e`|与 D8 必须分离才可用|
+**E7**|`:1800-1806` 容量满|`ret − put`|混在 `_corpse_decayed_e`|与 D8 必须分离才可用
+**E8**|`:2908-2911` 能量封顶 `energy_cap_enabled`（**默认关**）|`Σ max(0, E − max_energy)`|🟡 `_over_cap_seen` / `_frac_over_cap_max`（R145 活体探针）已有计数|开启档才是逃逸；默认关 ⇒ 对逐位等价门无影响，但**开关一开就是新纪元**（`:2906-2907` 自述禁跨比）⇒ A2 若跑开启档必须入账|
 
 ---
 
@@ -111,7 +112,7 @@ A2 的定义（照镜 §四）：**不复用 A1 的构造恒等**，而是每 ti
 **散逸账** `dis_meta`|D1+D2+D3|—|✓ `EC_META`|已合并，若砚要拆需分别记|
 `dis_move`|D5|—|✓ `EC_MOVE`||
 `dis_attack`|D6+D7|—|✓ `EC_ATTACK`||
-`dis_signal`|D4|`SIGNAL_COST×n_emitters`|🔴 需新计数|**新增 EC 通道 or 折进 cost_meta** ⇒ 口径归砚|
+`dis_signal`|D4|`SIGNAL_COST×n_emitters`|🟢 **无需新计数**（更正：现成 `_emit_count` 逐体终身计数在 `:3668` 累加，`:1461`；⇒ `SIGNAL_COST × _emit_count.sum()` 可精确反推，`config.py:560`＝0.1）|步A 前置探针已实测走通此路（见同批「旧装置逃逸量级」记录）
 `dis_decay`|D8|`(1−0.5)×存量`|🔴 需从 `_corpse_decayed_e` 拆出||
 `dis_digest`|D9|`(1−0.7)×eat_amount`|🔴 需新计数|关档恒 0|
 **逃逸账** `esc_death_e`|E1|`E_dead − deposit`|🔴 需新计数|压缩点 `:5059` 处一次算清|
@@ -126,7 +127,7 @@ A2 的定义（照镜 §四）：**不复用 A1 的构造恒等**，而是每 ti
 
 ### 2.3 新增计数器的工量与纪律
 
-- 需新增 **8 个只读累加器**（`inj_regrowth`、`inj_fruit`、`dis_signal`、`dis_decay`、`dis_digest`、`esc_death_e`、`esc_preed_s`、`esc_death_s`、`esc_assim`、`esc_plant_cap`，其中 2 个是从现有计数器拆分而非新增 ⇒ 净新增 ≈ 8）。
+- 需新增 **7 个只读累加器**（`inj_regrowth`、`inj_fruit`、`dis_decay`、`dis_digest`、`esc_death_e`、`esc_preed_s`、`esc_death_s`、`esc_assim`、`esc_plant_cap`，其中 2 个是从现有计数器拆分而非新增 ⇒ 净新增 **7**；`dis_signal` 经现成 `_emit_count` 反推解决，E8 复用现成 `_over_cap_seen` ⇒ **原估 8 个已减到 7 个**）。
 - 全部落在**已算完的中间量**上（`_pho`/`digest`/`ret`/`put`/`_back`/`S_dead` 都是现成变量）⇒ 只加 `float(x.sum())` 级别操作 ⇒ 与我立场帖 §五 的 **0.7–1.3%** 性能结论一致（A2 全开后 2–4%）。
 - 不消费 RNG、默认关（`energy_close.enabled=False`）⇒ 逐字节等价门照旧（新工具四律）。
 - 🔴 **A1 类现成 `_audit_*` / `_corpse_*` 计数器必须在文档和代码注释里标 `# construction identity — not a conservation test`**（镜 §四 原话的工程落点），否则后来者会把它们当守恒证据。
