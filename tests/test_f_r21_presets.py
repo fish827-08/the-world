@@ -24,7 +24,38 @@ sys.path.insert(0, str(ROOT))
 
 from experiments import batch_runner as br  # noqa: E402
 
-PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
+def _python_candidates() -> tuple[str, ...]:
+    """解释器候选序（**只修取径，不动 preset 语义与期望值**——PI 22:0x 落裁①）。
+
+    缺陷原型：原写作 `str(ROOT / ".venv" / "Scripts" / "python.exe")` 硬编码**主树** venv，
+    而 `ROOT` 在 `.worktrees/<卡号>` 下指向 worktree（无 `.venv`）⇒ 该文件 10 例
+    必 `FileNotFoundError`（主树同文件全绿；PI `806279a` 值班记逐例集合差互证）。
+    ①当前解释器 = 跑 pytest 的那个 python（worktree 下天然回指主树 venv）；
+    ②②Windows 主树 venv；③*nix/云机 venv。逐候选**验存在**后才用。
+    """
+    return (sys.executable,
+            str(ROOT / ".venv" / "Scripts" / "python.exe"),
+            str(ROOT / ".venv" / "bin" / "python"))
+
+
+def _resolve_python(candidates: tuple[str, ...] | None = None) -> str:
+    """返回第一个真实存在的解释器；全落空 ⇒ **当场报错**（fail-loud，禁 skip 伪装成绿）。"""
+    cands = _python_candidates() if candidates is None else candidates
+    for cand in cands:
+        if cand:
+            try:
+                if Path(cand).is_file():
+                    return str(cand)
+            except OSError:
+                continue
+    raise RuntimeError(
+        "找不到可用 Python 解释器，候选逐条验存在均落空："
+        + " / ".join(str(c) for c in cands)
+        + "（本测试须用仓库 venv 的解释器跑目标脚本 `--help`；不降级、不 skip）"
+    )
+
+
+PY = _resolve_python()
 _FLAG_RE = re.compile(r"(--[A-Za-z0-9][-A-Za-z0-9]*)")
 _HELP_CACHE: dict[str, set[str]] = {}
 
@@ -146,3 +177,38 @@ def test_r97cal_preset_is_now_runnable_shape():
     # 模板里的 m 值必须来自网格（1.0 / 1.3 / 1.5）
     ms = sorted({r.out.name.split("_")[0] for r in runs})
     assert ms == ["m1.0", "m1.3", "m1.5"]
+
+
+def test_python_resolver_rejects_missing_candidates(tmp_path):
+    """取径修复的**定向守卫**（变异必红）：候选逐条都不存在 ⇒ 必须当场 RuntimeError。
+
+    退化原型 = 老写法"拼一个 `ROOT/.venv` 路径就交差"（worktree 下不存在 ⇒
+    10 例 FileNotFoundError，红得看不出原因）。现在必须**验存在**且落空即炸，
+    不许静默返回假路径、更不许 `pytest.skip` 把红洗成绿。
+    """
+    bad = (str(tmp_path / "nope.exe"), "", str(tmp_path / "nope2"))
+    with pytest.raises(RuntimeError, match="找不到可用 Python 解释器"):
+        _resolve_python(bad)
+
+
+def test_python_resolver_prefers_first_existing_candidate(tmp_path):
+    """存在性优先、顺序敏感：第一个存在的候选胜出（不回退硬编码主树路径）。"""
+    ok = tmp_path / "python.exe"
+    ok.write_text("")          # 只验 is_file，不执行
+    assert _resolve_python((str(ok), "zzz")) == str(ok)
+    # 目录不算存在（`.venv/` 半截目录不能当解释器）
+    d = tmp_path / "dir"
+    d.mkdir()
+    assert _resolve_python((str(d), str(ok))) == str(ok)
+
+
+def test_resolved_py_is_the_running_interpreter_in_worktrees():
+    """双侧同绿的机读保证：`PY` 必须是**真实存在**的文件且能跑 `--help`。
+
+    主树与 `.worktrees/<卡号>` 下都成立（PI 验收=双侧同绿）；`cwd=ROOT` 亦随
+    `Path(__file__)` 落到当轮载体，不跨载体引用主树目录。
+    """
+    assert Path(PY).is_file(), f"PY 指向不存在的解释器：{PY}"
+    out = subprocess.run([PY, "-c", "print(1)"], capture_output=True, text=True,
+                         cwd=str(ROOT))
+    assert out.returncode == 0 and out.stdout.strip() == "1"
