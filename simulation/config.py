@@ -1415,6 +1415,41 @@ _ACTION_SELECTION_FIELDS: frozenset = frozenset(
 
 
 @dataclass
+class EnergyProbeConfig:
+    """ENERGY-CLOSE **步A 只读累加器**（A2 独立实测侧的散逸/逃逸分账埋点）。
+
+    口径：`docs/设计文档/记录-ENERGY-CLOSE步A-通道枚举与A2三账口径-20261007.md` §三/§四
+    （7 通道 = 4 散逸 `dis_meta/dis_move/dis_attack/dis_signal`
+    + 3 逃逸 `esc_death_e/esc_pred_e/esc_pred_s`）。
+    🔴 **列面纪律（轻舟约束 1 + 砚⑤）**：本机制**不动** `EC_*` 枚举、**不动**
+    `energy_ledger` 列名（`tools/calib_solve.py` 按现列面消费）⇒ 全部读数走
+    **sidecar 新键**（`energy_probe_rows()` / `energy_probe_totals()`），
+    且 sidecar 行带 `tick` + 群体规模锚，可与主 CSV 逐 tick 行回 join。
+    🔴 **默认关 = 旧行为逐位不变**（关档时引擎侧整段不执行 ⇒ 零开销；
+    C7 钉死基线 `(574887, 11266.746993)` 不许动 = 唯一回滚点）。
+    ⚠️ 挂进 `SimConfig` ⇒ 经 `asdict` **自动进 `fingerprint()`**（跨档续跑被拦，
+    同 `smell` / `action_selection`）⇒ commit/manifest 须写明"**指纹变、行为不变**"。
+    ⚠️ **只在 Python 路径可用**：`use_sim_core=True` 时维持/代谢扣费发生在 Rust 内部
+    ⇒ 构造期**硬失败**（不放行 = 一整批空 sidecar 白跑）。
+    """
+
+    enabled: bool = False        # 🔴 总开关：默认关（关档逐位等价 = 唯一回滚点）
+    row_every: int = 1           # sidecar 行频（每 N tick 落一行；1 = 逐 tick）
+    max_rows: int = 0            # 0 = 不限；>0 ⇒ 环形保留最近 N 行（长批防内存）
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.enabled, bool), "enabled 必须是布尔值"
+        assert self.row_every >= 1, (
+            "row_every ≥ 1（0/负数 = 永不落行，属配置错误而非关档 ⇒ 不许静默）"
+        )
+        assert self.max_rows >= 0, "max_rows ≥ 0（0 = 不限）"
+
+
+#: 步A 能量探针白名单（同规格；步A 之前的存档无 `energy_probe` 键 ⇒ 回退默认 = 全关）。
+_ENERGY_PROBE_FIELDS: frozenset = frozenset(f.name for f in fields(EnergyProbeConfig))
+
+
+@dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
 
@@ -1458,6 +1493,10 @@ class SimConfig:
     #   实施规格：同文件 §三（已冻结）。依赖 `smell.channels` 含 food/risk/kin
     #   （缺 ⇒ 引擎构造期 fail-loud，不许静默降级）。
     action_selection: ActionSelectionConfig = field(default_factory=ActionSelectionConfig)
+    # ---- ENERGY-CLOSE 步A：只读能量探针（**默认关 = 旧行为逐位等价**）----
+    #   读数一律走 sidecar 新键，**不动** `EC_*` 枚举与 `energy_ledger` 列面（轻舟约束 1）。
+    #   挂进 SimConfig ⇒ 经 `asdict` 自动进指纹（跨档续跑被拦，同 `smell` / `action_selection`）。
+    energy_probe: EnergyProbeConfig = field(default_factory=EnergyProbeConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -1619,6 +1658,17 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("action_selection") or {}).items()
                     if k in _ACTION_SELECTION_FIELDS
+                }
+            ),
+            # ENERGY-CLOSE 步A 能量探针；旧存档缺失 ⇒ 回退默认（enabled=False = 逐位等价）。
+            #   同款字段白名单过滤（步A 之前的存档无 `energy_probe` 键）。
+            #   🔴 同 R233 T-F 教训：**新组必须在此显式接线**，否则 `load_snapshot(config=None)`
+            #   的续跑会把该组静默退回默认（探针档悄悄变关档 = 空 sidecar 白跑）。
+            energy_probe=EnergyProbeConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("energy_probe") or {}).items()
+                    if k in _ENERGY_PROBE_FIELDS
                 }
             ),
         )

@@ -112,7 +112,8 @@ A2 的定义（照镜 §四）：**不复用 A1 的构造恒等**，而是每 ti
 **散逸账** `dis_meta`|D1+D2+D3|—|✓ `EC_META`|已合并，若砚要拆需分别记|
 `dis_move`|D5|—|✓ `EC_MOVE`||
 `dis_attack`|D6+D7|—|✓ `EC_ATTACK`||
-`dis_signal`|D4|`SIGNAL_COST×n_emitters`|🟢 **无需新计数**（更正：现成 `_emit_count` 逐体终身计数在 `:3668` 累加，`:1461`；⇒ `SIGNAL_COST × _emit_count.sum()` 可精确反推，`config.py:560`＝0.1）|步A 前置探针已实测走通此路（见同批「旧装置逃逸量级」记录）
+`dis_signal`|D4|`SIGNAL_COST×n_emitters`|🔴 **本行原判定已作废**（2026-10-08 实码复核，澜舟）：原写"`_emit_count` 可精确反推 ⇒ 无需新计数"——**错**。`_emit_count` 的自增点在 `if self._oracle_on:` 分支内（现码 `sphere_engine.py:3804-3808`），且整段位于 Python `else:` ⇒ **oracle 关档（默认档）时 `_emit_count` 恒零**，而信号费每 tick 真实在扣（`:3770-3773`）⇒ 按反推口径记账 = **静默漏整条 D4**（同 B3「看着像计数、实际 no-op」家族）。⇒ 改为**扣费现场直记**（已实装：`_ep_add("dis_signal", SIGNAL_COST × len(emitters))`），靶向测 `test_dis_signal_is_measured_at_the_deduction_site` 钉死"关档 `_emit_count=0` 而实测 >0"；开档另有 `test_dis_signal_matches_emit_count_when_oracle_on` 作正向同闸核对|步A v0 已实装（不是反推）
+
 `dis_decay`|D8|`(1−0.5)×存量`|🔴 需从 `_corpse_decayed_e` 拆出||
 `dis_digest`|D9|`(1−0.7)×eat_amount`|🔴 需新计数|关档恒 0|
 **逃逸账** `esc_death_e`|E1|`E_dead − deposit`|🔴 需新计数|压缩点 `:5059` 处一次算清|
@@ -180,3 +181,92 @@ A2 独立实测面（tick 首末五账户总量）+ sidecar 输出|1.0–1.5|
 2. 口径未定不阻塞：③干净世界骨架草案已同批产出（见同目录 `记录-ENERGY-CLOSE步A-干净世界骨架草案-20261007.md`），骨架不依赖 A2 量域选择；
 3. 实现动工一律在 `.worktrees/ENERGY-CLOSE`，触轻舟文件面（`sphere_engine.py` 注释更正、`config.py`）前先群报求 ack；
 4. 本清单上板简报 + @砚 请裁 §四 六条 + @PI 请裁落卡措辞（R387 双轨）。
+
+---
+
+## 七、引擎段动工后的两条实码更正（2026-10-08 夜，澜舟）
+
+埋点段（`EnergyProbeConfig` + `_ep_*` 只读探针）在 `:3494-3509`（D1/D2/D3）与
+`:3770-3773`（D4）落地后，实测把本表两处口径**证伪/收紧**了。两条都是**账目口径**问题，
+按纪律只报不裁（判据归砚、裁定归 PI）。
+
+### 7.1 D4「无需新计数」= 作废（已在 §二·2.2 表内原行改写）
+
+`_emit_count` 的自增点**嵌在 `if self._oracle_on:` 里**（现码 `sphere_engine.py:3804-3808`），
+而信号费扣减在**它外面**（`:3770-3773`，Python `else:` 分支）⇒
+
+- **oracle 关档 = 默认档**：`_emit_count` 恒零，但每 tick 真实在扣 `SIGNAL_COST`；
+- ⇒ 原写法 `SIGNAL_COST × _emit_count.sum()` 反推 D4，在默认档**恒等于 0**
+  ⇒ 属 B3 同族的**静默 no-op**（"看着像计数、实际不计数"）；
+- ⇒ 已在扣费现场直记：`self._ep_add("dis_signal", SIGNAL_COST * float(len(emitters)))`；
+- 靶向测（`tests/test_energy_probe.py`）：
+  `test_dis_signal_is_measured_at_the_deduction_site` 钉"关档 `_emit_count=0` 而实测 >0"；
+  `test_dis_signal_matches_emit_count_when_oracle_on` 钉"开档现场实测 == 反推值"
+  （两条合起来才把"发射"与"付费"的分叉夹死）；
+- 变异检查：删掉 `_ep_add("dis_signal", …)` 那行 ⇒ **两条同时红**（已实跑验证）。
+
+### 7.2 `cost_meta` 通道账**系统性低记**，漏量 = 本 tick 死亡个体的当 tick 支出
+
+`_ec_flush()`（`:2023` 起）在 **tick 末**统计，且 `P` 取
+`min(_genes, _energy, _id, _ec_pt)` 的**当前**最小长度；而死亡压缩发生在同一 tick 的**后段**
+⇒ 当 tick 已付出维持费的个体，若在该 tick 内死亡，其 `_ec_pt` 尾部条目被 `[:, :P]` **裁掉**。
+
+微型冒烟档（C7 helper 口径，`tests/test_energy_probe.py::_base_cfg`，seed 42）逐 tick 实测
+（**本表为 2026-10-08 夜重跑覆写**——原表数值取自一次变异试验跑，与判据档不符，作废）：
+
+| tick | 探针 `dis_meta` | 通道账增量 | 差 | 该 tick 死亡 |
+|---|---|---|---|---|
+| 1 | 260.849 | 260.849 | 0 | 0 |
+| 2 | 260.849 | 258.870 | 1.979 | 2 |
+| 6 | 254.285 | 254.285 | 0 | 0 |
+| 9 | 249.993 | 246.937 | 3.056 | 3 |
+| 10 | 247.650 | 247.650 | 0 | 0 |
+| 14 | 245.760 | 243.782 | 1.978 | 2 |
+
+⇒ **无死亡 tick 差值恒为 0，有死亡 tick 差值 = 死亡数 × 单个体当 tick 维持费**
+（每笔 ≈ 0.73~1.0，非随机噪声）；
+同档跑到 20 tick 的累计：**探针 `4990.648606` vs 通道账 `4975.831057`，差 `14.817549`，
+该档累计死亡 17 个体** ⇒ 17 笔裁剪与 14.8 的量级对得上。
+
+**这不是引擎能量泄漏**（`energy` 数组侧那份钱确实扣了），是**记账截断**。两条影响：
+
+1. 若步A 的 `close()` 判据用**通道账**侧 ⇒ 会出现与死亡数成正比的**恒定正残差**
+   （散逸少记 ⇒ 账上"能量去向"莫名多剩）⇒ 判据必须明确用哪一侧；
+2. 反过来看这正是 A2「**独立实测侧**」要抓的第一条账 ⇒ 已把该现象固化成判据：
+   `test_dis_meta_is_not_a_copy_of_the_channel_ledger`
+   （断言 探针 > 通道账，且 `差 ≤ 单位个体上界 × 总死亡数`，并要求**只有死亡 tick 才允许有差**）。
+
+🔴 **待砚裁（不自裁）**：`energy_ledger` 的 `cost_*` 列是否按"截断后"口径继续对外承诺
+（`tools/calib_solve.py` 按现列面消费 ⇒ 改列面=破约束 1）；还是在**读数侧**注明
+"通道账 = 存活者口径，探针 = 全额口径"，把差额留给 `esc_death_e` 那条腿闭合。
+我按现有约束**不动列面**，只在 sidecar 与本记录里报出。
+
+### 7.3 本段落地面（便于审/复跑）
+
+`simulation/config.py`（`EnergyProbeConfig` + 白名单 + `SimConfig.energy_probe` + `from_dict` 接线）｜
+`simulation/sphere_engine.py`（`EP_*` 常量、`__slots__`、构造期 Rust 档硬失败、
+`_ep_add`/`_ep_tick_end`/`energy_probe_rows`/`energy_probe_totals`、
+`_populate_history` 每 tick 钩子、快照 `ep_*` 三键 + 续跑守卫）｜
+`tests/test_energy_probe.py`（28 例）｜`tools/tick_denomination_audit.py`（三条新字段归类）。
+默认关档 digest 与 C7 钉死基线 `(574887, 11266.746993)` **逐位不变**；开档同 digest 不变。
+
+⚠️ **性能门未裁定完成**（轻舟约束 4）：本机只有微型冒烟档，实测 30 tick × 5 次中位
+`关档 3.4326 ms/tick` → `开档 3.6015 ms/tick`，**比值 1.049 ≤ 1.10**；
+但**正式门 = 轻舟 C1 T10 档**（480×960/s2），本机数值只能当"没跑飞"的先声，不能替她判过。
+
+### 7.4 变异检查查出的一处**假覆盖**（记进纪律，2026-10-08 夜）
+
+跑 M1 = 删掉 D3 愈合费埋点那行（`:3531`）⇒ **全套 27 例仍绿**。原因不是判据弱，
+而是**默认档 `wound_enabled=False` ⇒ 那一行一次都不执行**，删了等于没删。
+⇒ 这是"埋点写点覆盖"层面的漏洞，与 A2 要防的"静默 no-op"同族（B3/D4 都是它）。
+
+补法：`test_dis_meta_covers_the_heal_leg_when_wounds_on` —— 开血条 +
+`wound_heal_rate=0.05`/`wound_heal_energy_cost=0.5` 让 D3 真出钱，沿用同一条
+**无死亡 tick 零残差**判据；并自带**退化守卫**（若 20 tick 全为死亡 tick、
+或改愈合参数后 `cost_meta` 一分不变 ⇒ 直接报退化，不许静默变绿）。
+复跑 M1 ⇒ **红**（`tick 3 无死亡却残差 -2.0`），恢复后 28 例绿。
+
+⇒ 遗留提醒（下一步埋点自带）：`dis_move`/`dis_attack`/`E1` 三条腿写点各有档开关
+（`dash`、`contest`、`corpse`），**不默认开** ⇒ 每条腿必须配一条"开该档"的靶向测，
+否则又是删行全绿的假覆盖。
+

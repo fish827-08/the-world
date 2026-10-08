@@ -197,6 +197,23 @@ EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
 # 收入侧通道（净收入 = 收入 − 支出；缺 `intake_photo` 会让净收入虚假为负——
 # 光合是独立于取食的**直接收入**，不经过胃）。
 
+# ---- ENERGY-CLOSE 步A：只读能量探针（A2 **独立实测侧**的散逸/逃逸分账）----
+# 口径来源：`docs/设计文档/记录-ENERGY-CLOSE步A-通道枚举与A2三账口径-20261007.md` §三/§四。
+# 🔴 **列面纪律（轻舟约束 1 + 砚⑤）**：本探针**不动** `EC_*` 枚举、**不动** `energy_ledger`
+#    列名（`tools/calib_solve.py` 按现列面消费）⇒ 读数一律走 **sidecar 新键**
+#    （`energy_probe_rows()` / `energy_probe_totals()`），行带 `tick` + 群体规模锚。
+# 🔴 **独立算式（抓漏埋点的前提）**：`_ep_add` 只累加**自己的**写入面观测，
+#    与 `_ec_*` 无数据通路 ⇒ **不得**从通道账反推（否则漏埋点会被"抄一遍"掩盖）。
+# ⚠️ v0 实装 2 条：`dis_meta`（D1 基础维持 + D2 恒温费 + D3 愈合费）与
+#    `dis_signal`（D4 信号费，扣费现场直记）——均在 Python 段（与 `EC_META` 同路径面）；
+#    其余 5 通道**未埋点 ⇒ 读数 None（未观测），不写 0**
+#    （同 `energy_ledger` 的 Rust 口径：「没测到」与「测到 0」必须分开）。
+EP_CHANNELS = ("dis_meta", "dis_move", "dis_attack", "dis_signal",
+               "esc_death_e", "esc_pred_e", "esc_pred_s")
+EP_IDX = {name: i for i, name in enumerate(EP_CHANNELS)}
+EP_N = len(EP_CHANNELS)
+EP_V0_IMPLEMENTED = ("dis_meta", "dis_signal")      # 未列出的通道读数恒 None
+
 # R141/R138：真决斗三级拆分的键（**顺序固定**；全部预置 0 ⇒ 输出不随事件有无而变）
 #   nominal = len(attackers)：名义攻击者（= `cannibalism.n_attacks`，旧口径的分母）
 #   skip_*  = 三类"根本没出手"的原因；real_attempts = 真出手 = nominal − 三类 skip
@@ -672,6 +689,15 @@ class SphereEngine:
          "_rd_pred_kill_log",  # list[(id, flat_cell, tick)] | None；载体装=[]，窗末排空
          #   🔴 F5（镜 19:46 审 / PI 697e171）：元组含**稳定个体 id + 时刻**（非槽位号——
          #   槽位在同 tick 后段压缩后不可跨窗 join）。
+         # ---- ENERGY-CLOSE 步A：只读能量探针（本线 = [开发·二线] 澜舟）------------
+         # 🔴 __slots__ 硬约束：新属性必须登记。默认关 ⇒ 整段不执行 ⇒ 逐位等价。
+         "_ep_on",             # 开关快照（构造期取一次）
+         "_ep_acc",            # (EP_N,) 当 tick 累加（tick 末入 `_ep_total` 后清零）
+         "_ep_total",          # (EP_N,) 运行期累计（sidecar `totals` 的数据源）
+         "_ep_rows",           # list[dict]：sidecar 行（受 `row_every`/`max_rows` 约束）
+         "_ep_row_every",      # 行频（每 N tick 落一行）
+         "_ep_max_rows",       # 0=不限；>0 ⇒ 环形保留最近 N 行
+         "_ep_ticks_recorded",  # 已记录的 tick 数（含未落行的 ⇒ 防"行数=0"被读成"没跑"）
      )
 
     # ---- 性状解码表（基因位 → 行为） --------------------------------
@@ -853,6 +879,30 @@ class SphereEngine:
 
         # ---- C1 D-1 钩子（默认 None ⇒ 逐位等价；载体按需装 = []）----
         self._rd_pred_kill_log = None
+
+        # ---- ENERGY-CLOSE 步A：只读能量探针（默认关 ⇒ 逐位等价 + 零开销）----
+        # 🔴 **fail-loud 组合守卫**：开探针 + Rust 路径 ⇒ 直接报错，不静默出空 sidecar。
+        #   理由（新工具四律之「fail-loud」+ 砚⑥「没测到 ≠ 测到 0」）：Rust 段把
+        #   `energy` 的写入发生在 Rust 内部（`step_vectors_stage1` 等），Python 侧
+        #   **看不到散逸分账**；若放行，长批跑完才发现零行 = 白跑。
+        #   ⇒ 步A 埋点批只在 `use_sim_core=False` 跑（与既有 `energy_ledger` 同约束）。
+        _epc = getattr(config, "energy_probe", None)
+        self._ep_on = bool(getattr(_epc, "enabled", False))
+        self._ep_row_every = int(getattr(_epc, "row_every", 1) or 1)
+        self._ep_max_rows = int(getattr(_epc, "max_rows", 0) or 0)
+        self._ep_acc = np.zeros(EP_N, dtype=np.float64)
+        self._ep_total = np.zeros(EP_N, dtype=np.float64)
+        self._ep_rows: list[dict] = []
+        self._ep_ticks_recorded = 0
+        if self._ep_on:
+            if self._use_sim_core:
+                raise ValueError(
+                    "ENERGY-CLOSE 步A 硬失败：`energy_probe.enabled=True` 且 "
+                    "`use_sim_core=True` ⇒ 代谢/维持等散逸发生在 Rust 内部，Python 侧"
+                    "无法分账 ⇒ 探针只会产出空 sidecar（白跑一批）。"
+                    "请改 `use_sim_core=False`（步A 埋点批口径），或等 Rust 返回计数/"
+                    "只跑全量实测门的裁定。"
+                )
 
         # 预计算统一邻居表（L6 Rust 下沉用）：**P0.1（T1）紧凑化** —— 直接复用 world 的
         # 紧凑缓存（`(n_cells, 8)` int64 ≈ 29.5 MB @480×960），不再自建
@@ -2038,6 +2088,71 @@ class SphereEngine:
         """逐 tick 的净收入统计序列（CSV 16 列的来源；派工单 §1.3 列名）。"""
         return self._ec_ts
 
+    # ---- ENERGY-CLOSE 步A：只读探针（sidecar；**独立算式**，不读通道账）----------
+
+    def _ep_add(self, name: str, amount) -> None:
+        """累加**本 tick** 的某通道实测散逸/逃逸量（受守卫写入面的只读观测）。
+
+        🔴 与 `_ec_add` **无数据通路**：本函数只吃"这一行代码刚刚从 `energy` 扣掉的
+        那个数组"，不去看 `_ec_pt`/`_ec_global` ⇒ 通道账若漏埋点，探针侧仍独立成立
+        （A2 三账的"独立实测侧"定义；若从 `_ec_*` 反推则永远自证、抓不到漏账）。
+        不消费 RNG；关档时调用点整段不执行 ⇒ 零开销、逐位等价。
+        """
+        i = EP_IDX.get(name)
+        if i is None:
+            raise ValueError(f"未知能量探针通道 {name!r}（合法：{EP_CHANNELS}）")
+        a = np.asarray(amount, dtype=np.float64)
+        if a.size == 0:
+            return
+        if not np.all(np.isfinite(a)):
+            raise AssertionError(f"探针通道 {name} 收到非有限量（NaN/Inf）")
+        self._ep_acc[i] += float(a.sum())
+
+    def _ep_tick_end(self) -> None:
+        """tick 末：把当 tick 累加并入总计，按 `row_every` 落 sidecar 行，然后清零。
+
+        sidecar 行锚（砚⑤附款）：`tick` + `pop_n`（群体规模）⇒ 与主 CSV 的逐 tick 行
+        回 join。⚠️ **逐个体索引锚**要等 D5/D6/E1 这类按个体记的通道接入后再加，
+        v0 只有 `dis_meta`（群体级）⇒ 先给群体锚，不假装有个体锚。
+        """
+        self._ep_ticks_recorded += 1
+        self._ep_total += self._ep_acc
+        if self._tick % self._ep_row_every == 0:
+            row = {"tick": int(self._tick), "pop_n": int(len(self._id))}
+            for nm in EP_V0_IMPLEMENTED:
+                row[nm] = float(self._ep_acc[EP_IDX[nm]])
+            for nm in EP_CHANNELS:
+                if nm not in EP_V0_IMPLEMENTED:
+                    row[nm] = None            # 🔴 未观测 ≠ 0
+            self._ep_rows.append(row)
+            if self._ep_max_rows > 0 and len(self._ep_rows) > self._ep_max_rows:
+                del self._ep_rows[:len(self._ep_rows) - self._ep_max_rows]
+        self._ep_acc[:] = 0.0
+
+    def energy_probe_rows(self) -> list[dict]:
+        """sidecar 行（`rows` 段）。关档 ⇒ `[]`（**且调用方应检查 `enabled`**）。"""
+        return self._ep_rows
+
+    def energy_probe_totals(self) -> dict:
+        """sidecar 汇总（`totals` 段）：逐通道累计 + 未观测通道显式标 None。"""
+        out = {
+            "enabled": bool(self._ep_on),
+            "path": "rust" if self._use_sim_core else "python",
+            "ticks_recorded": int(self._ep_ticks_recorded),
+            "rows_emitted": int(len(self._ep_rows)),
+        }
+        for nm in EP_CHANNELS:
+            out[nm + "_sum"] = (
+                round(float(self._ep_total[EP_IDX[nm]]), 6)
+                if nm in EP_V0_IMPLEMENTED else None
+            )
+        out["note"] = (
+            "v0 实装 dis_meta（D1 基础维持 + D2 恒温费 + D3 愈合费）与 "
+            "dis_signal（D4 信号费，扣费现场直记）；"
+            "其余通道未埋点 ⇒ 读数 None = 未观测，不是 0。"
+        )
+        return out
+
     def energy_ledger(self) -> dict:
         """`energy_ledger` 段（summary；派工单 §1.3 结构，**列名勿改**——`calib_solve.py` 按此消费）。
 
@@ -2955,6 +3070,10 @@ class SphereEngine:
         # R141 P0：tick 末结算分通道记账（派工单 §1.2：**逐 tick** 出 n/mean/p50/var
         # ⇒ 避免"跨 tick 合并样本"造成的时间自相关伪重复，内评 01:16 §1.3③）
         self._ec_flush()
+        # 步A 探针：与 `_ec_flush` 同节拍（每 tick 一次），但**独立累加器**——
+        # 关档 ⇒ 一次布尔判断即返回（零开销、逐位等价）。
+        if self._ep_on:
+            self._ep_tick_end()
         if self._history_limit > 0:
             overflow = len(self._history) - self._history_limit
             if overflow > 0:
@@ -3387,6 +3506,12 @@ class SphereEngine:
             _ch = ocfg.homeo_upkeep * homeo
             energy -= _ch
             self._ec_add(EC_META, None, _ch)   # R141：并入 cost_meta 通道
+            # ---- 步A 探针（D1 基础维持 + D2 恒温费）：读**刚扣掉的那两个数组** ----
+            # 🔴 独立算式：直接对写入量求和，不吃 `_ec_pt`/`_ec_global` ⇒ 通道账漏埋点
+            #    时本侧仍成立（A2「独立实测侧」的定义）。关档 ⇒ 整段不执行（零开销）。
+            if self._ep_on:
+                self._ep_add("dis_meta", _cm)
+                self._ep_add("dis_meta", _ch)
 
         # 2.5) S2 愈合（设计稿 §2.3 H5；`wound_enabled`）：health += heal_rate（上限 1.0），
         #      并扣代谢能量 heal_energy_cost（愈合不免费）。
@@ -3401,6 +3526,9 @@ class SphereEngine:
                 energy[_heal] -= _heal_cost
                 # R165 0-2：愈合耗能**折进 `cost_meta`**（维持类，不新开通道）
                 self._ec_add(EC_META, np.flatnonzero(_heal), _heal_cost)
+                # ---- 步A 探针（D3 愈合费）：同一段写入量的**独立**求和 ----
+                if self._ep_on:
+                    self._ep_add("dis_meta", _heal_cost * float(_heal.sum()))
 
         # 3.5) 植物化光合增强（g19）：统一在 stage1 之后补，确保 Rust/Python 双路径一致
         #     扎根个体（g19 高）额外获得 光照×g8×g19×photo_max 的光合收入
@@ -3645,6 +3773,14 @@ class SphereEngine:
                 emitters = emitters[can_afford]
                 if len(emitters):
                     energy[emitters] -= SIGNAL_COST
+                    # ---- 步A 探针（D4 信号费）：在**扣费现场**记，不吃 `_emit_count` ----
+                    # 🔴 口径更正（2026-10-08，自查）：`_emit_count` 只在
+                    #    `if self._oracle_on:` 分支内自增（:3804-3808），且整段位于 Python
+                    #    `else:` ⇒ 它**不是**"发射次数"的全量计数。用
+                    #    `SIGNAL_COST × _emit_count.sum()` 反推 D4 = **oracle 关档时恒 0**
+                    #    的静默漏账（旧口径文档 §五 `:115` "无需新计数"一句据此作废）。
+                    if self._ep_on:
+                        self._ep_add("dis_signal", SIGNAL_COST * float(len(emitters)))
                     e_flat = self._flat[emitters]
                     if random_patterns is not None:
                         # D1 random 模式：用独立 rng 预生成的随机模式
@@ -6314,6 +6450,16 @@ class SphereEngine:
                  self._gate_delta_full_sum, self._gate_delta_content_sum],
                 dtype=np.float64,
             )
+        # ---- 步A 能量探针状态（v3 追加键；旧快照无此键 ⇒ 载入侧硬失败）----
+        # 🔴 续跑不可静默归零（R233 T-F 同族）：`_ep_total`/`_ep_acc`/`_ep_ticks_recorded`
+        #    随快照走。⚠️ **sidecar 行不落快照**（行是导出件、由 runner 续写；快照只保
+        #    累计量，不塞观测数据）⇒ 续跑后 `rows_emitted` 从 0 重计，`totals` 仍连续。
+        data["ep_total"] = self._ep_total.copy()
+        data["ep_acc"] = self._ep_acc.copy()
+        data["ep_ticks"] = np.array(
+            [self._ep_ticks_recorded, int(self._ep_on), self._ep_row_every,
+             self._ep_max_rows], dtype=np.int64,
+        )
         # D-26a 四环节诊断计数（oracle off 时恒零，仍随快照走以保证续跑后累计不失真）
         data["diag_funnel"] = np.array(
             [
@@ -6654,6 +6800,40 @@ class SphereEngine:
         # （语义 = 与修复前"缺侧车"的续跑一致；不静默错位）。
         if "d2_rng_state" in data:
             engine._d2_rng.set_state(pickle.loads(data["d2_rng_state"].item()))
+
+        # --- 9.5 步A 能量探针状态（ENERGY-CLOSE；旧快照 + 开档 ⇒ 硬失败）----
+        # 🔴 关档（默认）⇒ 整段跳过 ⇒ 与既有快照行为逐位一致。
+        #   开档且缺键 ⇒ **报错不静默归零**（R233 T-F 教训：续跑静默丢状态是隐性错误；
+        #   探针累计归零会被读数侧当成"这段没散逸"）。
+        if "ep_ticks" in data:
+            _et = np.asarray(data["ep_ticks"], dtype=np.int64).reshape(-1)
+            if _et.size != 4:
+                raise ValueError(
+                    f"ep_ticks 长度={_et.size} ≠ 4 ⇒ 探针快照键损坏（不猜语义）"
+                )
+            engine._ep_ticks_recorded = int(_et[0])
+            _saved_on = bool(_et[1])
+            if _saved_on != bool(engine._ep_on):
+                raise ValueError(
+                    f"快照 energy_probe.enabled={int(_saved_on)} 与当前配置 "
+                    f"enabled={int(engine._ep_on)} 不一致 ⇒ 拒绝续跑（配置漂移，"
+                    f"非数值容差问题）"
+                )
+            if engine._ep_on:
+                if int(_et[2]) != engine._ep_row_every or int(_et[3]) != engine._ep_max_rows:
+                    raise ValueError(
+                        f"快照 row_every={int(_et[2])}/max_rows={int(_et[3])} 与当前配置 "
+                        f"{engine._ep_row_every}/{engine._ep_max_rows} 不一致 ⇒ 拒绝续跑"
+                        f"（sidecar 行频变了 ⇒ 两侧读数不可拼）"
+                    )
+                engine._ep_total = np.asarray(data["ep_total"], dtype=np.float64).copy()
+                engine._ep_acc = np.asarray(data["ep_acc"], dtype=np.float64).copy()
+        elif engine._ep_on:
+            raise ValueError(
+                "ENERGY-CLOSE 步A 硬失败：快照无 `ep_*` 键（早于探针实装）而当前配置"
+                " `energy_probe.enabled=True` ⇒ 续跑会把探针累计静默归零。"
+                "请用关档快照另起探针档，或给本快照补探针键后重试。"
+            )
 
         # --- 10. 恢复元数据 ---
         engine._tick = int(data["tick"])

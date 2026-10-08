@@ -135,6 +135,10 @@ KNOWN: dict[str, str] = {
     "smell.w_risk": INVARIANT,
     "smell.w_kin": INVARIANT,
     "smell.norm_mode": INVARIANT,            # 归一化模式（字符串）
+    # ---- ENERGY-CLOSE 步A 能量探针（本线 = [开发·二线] 澜舟）----
+    "energy_probe.row_every": DURATION,      # 落行间隔（tick 数）⇒ 同 `smell.update_every` 族
+    "energy_probe.max_rows": INVARIANT,      # 环形**行数**上限（不是 tick）⇒ 不动
+    "energy_probe.enabled": INVARIANT,       # 开关（bool）⇒ 不承载 tick 面额
     # ---- 每 tick 概率（1−(1−p)^k）----
     "predation.attack_prob_coef": PROB,
     "pleasure.baseline_rate": PROB,
