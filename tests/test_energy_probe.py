@@ -30,7 +30,7 @@ import pytest
 
 from simulation.config import EnergyProbeConfig, InfoStructureConfig, SimConfig
 from simulation.sphere_engine import (
-    EP_CHANNELS, EP_V0_IMPLEMENTED, SphereEngine,
+    EP_CHANNELS, EP_IMPLEMENTED, SphereEngine,
 )
 
 
@@ -70,6 +70,56 @@ def _run(e: SphereEngine, ticks: int = 30) -> SphereEngine:
 
 def _digest(e: SphereEngine) -> tuple[int, float]:
     return (int(e._flat.sum()), round(float(e._energy.sum()), 6))
+
+
+def _resid_probe(e: SphereEngine, channel: str, ec_index: int,
+                 ticks: int = 20, require_truncation: bool = True) -> list[tuple]:
+    """逐 tick 判据（散逸腿通用）：**没死人 = 两侧一分不差**。
+
+    🔴 硬判据两条，各抓一类假实现：
+    ① `d_died == 0 ⇒ gap == 0`：**删埋点**（探针少记）⇒ 残差转负 ⇒ 当场红；
+    ② `0 ≤ gap ≤ 该 tick 探针全额`：被截断的死人支出必然是当 tick 总支出的**子集**
+       ⇒ 抄通道账（gap = −截断量 < 0）与离谱多记（gap > 全额）都被同一式夹住。
+    「残差 ∝ 死亡数」作为**观测量**返回（每笔人均差），不当硬门——硬门要的只是
+    "两侧差只可能出现在死亡 tick 且不超过该 tick 全额"，额度口径归砚，我不自裁。
+
+    返回 [(tick, gap, d_died, gap_per_died)]；无干净 tick 或无死亡 tick ⇒ 报退化。
+    """
+    out, prev_ledger, prev_died = [], 0.0, 0
+    clean, hit = 0, 0
+    for _ in range(ticks):
+        if e.extinct:
+            break
+        e.step()
+        rows = [r for r in e.energy_probe_rows() if r["tick"] == e.tick]
+        assert len(rows) == 1, f"tick {e.tick} 探针行数 {len(rows)} ≠ 1 ⇒ 落行钩子丢了"
+        probe_tick = rows[0][channel]
+        ledger_now = float(e._ec_global[ec_index])
+        died_now = int(e._run_died)
+        d_ledger, d_died = ledger_now - prev_ledger, died_now - prev_died
+        gap = round(probe_tick - d_ledger, 6)
+        if d_died == 0:
+            assert gap == 0.0, (
+                f"{channel}：tick {e.tick} 无死亡却残差 {gap} ⇒ 埋点漏记"
+                "（探针少记）或两侧不同源（另有未解释项）"
+            )
+            clean += 1
+        else:
+            assert 0.0 <= gap <= round(probe_tick, 6) + 1e-9, (
+                f"{channel}：tick {e.tick} 残差 {gap} 不在 [0, 该 tick 探针全额 "
+                f"{probe_tick}] ⇒ 负 = 抄通道账/截断方向反了；超全额 = 多记"
+            )
+            if gap > 0.0:
+                hit += 1
+        out.append((e.tick, gap, d_died, round(gap / d_died, 6) if d_died else 0.0))
+        prev_ledger, prev_died = ledger_now, died_now
+    assert clean > 0, f"{channel}：{ticks} tick 全为死亡 tick ⇒ 零残差判据未生效，本测退化"
+    if require_truncation:
+        assert hit > 0, (
+            f"{channel}：{ticks} tick 无一处死亡截断 ⇒ 判据退化（换更长档，"
+            "或本腿支出按现行压缩次序根本不会被裁——那要走板帖报备，不许静默关判据）"
+        )
+    return out
 
 
 # ------------------------------------------------------------------ ① 默认关等价
@@ -224,6 +274,82 @@ def test_dis_meta_covers_the_heal_leg_when_wounds_on() -> None:
     )
 
 
+def test_dis_move_default_branch_leg() -> None:
+    """④ D5 位移费·**默认档**那条腿（`subpos.enabled=False ∧ l2_dash=False`）。"""
+    from simulation.sphere_engine import EC_MOVE
+    e = _engine(EnergyProbeConfig(enabled=True))
+    assert not e.config.subpos.enabled and not e.config.simulation.l2_dash
+    _resid_probe(e, "dis_move", EC_MOVE, 20)
+    assert e.energy_probe_totals()["dis_move_sum"] > 0.0
+
+
+def test_dis_move_l2_branch_leg() -> None:
+    """④ D5 位移费·**L2 档**那条腿（`:4620`）——默认档不执行 ⇒ 必须显式开档才有覆盖。
+
+    ⚠️ 顺带发现（**只报不定性、不改**）：`_run_flat_move_n`（主判据 `mean_flat_moves` 的分子）
+    连同 `_run_mover_sub_n` / `_run_slow_n` 的 `+=` 只在 **subpos 分支**里（`:4602-4604`）
+    ⇒ `subpos.enabled=False`（**含本仓默认档**）下分母 `_run_mover_sub_n = 0`
+    ⇒ `:2332` 的 `mean_flat_moves` 恒 `None`。所以本测不能拿它当"这腿真走过"的守卫，
+    改用「默认档对照 + 通道账增量」两条替代。判读归砚/PI。
+    """
+    from simulation.sphere_engine import EC_MOVE
+    cfg = _base_cfg()
+    cfg.simulation.l2_dash = True
+    cfg.subpos.enabled = False
+    cfg.energy_probe = EnergyProbeConfig(enabled=True)
+    e = SphereEngine(cfg)
+    assert e.config.simulation.l2_dash, "L2 档没开上 ⇒ 本测测的是默认腿，退化"
+    _resid_probe(e, "dis_move", EC_MOVE, 20)
+    ctl = _run(_engine(EnergyProbeConfig(enabled=True)), 20)   # 默认档（非 L2）
+    a = e.energy_probe_totals()["dis_move_sum"]
+    b = ctl.energy_probe_totals()["dis_move_sum"]
+    assert a > 0.0 and b > 0.0, f"dis_move 两侧有零 ⇒ 档位没跑出位移支出（a={a} b={b}）"
+    assert float(e._ec_global[EC_MOVE]) > 0.0, "通道账 EC_MOVE 恒零 ⇒ 位移段未执行，本测退化"
+    assert a != b, "L2 档与默认档 dis_move 一分不差 ⇒ 没走到 L2 计费式，本测测的是默认腿"
+
+
+def test_dis_move_subpos_branch_leg() -> None:
+    """④ D5 位移费·**subdiv 档**那条腿（`:4610`，按实际步数比例计费）。"""
+    from simulation.sphere_engine import EC_MOVE
+    cfg = _base_cfg()
+    cfg.subpos.enabled = True
+    cfg.simulation.l2_dash = False
+    cfg.energy_probe = EnergyProbeConfig(enabled=True)
+    e = SphereEngine(cfg)
+    assert e.config.subpos.enabled, "subpos 档没开上 ⇒ 本测测的是默认腿，退化"
+    _resid_probe(e, "dis_move", EC_MOVE, 20)
+    assert e.energy_probe_totals()["dis_move_sum"] > 0.0
+    assert sum(e._steps_hist) > 0, "subdiv 档无人走步 ⇒ 该腿未执行，本测退化"
+
+
+def test_dis_attack_predation_leg() -> None:
+    """④ D6 捕食出手费（`:4813` 现场直记 vs `:4902` 批量账）。"""
+    from simulation.sphere_engine import EC_ATTACK
+    e = _engine(EnergyProbeConfig(enabled=True))
+    # ⚠️ 实测（C7 档 40 tick）：D6 侧**一次死亡截断都没出现** ⇒ 本腿只跑零残差判据
+    #    （删埋点仍当场红：残差转负）。截断捕获能力由 `dis_meta` 腿与 D7 争夺腿证明。
+    #    🔴 不静默放宽：这条"未见截断"是**观测**，写进记录 §7.5 供砚判读量级。
+    _resid_probe(e, "dis_attack", EC_ATTACK, 40, require_truncation=False)
+    assert e._duel["real_attempts"] > 0, "出手数为零 ⇒ D6 腿未执行，本测退化"
+    assert e.energy_probe_totals()["dis_attack_sum"] > 0.0
+
+
+def test_dis_attack_contest_leg_when_contest_on() -> None:
+    """④ D7 争夺出手费（`contest_enabled` **默认关** ⇒ 不开档就是假覆盖，照 §7.4 教训）。
+
+    D7 的通道账写入是**循环外批量一次**（`:2016`），探针在扣费现场逐次记 ⇒
+    把批量那行删掉也必须被本测抓到（残差转正 = 通道账少记）。
+    """
+    from simulation.sphere_engine import EC_ATTACK
+    cfg = _base_cfg()
+    cfg.corpse_wound.contest_enabled = True
+    cfg.energy_probe = EnergyProbeConfig(enabled=True)
+    e = SphereEngine(cfg)
+    assert e.config.corpse_wound.contest_enabled
+    _resid_probe(e, "dis_attack", EC_ATTACK, 40)
+    assert e._contest_n > 0, "20 tick 无一次争夺 ⇒ D7 腿未执行，本测退化（另需查档）"
+
+
 def test_probe_read_api_does_not_touch_ledger_arrays() -> None:
     """④ 静态面：`_ep_*` 三个方法的字节码**不得**引用 `_ec_pt`/`_ec_global`。
 
@@ -303,7 +429,7 @@ def test_row_every_and_ring_buffer() -> None:
 
 
 def test_uninstrumented_channels_read_none_not_zero() -> None:
-    """⑤ 🔴 v0 只实装 `dis_meta`/`dis_signal` ⇒ 其余 5 通道读数必须是 **None**，不是 0。
+    """⑤ 🔴 已实装腿（4/4 散逸）读数 = 实测浮点；**未埋点的逃逸腿读数必须是 None**，不是 0。
 
     「没测到」写成 0 = 把漏埋点伪装成"这条通道一分没漏"，是本项目反复踩的假绿。
     """
@@ -311,14 +437,17 @@ def test_uninstrumented_channels_read_none_not_zero() -> None:
     row = e.energy_probe_rows()[-1]
     tot = e.energy_probe_totals()
     for name in EP_CHANNELS:
-        if name in EP_V0_IMPLEMENTED:
+        if name in EP_IMPLEMENTED:
             assert isinstance(row[name], float), f"{name} 应是实测浮点"
             assert isinstance(tot[name + "_sum"], float)
         else:
             assert row[name] is None, f"{name} 未埋点却读出 {row[name]!r}"
             assert tot[name + "_sum"] is None, f"{name}_sum 未埋点却非 None"
     assert tot["path"] == "python"
-    assert "v0 实装" in tot["note"]
+    assert "未观测，不是 0" in tot["note"], tot["note"]
+    # 4/4 散逸腿齐 = 步A 散逸侧闭合的前提；逃逸腿留白必须是**显式**的，不是默认值
+    assert set(EP_IMPLEMENTED) == {"dis_meta", "dis_move", "dis_attack", "dis_signal"}
+    assert all(n.startswith("esc_") for n in set(EP_CHANNELS) - set(EP_IMPLEMENTED))
 
 
 def test_sidecar_row_anchor_for_join() -> None:

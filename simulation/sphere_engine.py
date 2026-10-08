@@ -204,15 +204,17 @@ EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
 #    （`energy_probe_rows()` / `energy_probe_totals()`），行带 `tick` + 群体规模锚。
 # 🔴 **独立算式（抓漏埋点的前提）**：`_ep_add` 只累加**自己的**写入面观测，
 #    与 `_ec_*` 无数据通路 ⇒ **不得**从通道账反推（否则漏埋点会被"抄一遍"掩盖）。
-# ⚠️ v0 实装 2 条：`dis_meta`（D1 基础维持 + D2 恒温费 + D3 愈合费）与
+# ⚠️ 实装 4 条（4/4 散逸腿已齐）：`dis_meta`（D1 基础维持 + D2 恒温费 + D3 愈合费）、
+#    `dis_move`（D5 位移费，subdiv/L2/默认三支各记各的扣费现场）、
+#    `dis_attack`（D6 捕食出手费 + D7 争夺出手费）、
 #    `dis_signal`（D4 信号费，扣费现场直记）——均在 Python 段（与 `EC_META` 同路径面）；
-#    其余 5 通道**未埋点 ⇒ 读数 None（未观测），不写 0**
+#    剩余 3 通道（逃逸腿 esc_*）**未埋点 ⇒ 读数 None（未观测），不写 0**
 #    （同 `energy_ledger` 的 Rust 口径：「没测到」与「测到 0」必须分开）。
 EP_CHANNELS = ("dis_meta", "dis_move", "dis_attack", "dis_signal",
                "esc_death_e", "esc_pred_e", "esc_pred_s")
 EP_IDX = {name: i for i, name in enumerate(EP_CHANNELS)}
 EP_N = len(EP_CHANNELS)
-EP_V0_IMPLEMENTED = ("dis_meta", "dis_signal")      # 未列出的通道读数恒 None
+EP_IMPLEMENTED = ("dis_meta", "dis_move", "dis_attack", "dis_signal")
 
 # R141/R138：真决斗三级拆分的键（**顺序固定**；全部预置 0 ⇒ 输出不随事件有无而变）
 #   nominal = len(attackers)：名义攻击者（= `cannibalism.n_attacks`，旧口径的分母）
@@ -2006,6 +2008,9 @@ class SphereEngine:
                 self._contest_holder_win_n += 1
             self._health[loser] = max(0.0, float(self._health[loser]) - _lose)
             energy[winner] -= _cost
+            # ---- 步A 探针（D7 争夺出手费）：扣费现场直记，不吃 :2011 的批量写入 ----
+            if self._ep_on:
+                self._ep_add("dis_attack", _cost)
             _paid.append(int(winner))
         if _paid:                                  # R165 0-2：一次写入（不是逐次）
             self._ec_add(EC_ATTACK, np.asarray(_paid, dtype=np.int64), _cost)
@@ -2119,10 +2124,10 @@ class SphereEngine:
         self._ep_total += self._ep_acc
         if self._tick % self._ep_row_every == 0:
             row = {"tick": int(self._tick), "pop_n": int(len(self._id))}
-            for nm in EP_V0_IMPLEMENTED:
+            for nm in EP_IMPLEMENTED:
                 row[nm] = float(self._ep_acc[EP_IDX[nm]])
             for nm in EP_CHANNELS:
-                if nm not in EP_V0_IMPLEMENTED:
+                if nm not in EP_IMPLEMENTED:
                     row[nm] = None            # 🔴 未观测 ≠ 0
             self._ep_rows.append(row)
             if self._ep_max_rows > 0 and len(self._ep_rows) > self._ep_max_rows:
@@ -2144,12 +2149,14 @@ class SphereEngine:
         for nm in EP_CHANNELS:
             out[nm + "_sum"] = (
                 round(float(self._ep_total[EP_IDX[nm]]), 6)
-                if nm in EP_V0_IMPLEMENTED else None
+                if nm in EP_IMPLEMENTED else None
             )
         out["note"] = (
-            "v0 实装 dis_meta（D1 基础维持 + D2 恒温费 + D3 愈合费）与 "
+            "实装 4/4 散逸腿：dis_meta（D1 基础维持 + D2 恒温费 + D3 愈合费）、"
+            "dis_move（D5 位移费，subdiv/L2/默认三支各自扣费现场）、"
+            "dis_attack（D6 捕食出手费 + D7 争夺出手费）、"
             "dis_signal（D4 信号费，扣费现场直记）；"
-            "其余通道未埋点 ⇒ 读数 None = 未观测，不是 0。"
+            "逃逸腿 esc_* 未埋点 ⇒ 读数 None = 未观测，不是 0。"
         )
         return out
 
@@ -3775,7 +3782,7 @@ class SphereEngine:
                     energy[emitters] -= SIGNAL_COST
                     # ---- 步A 探针（D4 信号费）：在**扣费现场**记，不吃 `_emit_count` ----
                     # 🔴 口径更正（2026-10-08，自查）：`_emit_count` 只在
-                    #    `if self._oracle_on:` 分支内自增（:3804-3808），且整段位于 Python
+                    #    `if self._oracle_on:` 分支内自增（:3822-3825），且整段位于 Python
                     #    `else:` ⇒ 它**不是**"发射次数"的全量计数。用
                     #    `SIGNAL_COST × _emit_count.sum()` 反推 D4 = **oracle 关档时恒 0**
                     #    的静默漏账（旧口径文档 §五 `:115` "无需新计数"一句据此作废）。
@@ -4602,6 +4609,9 @@ class SphereEngine:
                     _cost = move_cost_ind[mi] * (_st.astype(np.float64) / float(_subdiv))
                     energy[mi] -= _cost
                     self._ec_add(EC_MOVE, mi, _cost)
+                    # ---- 步A 探针（D5 位移费·subdiv 档）：扣费现场独立求和 ----
+                    if self._ep_on:
+                        self._ep_add("dis_move", _cost)
                 else:
                     self._flat[mi] = targets
                     if _l2_on:
@@ -4609,10 +4619,16 @@ class SphereEngine:
                         _cost = move_cost_ind[mi] * _mult
                         energy[mi] -= _cost
                         self._ec_add(EC_MOVE, mi, _cost)
+                        # ---- 步A 探针（D5 位移费·L2 档）----
+                        if self._ep_on:
+                            self._ep_add("dis_move", _cost)
                     else:
                         energy[mi] -= move_cost_ind[mi]
                         # R141 P0：cost_move 通道（只记 Python 路径；Rust 路径在 Rust 内扣费）
                         self._ec_add(EC_MOVE, mi, move_cost_ind[mi])
+                        # ---- 步A 探针（D5 位移费·默认档）----
+                        if self._ep_on:
+                            self._ep_add("dis_move", move_cost_ind[mi])
                 # 5.6) 信任学习
                 target_cells = self._flat[mi]
                 had_signal = sig_present[target_cells] > 0
@@ -4795,6 +4811,9 @@ class SphereEngine:
                         continue
                     self._duel["real_attempts"] += 1
                     energy[idx] -= pcfg.attack_cost
+                    # ---- 步A 探针（D6 捕食出手费）：扣费现场直记（:4902 的批量账不吃它）----
+                    if self._ep_on:
+                        self._ep_add("dis_attack", pcfg.attack_cost)
                     _atk_i.append(idx)
                     _atk_amt.append(float(pcfg.attack_cost))
                     success_rate = np.clip(
