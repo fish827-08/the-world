@@ -270,10 +270,33 @@ def test_engine_never_imports_s0_kernel():
     assert offenders == [], f"引擎已导入 s0_kernel：{offenders}"
 
 
+RNG_FREE_MODULES = ("accounts", "channels", "books", "world", "closed_loop", "arms")
+RNG_USER_MODULES = ("harness",)     # 唯一消费者：模拟要抽样 ⇒ 换取"同 seed 逐位复现"硬门
+
+
+def _imported_modules(name: str) -> set[str]:
+    """按 **AST** 取真实 import 面（子串匹配会把 docstring 里提"random"当成违规）。"""
+    import ast
+    src = inspect.getsource(importlib.import_module(f"s0_kernel.{name}"))
+    got: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            got |= {al.name for al in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            got.add(node.module)
+    return got
+
+
 def test_kernel_consumes_no_rng():
-    for name in ("accounts", "channels", "books", "world", "closed_loop"):
-        src = inspect.getsource(importlib.import_module(f"s0_kernel.{name}"))
-        assert "random" not in src and "np." not in src, name
+    """账本层与**获取函数层**（含 arms）零 RNG；出货层 harness 是唯一例外，另条钉其边界。"""
+    banned = {"random", "numpy.random", "np.random", "secrets"}
+    for name in RNG_FREE_MODULES:
+        got = _imported_modules(name)
+        assert not (got & banned), f"{name} 消费 RNG：{sorted(got & banned)}"
+    hg = _imported_modules("harness")
+    assert "numpy" in hg, "harness 该抽样却没抽 ⇒ 出货面退化"
+    assert "simulation" not in " ".join(sorted(hg)), "harness 不许碰主引擎（零行为面）"
+    assert "simulation.sphere_engine" not in " ".join(sorted(hg))
 
 
 def test_same_options_give_bit_identical_state():

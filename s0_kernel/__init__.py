@@ -10,9 +10,9 @@
   唯一会合点是 `Books.close()` ⇒ 杜绝"由构造恒真"的尾差假绿（`_audit_*:521` / test_o7 同族）。
 - **未登记的写能量动作当场 raise**（fail-loud）：旁路 `apply()` ⇒ `ChannelViolation`；
   未登记真实写点 ⇒ `close()` 非零（变异 M1–M3/M5 证明）。
-- **不消费 RNG**：本包不 import `random`/`numpy.random`，同参数跑两次逐位相同。
+- **不消费 RNG（除 `harness`）**：`accounts/channels/books/world/closed_loop/arms` 全不 import `random`/`numpy.random`，同参数跑两次逐位相同；**唯一**消费 RNG 的是 `harness`（它要模拟抽样），代价是必须**同 seed 逐位复现**（`tests/test_s0_harness.py` 钉字节级一致）。
 
-模块分层（单向依赖，无环）：`accounts` → `channels` → `books` → `world` → `closed_loop`。
+模块分层（单向依赖，无环）：`accounts` → `channels` → `books` → `world` → `closed_loop`；获取函数层 `arms`（纯函数）→ 出货层 `harness`（`run_arm`）。
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from .arms import (F_FORMS, INCONCLUSIVE_EXIT, SIGMA_C_PROVISIONAL, WINDOW_GUARD
                    nu_local, nu_proxy, success_s, w_a, w_b, w_b0, w_mn, w_mr)
 from .books import DOMAIN_ACCOUNTS, Books, resolve_domain
 from .channels import DIS, ESC, INJ, TRF, Channel, ChannelRegistry, ChannelViolation
+from .harness import Demography, S0World, run_arm
 from .world import (ConservationViolation, World, WorldOptions, check_tick, default_registry,
                     run)
 
@@ -38,4 +39,5 @@ __all__ = [
     "clamp_is_active", "declare_inconclusive_exit", "default_predation", "f_a1", "f_gn",
     "has_interior_valley", "is_inside_valley_window", "nu_local", "nu_proxy", "success_s",
     "w_a", "w_b", "w_b0", "w_mn", "w_mr",
+    "Demography", "S0World", "run_arm",
 ]
