@@ -429,7 +429,7 @@ def test_row_every_and_ring_buffer() -> None:
 
 
 def test_uninstrumented_channels_read_none_not_zero() -> None:
-    """⑤ 🔴 已实装腿（4/4 散逸）读数 = 实测浮点；**未埋点的逃逸腿读数必须是 None**，不是 0。
+    """⑤ 🔴 已实装腿（4/4 散逸 + E1）读数 = 实测浮点；**未埋点的逃逸腿读数必须是 None**，不是 0。
 
     「没测到」写成 0 = 把漏埋点伪装成"这条通道一分没漏"，是本项目反复踩的假绿。
     """
@@ -445,8 +445,10 @@ def test_uninstrumented_channels_read_none_not_zero() -> None:
             assert tot[name + "_sum"] is None, f"{name}_sum 未埋点却非 None"
     assert tot["path"] == "python"
     assert "未观测，不是 0" in tot["note"], tot["note"]
-    # 4/4 散逸腿齐 = 步A 散逸侧闭合的前提；逃逸腿留白必须是**显式**的，不是默认值
-    assert set(EP_IMPLEMENTED) == {"dis_meta", "dis_move", "dis_attack", "dis_signal"}
+    # 散逸 4/4 + 逃逸 E1 = 步A 已实装面；留白必须是**显式**的（esc_pred_* 未埋点），不是默认值
+    assert set(EP_IMPLEMENTED) == {
+        "dis_meta", "dis_move", "dis_attack", "dis_signal", "esc_death_e"
+    }
     assert all(n.startswith("esc_") for n in set(EP_CHANNELS) - set(EP_IMPLEMENTED))
 
 
@@ -505,6 +507,72 @@ def test_dis_signal_matches_emit_count_when_oracle_on() -> None:
     assert e.energy_probe_totals()["dis_signal_sum"] == pytest.approx(
         SIGNAL_COST * float(e._emit_count.sum()), rel=0, abs=1e-9
     ), "开档下现场实测 ≠ _emit_count 反推 ⇒ 发射与付费分叉"
+
+
+# ------------------------------------------------------------------ 逃逸腿 E1（死亡逃逸）
+
+def test_esc_death_e_tracks_deaths_when_corpse_off() -> None:
+    """E1 · 默认档（`corpse_enabled=False`）：死者体能在压缩点**全额消失** ⇒ 逃逸 = 全额。
+
+    两条硬判据各抓一类假实现：
+    ① 无死亡 tick ⇒ 该行必须**恰好 0**（抓"无条件加"/把上 tick 余量串记）；
+    ② 死亡 tick ⇒ 人均逃逸 ≤ `max_energy`（抓多记）。
+    上界口径不是我新造的容差 —— 引擎自己两条扣费封顶（`sphere_engine.py:2237-2238`）：
+    进食 `max_energy/eat_eff × 0.5 × cap_mult` ≤100、捕食 `max_energy/eat_eff` = 100，
+    均 < `max_energy`(300) ⇒ 个体能量上界取 `max_energy` 是现行口径的**推论**。
+    """
+    cfg = _base_cfg()
+    assert cfg.corpse_wound.corpse_enabled is False, "前提失效：默认档 corpse 不是关的"
+    cfg.energy_probe = EnergyProbeConfig(enabled=True)
+    e = SphereEngine(cfg)
+    ceiling = float(cfg.organisms.max_energy)
+    prev_died, died_seen, paid_ticks = 0, 0, 0
+    for _ in range(40):
+        if e.extinct:
+            break
+        e.step()
+        rows = [r for r in e.energy_probe_rows() if r["tick"] == e.tick]
+        assert len(rows) == 1, f"tick {e.tick} 探针行数 {len(rows)} ≠ 1"
+        d_died = int(e._run_died) - prev_died
+        prev_died += d_died
+        died_seen += d_died
+        esc = rows[0]["esc_death_e"]
+        assert isinstance(esc, float), "E1 已实装却读出 None ⇒ 通道登记没跟上"
+        if d_died == 0:
+            assert esc == 0.0, f"tick {e.tick} 无死亡却逃逸 {esc} ⇒ 埋点无条件加"
+        else:
+            assert 0.0 <= esc <= d_died * ceiling + 1e-9, (
+                f"tick {e.tick} 死亡 {d_died} 逃逸 {esc} > {d_died}×max_energy ⇒ 多记"
+            )
+            if esc > 0.0:
+                paid_ticks += 1
+    assert died_seen > 0, "40 tick 无死亡 ⇒ 本测退化（E1 从未被执行）"
+    assert paid_ticks > 0, "40 tick 有死亡但逃逸全 0 ⇒ 删埋点（漏账）"
+    assert e.energy_probe_totals()["esc_death_e_sum"] > 0.0
+
+
+def test_esc_death_e_is_independent_recalc_not_a_copy_of_deposit() -> None:
+    """E1 · 开 corpse 档：探针（独立重算）与投放侧既有计数器必须满足**恒等式**。
+
+    `deposit = frac × ΣE_dead`（`_deposit_corpse:1821-1829`，钳制前"意图"口径）
+    `esc     = (1 − frac) × ΣE_dead`（同一时刻、同一 `dead` 掩码，公式**独立写第二遍**）
+    ⇒ `esc / deposit = (1 − frac)/frac`，与轨迹无关的**常数**。
+    抓四类假实现：删埋点(0)、把逃逸记成全额(`1/frac` 倍)、双计(2×)、
+    直接抄 `_corpse_deposited_e`(1) —— 各落在此式一处。🔴 探针不读该计数器 ⇒ 抄不了。
+    """
+    cfg = _base_cfg()
+    cfg.corpse_wound.corpse_enabled = True
+    cfg.energy_probe = EnergyProbeConfig(enabled=True)
+    e = _run(SphereEngine(cfg), 40)
+    frac = float(cfg.corpse_wound.corpse_energy_frac)
+    esc = e.energy_probe_totals()["esc_death_e_sum"]
+    dep = float(e._corpse_deposited_e)      # 投放侧**既有**读数，仅作对照
+    assert dep > 0.0, "40 tick 无投放 ⇒ 本测退化"
+    assert esc > 0.0, "开档有投放但探针记 0 ⇒ E1 埋点没接上"
+    assert round(esc / dep, 6) == round((1.0 - frac) / frac, 6), (
+        f"esc/deposit = {esc / dep}，恒等式要求 (1−frac)/frac = {(1.0 - frac) / frac}"
+        " ⇒ 两侧不同源（探针不是同一时刻的独立重算）"
+    )
 
 
 # ------------------------------------------------------------------ ⑥ 配置四件套

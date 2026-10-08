@@ -204,17 +204,18 @@ EC_BOX_NAMES = ("lo", "mid", "hi")   # g16 < 1/3 / [1/3, 2/3] / > 2/3
 #    （`energy_probe_rows()` / `energy_probe_totals()`），行带 `tick` + 群体规模锚。
 # 🔴 **独立算式（抓漏埋点的前提）**：`_ep_add` 只累加**自己的**写入面观测，
 #    与 `_ec_*` 无数据通路 ⇒ **不得**从通道账反推（否则漏埋点会被"抄一遍"掩盖）。
-# ⚠️ 实装 4 条（4/4 散逸腿已齐）：`dis_meta`（D1 基础维持 + D2 恒温费 + D3 愈合费）、
+# ⚠️ 实装 5 条（散逸 4/4 齐 + 逃逸 E1）：`dis_meta`（D1 基础维持 + D2 恒温费 + D3 愈合费）、
 #    `dis_move`（D5 位移费，subdiv/L2/默认三支各记各的扣费现场）、
 #    `dis_attack`（D6 捕食出手费 + D7 争夺出手费）、
 #    `dis_signal`（D4 信号费，扣费现场直记）——均在 Python 段（与 `EC_META` 同路径面）；
-#    剩余 3 通道（逃逸腿 esc_*）**未埋点 ⇒ 读数 None（未观测），不写 0**
+#    逃逸腿已实装 `esc_death_e`（E1，死亡压缩前"体能 − 投放"，corpse 关档 = 全额消失）；
+#    剩余 2 通道（`esc_pred_e`/`esc_pred_s`）**未埋点 ⇒ 读数 None（未观测），不写 0**
 #    （同 `energy_ledger` 的 Rust 口径：「没测到」与「测到 0」必须分开）。
 EP_CHANNELS = ("dis_meta", "dis_move", "dis_attack", "dis_signal",
                "esc_death_e", "esc_pred_e", "esc_pred_s")
 EP_IDX = {name: i for i, name in enumerate(EP_CHANNELS)}
 EP_N = len(EP_CHANNELS)
-EP_IMPLEMENTED = ("dis_meta", "dis_move", "dis_attack", "dis_signal")
+EP_IMPLEMENTED = ("dis_meta", "dis_move", "dis_attack", "dis_signal", "esc_death_e")
 
 # R141/R138：真决斗三级拆分的键（**顺序固定**；全部预置 0 ⇒ 输出不随事件有无而变）
 #   nominal = len(attackers)：名义攻击者（= `cannibalism.n_attacks`，旧口径的分母）
@@ -2156,7 +2157,8 @@ class SphereEngine:
             "dis_move（D5 位移费，subdiv/L2/默认三支各自扣费现场）、"
             "dis_attack（D6 捕食出手费 + D7 争夺出手费）、"
             "dis_signal（D4 信号费，扣费现场直记）；"
-            "逃逸腿 esc_* 未埋点 ⇒ 读数 None = 未观测，不是 0。"
+            "逃逸腿实装 esc_death_e（E1 = 死者体能 − 投放，独立重算投放；corpse 关档 = 全额消失）；"
+            "esc_pred_e / esc_pred_s 未埋点 ⇒ 读数 None = 未观测，不是 0。"
         )
         return out
 
@@ -4992,6 +4994,21 @@ class SphereEngine:
         _cwc = getattr(self.config, "corpse_wound", None)
         if bool(getattr(_cwc, "corpse_enabled", False)) and dead.any():
             self._deposit_corpse(dead, energy)
+            # ---- 步A 探针（E1 死亡逃逸）：`E_dead − deposit`，**独立重算** deposit ----
+            # 🔴 不吃 `_corpse_deposited_e`（那是投放侧现成计数器）⇒ 探针按同一时刻的
+            #    `energy[dead]` 用公式重算一遍：两侧不等就是**投放侧漏账**（A2 的定义）。
+            # ⚠️ 位置钉在「死亡判定后、繁殖扣能量前」= 与 `_deposit_corpse` **同一时刻**，
+            #    否则亲代能量已被繁殖改动 ⇒ 两侧不可比。
+            if self._ep_on:
+                _e_dead = np.maximum(0.0, energy[dead])
+                self._ep_add(
+                    "esc_death_e",
+                    float(_e_dead.sum())
+                    - float(_e_dead.sum() * float(_cwc.corpse_energy_frac)),
+                )
+        elif self._ep_on and dead.any():
+            # 尸体通道关档 ⇒ 死者体能在压缩点**全额消失**（一分钱不进任何池）
+            self._ep_add("esc_death_e", float(np.maximum(0.0, energy[dead]).sum()))
 
         # 8) 繁殖：冷却期（g12）倒数；能量 ≥ 阈值（0.25+g2×0.65），且种群未满
         # 注意：统一用 Python 计算繁殖判定（不用 Rust 的 out_repro），
