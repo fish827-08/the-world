@@ -18,6 +18,11 @@
 from __future__ import annotations
 
 from .accounts import ACCOUNTS, ACCOUNT_UNITS, ENERGY_ACCOUNTS, MASS_ACCOUNTS, to_energy
+from .arms import (F_FORMS, INCONCLUSIVE_EXIT, SIGMA_C_PROVISIONAL, WINDOW_GUARD,
+                   WINDOW_MEASURED, WINDOW_QUOTED_R197, Landscape, arm_specs,
+                   assert_arms_comparable, attack_p, clamp_is_active, declare_inconclusive_exit,
+                   default_predation, f_a1, f_gn, has_interior_valley, is_inside_valley_window,
+                   nu_local, nu_proxy, success_s, w_a, w_b, w_b0, w_mn, w_mr)
 from .books import DOMAIN_ACCOUNTS, Books, resolve_domain
 from .channels import DIS, ESC, INJ, TRF, Channel, ChannelRegistry, ChannelViolation
 from .world import (ConservationViolation, World, WorldOptions, check_tick, default_registry,
@@ -28,4 +33,9 @@ __all__ = [
     "DOMAIN_ACCOUNTS", "Books", "resolve_domain",
     "INJ", "TRF", "DIS", "ESC", "Channel", "ChannelRegistry", "ChannelViolation",
     "ConservationViolation", "World", "WorldOptions", "check_tick", "default_registry", "run",
+    "F_FORMS", "INCONCLUSIVE_EXIT", "SIGMA_C_PROVISIONAL", "WINDOW_GUARD", "WINDOW_MEASURED",
+    "WINDOW_QUOTED_R197", "Landscape", "arm_specs", "assert_arms_comparable", "attack_p",
+    "clamp_is_active", "declare_inconclusive_exit", "default_predation", "f_a1", "f_gn",
+    "has_interior_valley", "is_inside_valley_window", "nu_local", "nu_proxy", "success_s",
+    "w_a", "w_b", "w_b0", "w_mn", "w_mr",
 ]
