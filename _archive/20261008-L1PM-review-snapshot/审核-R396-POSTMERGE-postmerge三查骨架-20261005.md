@@ -1,0 +1,142 @@
+# 审核 — R396② `tools/postmerge_check.py` 骨架 v0（队列③）
+
+- 审核人：镜 `[代码审核]`｜日期 2026-10-05（22:5x 收口）
+- 被审件：`gitee/task/R396-POSTMERGE @c95f9e5`（作者 澜舟，基点 main@4aa0b38）
+- 卡：`_share/任务卡.md:38` R396-POSTMERGE（claimed；验收三条＝①30 行骨架＋用法上板 ②巡检一行可调用 ③退出码语义写清；硬约束＝**只调用既有件、不新造判据、不裁定；fail-loud（缺件即红，不静默跳过）；零机时（不跑批）**）
+- 只审不改：以下每条附复现命令与修法建议，我未改动 `tools/postmerge_check.py` / `tests/test_postmerge_check.py` 一个字节；变异在 `.worktrees/jing_pm_mut`（跑完 `git checkout --` 还原，`git status --porcelain` 空）。
+
+---
+
+## 一、结论
+
+🟡 **有条件通过**（骨架方向成立、家规映射正确、五性质确有守），但 **3 条 🔴 让门禁在它主打的两个场景上没有判别力或直接崩**：
+
+| 腿 | 判定 | 一句话 |
+|---|---|---|
+| C7 对拍 | 🔴 P-A | 两表**行数不等**（最常见差异形态）⇒ `StopIteration` 崩穿解释器，不出判定行 |
+| 装置档回显 | 🔴 P-B / P-C | 0 个字段可比仍报 **PASS**（真产物 8/394 属此类）；且只比 argv 声明值 ⇒ R5.6 要防的"静默吃默认"落在 SKIP 一侧，**永不可见** |
+| 完整性 | 🟡 P-G | 文档承诺"末行 tick==ticks"未实现 ⇒ 恰看不见 C1 那类"跑完再崩/被中断"的截断件 |
+| 纪律层 | 🟡 P-E / P-F | 巡检一行在既有语料 rc=1（PASS=32 FAIL=48 SKIP=7）；`--lenient` + 单边 `--c7-baseline` ⇒ **rc=0 而 C7 从未执行** |
+| 测试覆盖 | 🟡（M6/M7/M8） | 五性质有守，但"默认 strict：SKIP 也算不过"这条**招牌纪律 0 测** |
+| 其余 | ⚪ P-H / P-I | tick 空值直调抛异常 / `io.open().write()` 不留 `with` |
+
+**给 PI 的排序建议**：P-A / P-B / P-C 属"实装拍（板桥 CI 接线）前必处置"；P-E / P-D 不处置则**接上 CI = 常红灯**，等于训练全员忽略门禁——这与 R396① 采纳理由（"从人眼值班变脚本值班"）相反。
+
+---
+
+## 二、实证表（全部本机实测，零机时：只读已有产物）
+
+| # | 动作 | 结果 |
+|---|---|---|
+| E1 | `py -m pytest tests/test_postmerge_check.py -q` | **6 passed in 0.29s** |
+| E2 | `py tools/postmerge_check.py --selftest` | `计时列豁免=PASS 整列全空=FAIL tick 倒退=FAIL ⇒ PASS`，**rc=0** |
+| E3 | `check_c7_pair(3 行, 2 行·公共前缀全同)` | 💥 `StopIteration`（`:95`）；走 `main()` ⇒ **rc=1 且无 `[FAIL]`/无 `# postmerge_check:` 汇总行** |
+| E4 | `check_device_echo({"argv":["--device","s2","--ticks","50000","--seed","7"]})` | `{'status':'PASS','msg':'--device s2 声明字段与预设档一致'}` ← **比较字段数 = 0** |
+| E5 | 真语料 394 个 `.summary.json` 全量过 `_argv_map` | **366 SKIP（无 device）／12 FAIL（声明与预设冲突）／8 PASS(≥1 字段)／8 PASS(零字段·空判据)**；空判据例：`the-world-data/p1c/p1c_s207_t3000.summary.json` |
+| E6 | 截断件 `tick 末行 30000` + `meta.ticks=50000` | `integrity PASS（3 行 × 3 列）` + `pairing PASS` ⇒ 文档 §表头"末行 tick==ticks"**无实现** |
+| E7 | 文档默认命令 `--data-dir the-world-data --limit 40` | strict ⇒ `PASS=32 FAIL=48 SKIP=7 ⇒ FAIL` **rc=1**；`--lenient` 同 rc=1（FAIL 主导，lenient 救不回） |
+| E8 | `main(["--c7-baseline", a])` | strict rc=**1**（SKIP-red）；**lenient rc=0（绿，但 C7 一次没跑）** |
+| E9 | `main([])` / `main(["--data-dir","不存在"])` | 均 rc=**2** ✅（P5 承诺的"没查不给 2"成立） |
+| E10 | `check_integrity` tick 列空串 | 直调 `ValueError: could not convert string to float: ''`；经 `sweep_data_dir` ⇒ 被 try 兜住记 FAIL（可接受） |
+| E11 | 装置预设真源 | `DEVICE_PRESETS` 仅 `s2`（rows 480/cols 960/patches 1700/pop 10000/rgm 1.195/bg_* 0.0）⇒ 语料里 `--device s2 --patches 213/425` 必判红 |
+| E12 | 接线面 grep 全仓 | 除自身与被审测试外，`postmerge_check` **无任何调用点**（`.gitee-ci.yml` 未接）⇒ 与卡"实装候板桥 CI 接线口径"一致，本拍不判缺失 |
+
+## 三、变异表（验她 6 例 + `--selftest` 的守力边界）
+
+| # | 变异（单点） | 结果 | 判 |
+|---|---|---|---|
+| M1 | `TIME_COLS = set()`（计时列不再豁免） | 2 failed | 🟢 有守 |
+| M2 | 整列全空不判红 | 2 failed | 🟢 有守 |
+| M3 | tick 倒退不判红 | 2 failed | 🟢 有守 |
+| M4 | 回显不等不判红 | 1 failed | 🟢 有守 |
+| M5 | 什么都没查也绿 | 1 failed | 🟢 有守（P5 真钉住） |
+| M6 | `sweep` 不调 `check_pairing` | **6 passed / 0 红** | 🔴 无守（成对检查在巡检路径上被摘掉无人知） |
+| M7 | 预设档读不到 ⇒ 改判 PASS | **6 passed / 0 红** | 🔴 无守（环境坏=绿，违 fail-loud） |
+| M8 | 取消"strict 下 SKIP 计红" | **6 passed / 0 红**（且 `--selftest` 仍 rc=0） | 🔴 无守（本工具招牌纪律零测） |
+
+**方法学复述**（与队列④ 同一条教训）：M1–M5 说明她写的 6 例对**已实现**的五性质是真守；M6–M8 说明对**未写测试的编排层/默认档语义**是零守。"测试绿"≠"分支被走到"，更≠"承诺的判据存在"（E6 即属后者）。
+
+---
+
+## 四、逐条缺陷（现象 → 复现 → 影响 → 建议修法）
+
+**P-A 🔴 C7 行数不等崩穿（`:92-96`）**
+复现：`py tools/postmerge_check.py --c7-baseline <3行csv> --c7-current <其前2行csv>` ⇒ `StopIteration`，rc=1，无判定行。
+影响：改观测件后**行数变化本身就是 C7 违规信号**（采样节拍/存活数变了），却以 traceback 收场；rc=1 与"有 FAIL"同号但无 `[FAIL]` 行 ⇒ 巡检若按汇总行取数会拿到空值。
+建议：`if len(a) != len(b): return _result("c7-pair", False, f"行数不等 {len(a)} vs {len(b)} ⇒ 采样面/存活面被扰动")`；`next(...)` 前保底或整腿 try/except ⇒ FAIL。补一例行数不等测试（否则修法本身无守）。
+
+**P-B 🔴 零字段可比仍 PASS（`:138-147`）**
+复现见 E4；语料规模见 E5（**8/394 空判据绿**，含 p1c 族正式件）。
+影响：卡硬约束"**缺件即红，不静默跳过**"——声明了 `--device` 却无任何装置字段可比，正是"缺件"，现在却绿。
+建议：`n_cmp = sum(1 for f in preset if flags.get(f) is not None)`，`n_cmp == 0` ⇒ 返回 SKIP 且 msg 写明"无可比字段"（strict 下自然计红）；不建议直接 FAIL，因"device 已摁住全部字段"是合法用法——但**必须与"核过且一致"分色**。
+
+**P-C 🔴 回显腿的判别面与 R5.6 的保护面不相交（文件头 §表头 vs `:124` 实现）**
+现象：模块表头写"批里 `--device X` 声明的装置字段，**实际落盘值**必须等于预设档"，实现只比 **argv 声明值 vs 预设档**（文件头"边界"自述亦承认"不核引擎运行期真值"）。
+影响：R5.6 真正要防的是"忘传 `--device` ⇒ 吃 60×120 默认"与"传了 device 但脚本没摁住"。前者在 argv 里没有 device ⇒ 归入 E5 的 **366 SKIP**；后者 argv 与预设一致 ⇒ **PASS**。即：**该腿按其声称的目的，在当前实现下检出数恒为 0**。
+建议（二选一，我倾甲）：
+甲＝真读"落盘值"：`rows/cols/patches/pop` 已随 CSV/summary/manifest 落盘的，读回来与 argv 交叉比（零机时、不新造判据，只是把已有件读全）——表头承诺即可兑现；
+乙＝诚实改口径：表头改为"仅核**声明一致性**"，并在 §边界明文写"静默回落本腿检不出，归 `experiments/preflight_check.py`（C4 读回）"，同时给巡检文档补一句"device 腿不得单独作为 R5.6 达标证据"。
+**不管选哪个，请 PI 在起跑门前定，否则 R225 会签里"装置档已核"是空账。**
+
+> **队列② 遗留补报（一并销项）**：我在 G6 审结时留过一问——"C1 / S4-M7 类装置面遗漏能否由 postmerge 的回显检查兜住"。本审答：**兜不住**。理由即 P-C：该腿只比 argv 声明值，忘传 device / 内部回落两种形态分别落在 SKIP 与 PASS 侧。故 S3-RDSWITCH 审头 S1（🔴 最后一公里丢传参）那类缺陷**只能靠 Pre-Flight + 起跑令 `--device` 显式（R5.6）+ 代码审**三选一拦住，不得以"postmerge 会查"作为放宽理由。
+
+**P-D 🟡 装置字段无豁免通道（对照 `--allow-empty-col` 已有列豁免）**
+复现：E5/E11——12/20 带 device 的件因 `patches: 声明 213/425 ≠ 预设 1700` 判红，其中密度批式覆盖是设计内用法（她测试 P4 注释亦写"纪元级覆盖 ⇒ 须显式批准"）。
+影响：合法覆盖与真错同色 ⇒ 门禁在真实语料上恒红。
+建议：加 `--allow-device-override FIELD=VALUE`（可重复，用法与 `--allow-empty-col` 同形，msg 内要求写理由并在批记录留痕）；无豁免时维持红。
+
+**P-E 🟡 巡检一行在既有语料 rc=1（E7）**
+影响：R396② 的落地形态是"值班巡检每班调用"。第一班就红 48 项（多为历史件缺 summary/列序旧）⇒ 实际结果只会是"改 `--lenient`"（而 lenient 放大 P-F）或"跳过不看"。
+建议：`--since <日期>` 或 `--only <子目录>`（新产物目录白名单），并在输出末行显式披露"本次实查 N 个 / 语料共 M 个（limit 截断）"；现 `--limit 40` 是 `os.walk` 序内的先到先查 ⇒ **查哪 40 个不确定**，PASS 不可比。
+
+**P-F 🟡 lenient + 单边 C7 ⇒ 绿（E8）**
+复现：`main(["--c7-baseline", x, "--lenient"])` ⇒ rc=0，msg 只有 `[SKIP] 未给 --c7-baseline/--c7-current`。
+影响：违她测试 P5 自述"不许没查也绿"与卡"退出码语义写清"（文档写 `2 = 用法/环境错`）。
+建议：`bool(a.c7_baseline) ^ bool(a.c7_current)` ⇒ `print(..., file=sys.stderr); return 2`，置于 lenient 判定之前。
+
+**P-G 🟡 承诺"末行 tick==ticks"未实现（E6）**
+影响：本项恰是队列④ C-A（scipy 收尾崩 ⇒ 跑完再崩、数据半件）最需要的下游探测器；现在截断件 integrity/pairing 双 PASS。
+建议：同目录同名 `.summary.json`（或 manifest）里取 `ticks`，与末行 tick 比，不等 ⇒ FAIL"疑截断"。零机时、只读已有产物，不触卡禁。
+
+**P-H ⚪ `:162-165` tick 空值/NaN 直调抛 `ValueError`（E10）；`:167` `idx[c] < len(rows[0])` 恒真（前面已保证列数齐）⇒ 死条件。**
+建议：`ticks` 解析失败即归入"整列空/脏值"分支；删死条件或改为 `rows` 宽度守卫。
+
+**P-I ⚪ `io.open(...,"w").write(...)` 不留 `with`（`selftest` :213/218/221，测试 `_w` :20）**
+依赖 CPython 引用计数即时落盘；若后续改并发/换解释器 ⇒ 读侧可能拿到空文件（表现为莫名 PASS/FAIL 抖动）。建议统一 `with`。
+
+---
+
+## 五、卡验收与硬约束对照
+
+| 卡面条目 | 实测 | 判 |
+|---|---|---|
+| ① 30 行骨架＋用法上板 | 271 行（含 33 行文档）+ 69 行测试；"用法上板"我**未核到**澜舟自发的用法板帖（板面只见 PI 帖 `:499/:535`） | ⚠️ 待澜舟/板桥补链接，我不断言"未做" |
+| ② 巡检一行可调用 | 可调用，但 rc=1（E7） | 🟡 P-E |
+| ③ 退出码语义写清 | 文档 0/1/2 写清 ✅；实现两处与文档不符（P-A 崩穿借 1 号、P-F 应 2 判 0） | 🟡 |
+| 硬约束：只调用既有件、不新造判据、不裁定 | ✅ 未见新造判据；引用 `device_presets` 真源、复用 AGENT.md §十二 C7 语义 | 🟢 |
+| 硬约束：fail-loud（缺件即红，不静默跳过） | ❌ **P-B 空判据绿 / P-C 检出面为空 / M7 环境坏可改绿** | 🔴 本条是骨架阶段就该修的，不该留到实装拍 |
+| 硬约束：零机时（不跑批） | ✅ 全程只读产物；我也未启动任何跑批（R117） | 🟢 |
+| 新工具四律之"变异必红" | 五性质 M1–M5 ✅；编排/默认档 M6–M8 ❌ | 🟡 补 3 例即闭合 |
+
+---
+
+## 六、回避矩阵与独立性（R394）
+
+- 本件作者＝澜舟；我**未**参与 R396 设计/预审，无"设计稿作者≠审核人"冲突。
+- 判读独立性：E5/E6/E7 用我自己写的独立脚本（TEMP `jing_pm_probe/`：`probe.py` / `probe2.py` / `scan.py` / `echo.py` / `mut.py`），未复用她的测试函数取证；未改动被审树任何文件。
+- 一处须留痕的关联：队列② `G6-EMITRATE` 同属澜舟件且我已审结——两卡独立、判据不互借，特此声明以备查。
+
+## 七、请 PI 处置
+
+| 项 | 请求 |
+|---|---|
+| P-A / P-B / P-C | 定为实装拍**前置**（不是尾项）；P-C 请裁甲/乙，并在起跑门 R225 会签文本里写清"装置档由谁核" |
+| P-D / P-E | 建议与 P-B 同批改（各 ≤5 行），否则 CI 一接就是常红灯 |
+| P-F / P-G | 各 1–3 行，随批落最省；P-G 若采纳，请知会轻舟（队列④ C-A 的下游探测器同源） |
+| M6–M8 | 请补 3 例编排层测试（`--selftest` 亦建议扩到 main 的 verdict 层） |
+| 本件交付 | = 本审头（分支 `task/PM-REVIEW`，独立于队列④ `task/C1-REVIEW` 以便分开处置；候合，合并候 PI）。任务卡 R396-POSTMERGE 审核结果登记请**板桥/PI 代执**（R371，我不写 `_share/任务卡.md`） |
+
+**证据路径**：`C:/Users/圣羽/AppData/Local/Temp/jing_pm_probe/`（`probe.py`/`probe2.py`/`echo.py`/`mut.py`/`echo_out.txt`/`mut_out.txt`）；变异树 `.worktrees/jing_pm_mut`（已还原，`git status --porcelain` 空）。
+**群报说明**：本 waker `0252d9a72439` 无已启用 IM channel（`channel list` = No channels found）⇒ 群内 @PI 不可达，板帖即 R384/R387 上报载体。
+
+—— 镜 `[代码审核]`
