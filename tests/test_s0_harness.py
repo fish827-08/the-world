@@ -203,3 +203,24 @@ def test_birth_requires_energy_threshold(tmp_path) -> None:
     assert m["cap_hits"] == 0
     assert m["pop_end"] <= dem.n_ind0, (m["pop_end"], dem.n_ind0)
     assert m["digest"][1] <= dem.n_ind0
+
+
+def test_selftest_perf_script_runs_and_reports_keys(tmp_path) -> None:
+    """性能表脚本本体入库可跑（微型档 reps=1，CI 里几秒级），字段齐＋灭绝即 raise。"""
+    import importlib.util
+    from pathlib import Path as _P
+    spec_path = _P(__file__).resolve().parents[1] / "tools" / "s0_selftest_perf.py"
+    spec = importlib.util.spec_from_file_location("s0_selftest_perf", spec_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    row = mod.bench_one({"name": "ci", "n_ind0": 20, "rows": 10, "cols": 20, "max_ind": 40,
+                         "ticks": 25, "arm": "B", "alpha_W": 1.0}, reps=1, seed=207)
+    for k in ("ms_per_tick_median", "ms_per_tick_worst", "pop_end", "cap_hits", "capped",
+              "extrapolated_20000t_seconds", "extrapolated_32run_serial_hours"):
+        assert k in row, k
+    assert row["ms_per_tick_median"] > 0.0 and row["ticks_benched"] == 25
+    # 灭绝即 raise：微基准不许静默交短跑
+    with pytest.raises(RuntimeError, match="灭绝"):
+        mod.bench_one({"name": "dead", "n_ind0": 10, "rows": 10, "cols": 20, "max_ind": 10,
+                       "ticks": 200, "arm": "A", "alpha_W": None,
+                       "meta": 99.0, "intake_scale": 1e-9}, reps=1, seed=207)
