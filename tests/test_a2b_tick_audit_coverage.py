@@ -177,3 +177,23 @@ def test_s9_syntax_error_is_fail_loud(tmp_path):
     bad.write_text("def f(:\n    pass\n", encoding="utf-8")
     with pytest.raises(tk.CoverageError):
         tk._scan_literals(bad)
+
+
+# ---------------------------------------------------------------- S10（2026-10-09 板桥补）
+
+def test_s10_s0_kernel_scanned_and_memory_fields_classified():
+    """S10（R394③ 三红修复守卫）：
+    a) `s0_kernel/arms.py` + `harness.py` 必须在 glob 派生的发现项里（人口学旋钮承载 tick 面额）；
+    b) G6 记忆档 5 字段必须有人工判后的 KNOWN 归类（未分类 => rc=1，s1/s7/s8 连坐红即此因）。"""
+    files = _scan_files_rel()
+    for rel in ("s0_kernel/arms.py", "s0_kernel/harness.py"):
+        assert rel in files, f"{rel} 必须被纳入扫描（S0 装置旋钮不许留在清单外）"
+    for full, want in (("info_structure.memory_ttl", tk.DURATION),
+                       ("info_structure.memory_noise_p", tk.PROB),
+                       ("info_structure.memory_dist_scale", tk.INVARIANT),
+                       ("info_structure.memory_degrade_thr", tk.INVARIANT),
+                       ("info_structure.memory_coarse_gain", tk.INVARIANT)):
+        grp, name = full.split(".", 1)
+        cls, _why = tk._suggest(grp, name)
+        assert cls == want, f"{full} 应归 {want}，实得 {cls}"
+        assert cls != "UNCLASSIFIED"

@@ -34,7 +34,7 @@
 
 A2b 覆盖纪律（T6，2026-09-26）
 ----
-* **扫描清单 = glob 派生**（`simulation/*.py` + `world/*.py`，排除 `config.py`/`__init__.py`），
+* **扫描清单 = glob 派生**（`simulation/*.py` + `world/*.py` + `s0_kernel/*.py`，排除 `config.py`/`__init__.py`），
   **禁手写清单** —— 旧版手写清单含不存在的 `world/resources.py`（真名 `resource_field.py`），
   且 `if p.is_file():` **静默跳过** ⇒ `world/` 6 个业务文件里只有 1 个真被扫到（变异测试证实有洞）。
 * **缺失/0 文件/低于数量下限/文件不存在 ⇒ fail-loud 抛 `CoverageError`（退出码 2）**，不许静默。
@@ -190,6 +190,13 @@ KNOWN: dict[str, str] = {
     "info_structure.memory_gradient_gain": INVARIANT,
     "info_structure.memory_weight_gene": INVARIANT,  # 13.11 开关（bool）—— 乘子只改打分权重，不承载 tick 面额
     "info_structure.perception_radius": INVARIANT,
+    # ---- R394③ 板桥 a2b 三红修复（2026-10-09）：G6 记忆档 5 字段人工判后补录 ----
+    #   取证：`simulation/config.py:636-641` 注释 + `simulation/sphere_engine.py:1440-1445` 读点。
+    "info_structure.memory_dist_scale": INVARIANT,   # 距离衰减尺度 d0（单位=格，空间量纲非 tick，config:636）
+    "info_structure.memory_degrade_thr": INVARIANT,  # 降级**距离**阈值（单位=格，config:637）
+    "info_structure.memory_coarse_gain": INVARIANT,  # 粗记忆增益（无量纲乘子 = 0.5×gradient_gain，config:638）
+    "info_structure.memory_ttl": DURATION,           # 🔴 记忆时效**以 tick 计**（age>TTL 置空，config:639）⇒ ÷k
+    "info_structure.memory_noise_p": PROB,           # 🔴 **每 tick** 以该概率扰动方位（config:640）⇒ 1−(1−p)^k
     "pleasure.optimism": INVARIANT,
     "pleasure.w_energy": INVARIANT,
     "pleasure.w_info": INVARIANT,
@@ -428,7 +435,10 @@ _LITERAL_CTX: list[tuple[str, str, str]] = [
 # ---------------------------------------------------------------------------
 
 #: 扫描目录（glob 派生；新增文件自动纳入）
-_SCAN_DIRS: tuple[str, ...] = ("simulation", "world")
+#: 2026-10-09 板桥（PI 丙案审工同窗指令）补 `s0_kernel/`：双臂 S0 的人口学旋钮
+#: （`meta` 每 tick 代谢 / `lifespan` tick 上限 / `mut_rate` 每出生点伯努利 / `ticks·sample` 运行长度）
+#: 全部承载 tick 面额 ⇒ 必须进机械化发现项，不许留在清单外。
+_SCAN_DIRS: tuple[str, ...] = ("simulation", "world", "s0_kernel")
 
 #: 排除：包标记 + 纯默认值模块（config 的全部数值字段已由 §3.1 枚举，扫其字面量只重复+噪声）
 _SCAN_EXCLUDE_NAMES: frozenset[str] = frozenset({"__init__.py", "config.py"})
