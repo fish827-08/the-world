@@ -510,6 +510,8 @@ class SphereEngine:
         #   逐字段开关在 `resources._lazy` / `signals._sparse`（R231 T-E 起两侧解耦，
         #   `_sparse_fields=False` **不再**意味着信号侧退场）
         "_sparse_fields",
+        # ---- 纯斑块世界 ENV 场（2026-10-11）：场对象 + 闸位说明行（manifest 用）----
+        "env_field", "env_note",
         "_fruit_grid", "_fruit_charge", "_seed_carried",  # L10a
         # ---- D-17/D-18/D-8（⑤⑥ 探针 + oracle）----
         # 按 _id 键控的终身账本（长度 = _next_id，只增不压缩；死亡个体保留行——
@@ -822,6 +824,34 @@ class SphereEngine:
             tilt_rad=config.light.tilt_rad,
             season_period=config.light.season_period,
         )
+        # ---- 纯斑块世界（2026-10-11）：ENV 场（地形→气候态水分→产能因子）----
+        #   🔴 默认关（`env_field.enabled=False`）⇒ **不构造任何场** ⇒ 旧行为逐位等价
+        #      （C7 回滚点）；开档但两 sensitivity 全 0 ⇒ 因子 None ⇒ 同样逐位等价。
+        #   🔴 fail-loud 两道（禁静默；先例 = H3 家族 `:1026-1036`）：
+        #      ① `enabled ∧ use_sim_core`：Rust `regrow`/`regrow_patchy` 内联实现产能、
+        #         **不吃** Python 侧的 ENV 因子 ⇒ 开档会静默 no-op（整批白跑）⇒ 构造期炸；
+        #      ② `enabled ∧ resource_dynamics.enabled`：**未验证组合**（rd 的容量/掩码
+        #         重建与空间变化容量因子未对拍）⇒ 宁炸不静默（同 rd∧sparse∧¬bgzero 先例）。
+        #   ⚠️ 新属性必须进 `__slots__`（`:512` 附近；漏登 = AttributeError）。
+        self.env_field = None
+        self.env_note = None
+        _efc = getattr(config, "env_field", None)
+        if _efc is not None and bool(getattr(_efc, "enabled", False)):
+            if self._use_sim_core:
+                raise NotImplementedError(
+                    "env_field.enabled=True ∧ use_sim_core=True：ENV 因子尚未下沉 Rust"
+                    "（`sim_core::regrow*` 不吃新入参）⇒ 会静默 no-op。"
+                    "请设 simulation.use_sim_core=False（同 H3 先例）。"
+                )
+            if bool(getattr(config.resource_dynamics, "enabled", False)):
+                raise ValueError(
+                    "env_field.enabled=True ∧ resource_dynamics.enabled=True："
+                    "该组合未经验证（rd 容量/掩码重建 × 连续容量因子未对拍）——"
+                    "宁炸不静默。请二选一。"
+                )
+            from world.env_field import EnvField   # 局部导入：关档零 import 开销（同 rd/smell 先例）
+            self.env_field = EnvField(self.world, self.light, _efc,
+                                      base_seed=int(config.seed))
         self.resources = ResourceField(
             self.world, self.light,
             capacity_per_area=config.resources.capacity_per_area,
@@ -859,6 +889,11 @@ class SphereEngine:
             bg_low_cap_mult=float(
                 getattr(config.resources, "bg_cap_mult", 0.0)
             ),
+            # ---- 纯斑块世界 ENV 场因子（None = 关 ⇒ 资源场整块跳过 = 逐位等价）----
+            env_growth_factor=(self.env_field.growth_factor()
+                               if self.env_field is not None else None),
+            env_capacity_factor=(self.env_field.capacity_factor()
+                                 if self.env_field is not None else None),
         )
         # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
         # 🔴 P0.0 A1（2026-09-26）：寿命原为硬编码 `duration=50`，现读配置
@@ -1275,7 +1310,15 @@ class SphereEngine:
             and float(getattr(self._rd, "rest_regen_mult", 0.0)) >= 0.0
         )
         # R244 v1 范围锁：rd 关 ⇒ 原行为；rd 开 ⇒ 仅 bgzero 档放行（负闸 ⇒ 静默退回全场）。
-        self._sparse_fields = _sparse_cfg and (not _rd_on0 or (_bgzero0 and _rd_mults_ok))
+        # ---- 🔴 纯斑块世界 ENV 场：资源侧惰性**显式退场**（ENV-FIELD §五-4 口径 (ii)）----
+        #   `env ∧ sparse` ⇒ 资源侧退回全场路径 + `env_note` 记行（**不静默** ——
+        #   "enable_lazy 返回 False"那种静默退回**不算**满足本条）。信号侧与 ENV 正交
+        #   （R231 T-E 解耦）⇒ 下面的 `signals.enable_sparse()` 照常。
+        _ef_on = self.env_field is not None
+        self._sparse_fields = (_sparse_cfg and (not _rd_on0 or (_bgzero0 and _rd_mults_ok))
+                               and not _ef_on)
+        if _ef_on and _sparse_cfg:
+            self.env_note = "resource_lazy=off(reason=env_field)"
         if self._sparse_fields:
             self.resources.enable_lazy()
         if _sparse_cfg:

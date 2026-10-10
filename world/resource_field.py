@@ -59,6 +59,9 @@ class ResourceField:
         每个格子当前的食物存量（扁平数组，通过 flat 索引访问）。
     _capacity : NDArray[float64], 形状 (n_cells,) 平铺
         每个格子的食物容量上限（构造时按面积算好，之后只读）。
+    _env_growth : NDArray[float64] | None
+        纯斑块世界 ENV 场的再生因子（`world/env_field.py`；None = 机制关 ⇒ 整块跳过）。
+        容量因子不存属性：构造期一次性乘进 `_capacity`（初始填充随之继承）。
     """
 
     __slots__ = (
@@ -83,6 +86,8 @@ class ResourceField:
         # ---- R217 §五 #1 稀疏化 B：惰性再生（默认关；见 `enable_lazy`）----
         "_lazy",
         "_dirty_mask",
+        # ---- 纯斑块世界 ENV 场：再生因子（None = 机制关 ⇒ 整块跳过 = 逐位等价）----
+        "_env_growth",
     )
 
     def __init__(
@@ -109,6 +114,9 @@ class ResourceField:
         # ---- 🔴 R242 背景低产能带（默认 0 = 现行为逐位等价）----
         bg_low_prod_frac: float = 0.0,
         bg_low_cap_mult: float = 0.0,
+        # ---- 纯斑块世界 ENV 场（2026-10-11；默认 None = 机制关 ⇒ 逐位等价）----
+        env_growth_factor=None,
+        env_capacity_factor=None,
     ) -> None:
         """铺好初始食物。
 
@@ -158,6 +166,23 @@ class ResourceField:
                 f"light_sensitivity 必须 ≥ 0，收到 {light_sensitivity}"
             )
         self.distribution = distribution
+        # ---- 纯斑块世界 ENV 场因子（默认 None = 机制关 ⇒ 后面整块跳过 = 逐位等价）----
+        #   因子是**构造期算好的只读数组**（`world/env_field.py`）⇒ 热路径零三角函数/无 pow。
+        def _chk(f, name):
+            if f is None:
+                return None
+            arr = np.asarray(f, dtype=np.float64)
+            if arr.shape != (world.n_cells,):
+                raise ValueError(
+                    f"{name} 形状必须 (n_cells,)={world.n_cells}，收到 {arr.shape}")
+            if not np.isfinite(arr).all():
+                raise FloatingPointError(f"{name} 含非有限值（NaN/Inf）—— 因子异常，中止")
+            if bool((arr < 0.0).any()):
+                raise ValueError(f"{name} 含负值 —— 因子必须非负（负增长会破惰性夹取引理）")
+            return arr
+
+        self._env_growth = _chk(env_growth_factor, "env_growth_factor")
+        _env_cf = _chk(env_capacity_factor, "env_capacity_factor")
 
         areas = world.cell_area(np.arange(world.n_cells))
         base_cap = areas * capacity_per_area
@@ -229,6 +254,10 @@ class ResourceField:
                     base_cap * bg_cap_mult,
                 ),
             )
+            if _env_cf is not None:
+                # ENV 容量因子：乘在**最终容量层**（斑块/背景倍率之上）；下面的初始填充
+                #   （`_grid = _capacity × fill`）自然继承新容量 ⇒ 初始存量无需另改。
+                self._capacity = self._capacity * _env_cf
             # 4) 再生守恒：patch_mult × patch_frac + bg_mult × bg_frac = 1
             #   ⚠️ 同上：背景归零时该守恒式**不再成立**（这是 13.5 的目的）⇒ 直接取 0.0。
             patch_frac = patch_area / total_area
@@ -251,6 +280,8 @@ class ResourceField:
             self.bg_production_zero = bool(bg_production_zero)
         else:
             self._capacity = base_cap
+            if _env_cf is not None:
+                self._capacity = self._capacity * _env_cf
             self._grid = self._capacity * initial_fill   # sparse:init（构造期）
             self._patch_mask = None
             self._patch_regrowth_mult = 1.0
@@ -456,7 +487,10 @@ class ResourceField:
              `_bg_regrowth_mult` 可为负**（守恒式 `(1−pm·patch_frac)/bg_frac`）——负增长会把
              净格拉低 ⇒ 惰性必须退场（本档实测默认参数下可为负，不是假想情形）；
           ④ `distribution == "patchy"` 且掩码在：本机制的目标档（uniform 档全体初始半满
-             ⇒ 脏格≈全场，收益≈0，且首段反而多一次 `flatnonzero`）。
+             ⇒ 脏格≈全场，收益≈0，且首段反而多一次 `flatnonzero`）；
+          ⑤ `_env_growth is None`（ENV 场关）：ENV-FIELD §五-4 口径 (ii) —— 引擎开 ENV 档时
+             **显式退回全场路径**（不静默；`eng.env_note` 记一行）。即便因子是逐元乘
+             （子集在位性成立），也不在无对拍档上并开两个未验证机制。
         """
         if self.distribution != "patchy" or self._patch_mask is None:
             return False
@@ -464,6 +498,8 @@ class ResourceField:
             return False
         if (self.regrowth_rate < 0.0 or self._patch_regrowth_mult < 0.0
                 or self._bg_regrowth_mult < 0.0):
+            return False
+        if self._env_growth is not None:
             return False
         self._lazy = True
         self.rebuild_lazy()
@@ -574,7 +610,12 @@ class ResourceField:
                     growth * self._patch_regrowth_mult,
                     growth * self._bg_regrowth_mult,
                 )
-        return growth
+        # ---- 纯斑块世界 ENV 场：水分→再生因子（默认 None ⇒ 整块跳过 = 逐位等价）----
+        #   子集语义：纯逐元素乘（无归约/pow/条件分支）⇒ 子集执行与全场执行逐元素同式；
+        #   资源侧惰性另按 ENV-FIELD §五-4 口径 (ii) 显式退场（引擎侧接线 + `enable_lazy` ⑤）。
+        if self._env_growth is not None:
+            gf = self._env_growth if idx is None else self._env_growth[cells]
+            growth = growth * gf
         return growth
 
     # ---- 快照 / 调试 ---------------------------------------------------------

@@ -1450,6 +1450,85 @@ _ENERGY_PROBE_FIELDS: frozenset = frozenset(f.name for f in fields(EnergyProbeCo
 
 
 @dataclass
+class EnvFieldConfig:
+    """ENV 场：地形 → 气候态水分 → 格子产能因子（「纯斑块世界」底层规则）。
+
+    口径来源
+    --------
+    * `docs/设计文档/设计-纯斑块世界-底层规则自组织-20261011.md`（§十五 拍板：全规则一次到位、
+      ≤4 run 半对照、单 run ≤2000 tick）；
+    * `docs/设计文档/设计-ENV-FIELD-物理场与格子产能-20261008.md`（场定义 H/W/P、归一化条款、
+      四条算路与守卫口径）。
+
+    是什么（与 ENV-FIELD 设计稿的差别，写死防混）
+    --------------------------------------------
+    本机制**在既有斑块世界之上再加一层连续产能因子**（H→W→f_g/f_c 乘在斑块倍率之上），
+    **不撤** patch_mask / 斑块倍率（那是 ENV-FIELD 稿的 (a) 形态替换 = 后续纪元）。
+    全部新场是**构造期静态派生量** ⇒ **不进快照**（确定性可从 config 重建 ⇒ 存档零改动）。
+
+    🔴 默认关与回滚点
+    -----------------
+    * `enabled=False`（默认）⇒ 引擎**不构造** EnvField（零成本 + 旧行为逐位等价 = C7 回滚点）；
+    * 开档但 `water_sensitivity=0 ∧ cap_sensitivity=0` ⇒ 两个因子整块跳过（恒 1）
+      ⇒ **同样逐位等价**（ENV-FIELD §二-5 的同型"回归安全"设计）。
+
+    🔴 fail-loud 组合（构造期，见 `sphere_engine` 接线；禁静默）
+    ----------------------------------------------------------
+    * `enabled ∧ simulation.use_sim_core` ⇒ 报错（Rust regrow 不吃新因子 ⇒ 静默 no-op，
+      同 H3 先例 `sphere_engine.py:1026-1036`）；
+    * `enabled ∧ resource_dynamics.enabled` ⇒ 报错（**未验证组合**：rd 的容量/掩码重建
+      与空间变化容量因子未对拍，宁炸不静默）；
+    * `enabled ∧ simulation.sparse_fields` ⇒ **资源侧惰性显式退回全场** + `eng.env_note`
+      一行（ENV-FIELD §五-4 口径 (ii)：不静默；信号侧与 ENV 正交不受影响）。
+
+    🔴 RNG 纪律（新工具四律之一）
+    ----------------------------
+    噪声取**独立流** `default_rng([engine_seed, salt, 常数])`，**不消费引擎 `self.rng`**
+    （同 `patch_seed` 先例 `resource_field.py:167`）⇒ 同 seed 下开/关档引擎 RNG 序列逐位不变。
+
+    ⚠️ 挂进 `SimConfig` ⇒ 经 `asdict` **自动进 `fingerprint()`**（跨档续跑被拦，同 `smell` /
+    `energy_probe`）⇒ commit/manifest 须写明"**指纹变、行为不变**"（默认关档）。
+    """
+
+    enabled: bool = False            # 总开关；False ⇒ 引擎不构造 EnvField（零成本 + 逐位等价）
+    salt: int = 0                    # 独立流盐：换盐 = 换地形格局（不动 SimConfig.seed）
+    terrain_lattice: int = 64        # 3D 值噪声立方格点分辨率（64³ ⇒ 特征尺度 ≈ 5.6°）
+    terrain_octaves: int = 6         # fBm 八度数（振幅 ×0.5、频率 ×2 每级）
+    terrain_smooth: int = 2          # 路由前平滑遍数（真 8 邻居均值；抑制噪声级微洼）
+    shuffle: bool = False            # 🔴 置换零模型（对照臂）：空间置换 H（保直方图、毁结构）
+    lapse_c: float = 20.0            # H∈[0,1] 全程温差（°C）：T = base_temperature − lapse×H
+    orographic: float = 1.0          # 抬升增雨系数：Pr = q × (1 + orographic×H)
+    et_frac: float = 0.5             # 蒸散比：Et = et_frac × q（q = Magnus 饱和水汽压，hPa）
+    runoff_gain: float = 2.0         # 汇流增益：amp = 1 + gain×A/(A+A_ref)（0 ⇒ 无河汇流项）
+    water_sensitivity: float = 0.0   # 再生因子指数：f_g = u^ws / 面积权均值（0 ⇒ 整块跳过）
+    cap_sensitivity: float = 0.0     # 容量因子指数：f_c = clip(u,0,k_max)^cs / 均值（0 ⇒ 跳过）
+    k_max: float = 4.0               # 容量因子 clip 上界（河带封顶：cap×k_max^cs）
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.enabled, bool), "enabled 必须是布尔值"
+        assert isinstance(self.shuffle, bool), "shuffle 必须是布尔值"
+        assert self.terrain_lattice >= 4, "terrain_lattice ≥ 4（太小 = 全场一个团块）"
+        assert self.terrain_octaves >= 1, "terrain_octaves ≥ 1"
+        assert self.terrain_smooth >= 0, "terrain_smooth ≥ 0"
+        assert self.k_max >= 1.0, "k_max ≥ 1（< 1 会把富水格容量压低 = 反向机制）"
+        # `v == v` 挡 NaN（config.py 不依赖 numpy ⇒ 不用 isnan；同 SmellConfig 先例）
+        for nm in ("lapse_c", "orographic", "et_frac", "runoff_gain",
+                   "water_sensitivity", "cap_sensitivity"):
+            v = float(getattr(self, nm))
+            assert v == v and abs(v) <= 100.0, f"{nm}={v} 非法（需有限且 |v| ≤ 100）"
+        assert self.lapse_c >= 0.0, "lapse_c ≥ 0（递减率非负）"
+        assert self.orographic >= 0.0, "orographic ≥ 0"
+        assert self.et_frac >= 0.0, "et_frac ≥ 0"
+        assert self.runoff_gain >= 0.0, "runoff_gain ≥ 0"
+        assert self.water_sensitivity >= 0.0, "water_sensitivity ≥ 0"
+        assert self.cap_sensitivity >= 0.0, "cap_sensitivity ≥ 0"
+
+
+#: 纯斑块世界 ENV 场白名单（同规格；本批之前的存档无 `env_field` 键 ⇒ 回退默认 = 全关）。
+_ENV_FIELD_FIELDS: frozenset = frozenset(f.name for f in fields(EnvFieldConfig))
+
+
+@dataclass
 class SimConfig:
     """顶层配置：唯一事实来源，决定一次完整模拟。"""
 
@@ -1497,6 +1576,10 @@ class SimConfig:
     #   读数一律走 sidecar 新键，**不动** `EC_*` 枚举与 `energy_ledger` 列面（轻舟约束 1）。
     #   挂进 SimConfig ⇒ 经 `asdict` 自动进指纹（跨档续跑被拦，同 `smell` / `action_selection`）。
     energy_probe: EnergyProbeConfig = field(default_factory=EnergyProbeConfig)
+    # ---- 纯斑块世界（2026-10-11）：ENV 场（地形→气候态水分→产能因子；**默认关 = 逐位等价**）----
+    #   实现落在新文件 `world/env_field.py`；构造期静态派生量 ⇒ **不进快照**（可从 config 重建）。
+    #   挂进 SimConfig ⇒ 经 `asdict` 自动进指纹（跨档续跑被拦，同 `smell` / `energy_probe`）。
+    env_field: EnvFieldConfig = field(default_factory=EnvFieldConfig)
 
     # ---- D1 零模型三开关（进 fingerprint，用于对照实验） ----
     neutral_genes: bool = False          # 零模型：只冻结 g14/g15（感知/信号），其余照常演化（C3 修正）
@@ -1669,6 +1752,16 @@ class SimConfig:
                     k: v
                     for k, v in (data.get("energy_probe") or {}).items()
                     if k in _ENERGY_PROBE_FIELDS
+                }
+            ),
+            # 纯斑块世界 ENV 场；旧存档缺失 ⇒ 回退默认（enabled=False = 旧行为逐位等价）。
+            #   🔴 同 R233 T-F 教训：**新组必须在此显式接线**，否则 `load_snapshot(config=None)`
+            #   的续跑会把该组静默退回默认（开档批"续跑 ≠ 连续跑"）。
+            env_field=EnvFieldConfig(
+                **{
+                    k: v
+                    for k, v in (data.get("env_field") or {}).items()
+                    if k in _ENV_FIELD_FIELDS
                 }
             ),
         )
