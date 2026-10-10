@@ -23,6 +23,8 @@ export interface ChannelMeta {
 export interface EntitiesMeta {
   columns: ["flat", "sub_r", "sub_c", "energy", "age", "generation", "mode"];
   dtype: "float32";
+  /** 亚格细分数：`row = sub_r/subdiv`、`col = sub_c/subdiv`（格单位）；缺失 ⇒ 回退 flat 格中心 */
+  subdiv?: number;
   norm: Record<string, { p_lo: number; p_hi: number }>;
 }
 

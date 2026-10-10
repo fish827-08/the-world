@@ -2,6 +2,8 @@
 
 > 🔒 **冻结件**（2026-10-10 v0）：改动须轻舟评审 + 两侧同步；简牍（导出）/丹青（渲染）/营造（应用）以此为准。
 > 上游设计稿：`docs/设计文档/设计-可视化v0-20261010.md`。
+> 📌 **v0 修订 1**（2026-10-10，轻舟评审）：`meta.entities` 增 `subdiv` 字段——`sub_r/sub_c` 是**亚格绝对整数坐标**
+> （真源 `world/subpos.py`），不带 `subdiv` 前端无法归一；加性字段，缺省可回退（§4）。
 
 ## 0. 版本
 
@@ -34,6 +36,7 @@
   ],
   "entities": {"columns": ["flat", "sub_r", "sub_c", "energy", "age", "generation", "mode"],
                "dtype": "float32",
+               "subdiv": 4,
                "norm": {"energy": {"p_lo": 1.2, "p_hi": 40.0}, "age": {"p_lo": 0.0, "p_hi": 1200.0}}},
   "source":  {"snapshot": "…npz 路径", "snapshot_tick": 300000,
               "config_fingerprint": "…", "engine": "python|rust"},
@@ -52,8 +55,12 @@
 
 - 小端 `float32` **交错**记录，每实体 **7** 个值：`flat, sub_r, sub_c, energy, age, generation, mode`（**原始值**，非归一）。
 - 实体序 = id 升序；行数 = `file_size / 28`（帧间可变，个体数逐帧不同）。
-- 前端叠加：位置优先用 `sub_r/sub_c` + 配置 `subdiv` 细化到亚格（无亚格数据时回退格中心）；着色建议用 `meta.entities.norm`。
-- ⚠️ 旧快照无亚格/模式键时，载入侧回退零值 ⇒ 零值语义 = "无数据/关档"。
+- `sub_r/sub_c` = **亚格绝对整数坐标**（真源 `world/subpos.py`）：范围 `[0, rows*subdiv) × [0, cols*subdiv)`，
+  `subdiv` 取自 `meta.entities.subdiv`。前端位置：`row = sub_r / subdiv`、`col = sub_c / subdiv`（格单位）。
+- 回退口径：`subdiv` 缺失 或 无亚格数据 ⇒ 由 `flat` 推**格中心** `(r+0.5, c+0.5)`。
+  旧快照缺亚格键时**引擎载入侧**已回退格中心（`sub_r/subdiv = r+0.5` 恒成立，与 flat 一致）、缺 `mode` 键回退 `3`（explore）
+  ⇒ 前端无需特判，按下标直读即可；`mode` 取值域：`0=feed / 1=flee / 2=join / 3=explore`。
+- 着色建议用 `meta.entities.norm`。
 
 ## 5. `series.csv`
 
