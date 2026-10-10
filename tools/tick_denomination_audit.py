@@ -268,6 +268,18 @@ KNOWN: dict[str, str] = {
     "corpse_wound.contest_cost_energy": PER_EVENT,
     # ---- ⚠️ 时长但**不属于重标范围**（运行长度，不是物理常数）----
     "simulation.ticks": RUNTIME,
+    # ---- 纯斑块世界 ENV 场（2026-10-11；本线 = [本地开发·轻舟]）----
+    #   全部为**构造期静态场**的形状参数（地形 H / 气候态水分 W / 产能因子映射）
+    #   ⇒ 与 tick 无涉；`enabled`/`shuffle` 为 bool 不进本清点（`_iter_config_fields` 只收数值）。
+    "env_field.salt": INVARIANT,              # 独立流盐（同 `patch_seed` 族；换盐=换地形格局）
+    "env_field.terrain_lattice": INVARIANT,   # 3D 值噪声格点分辨率（空间特征尺度）
+    "env_field.terrain_octaves": INVARIANT,   # fBm 八度数
+    "env_field.terrain_smooth": INVARIANT,    # 路由前平滑遍数（空间量）
+    "env_field.lapse_c": INVARIANT,           # 温度直减率（场映射系数，无量纲）
+    "env_field.orographic": INVARIANT,        # 地形增幅系数（无量纲）
+    "env_field.runoff_gain": INVARIANT,       # 径流增益系数（无量纲）
+    "env_field.cap_sensitivity": INVARIANT,   # 产能因子指数（无量纲）
+    "env_field.water_sensitivity": INVARIANT, # 水分因子指数（无量纲）
     # ======================================================================
     # 🔴 `organisms.move_cost` —— **必须单列，不许归入四类中任何一类**
     # ======================================================================
