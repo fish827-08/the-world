@@ -8,6 +8,7 @@
 
 | 批次 / 目录 | 内容 | 件数/规模 | 备注 |
 |---|---|---|---|
+| **`2026-10-11-根目录清理/`** | 🧹 根目录点文件清理：`.workbuddy` / `.qoder-collab-runtime` / git 事故残骸（3 包）+ `.trae` 技能件（`git mv`） | 3 包 + 1 件 | **本批次明细见目录内 `README.md`**；触发=owner 直令 2026-10-11 |
 | **`2026-10-10-退役团队-归档/`** | 🏛️ **团队模式退役全套**：`AGENT.md` / `collab-toolkit/` / `_share/` / `_eval/` / `_web_eval/` / `_audit/` / `evidence/` / `工具/` / `docs-旧档/` / `杂项/` / `_trash_local-20261010.tar.gz` | 410 件 `git mv` + 4 未跟踪件 | **本批次明细见目录内 `README.md`**；触发=owner 直令 2026-10-10 |
 | `2026-09-17-瘦身/` | 首次瘦身：`PROGRESS.md` / `MODULES.md` / `ARCHITECTURE.md` / `AI-CODE-DEVELOPMENT-RULES.md` / 项目状态与实验续跑指南-20260908 / 性能优化路线与触发条件-20260908 / `TASKS-CLOUD/DEV/SNAPSHOT` | 9 件 | R115；根目录"只留必读 4 件"的由来 |
 | `20261008-L1PM-review-snapshot/` | L1/PM 两份审头文档防丢快照（原样导出）+ `README.md` 说明 | 2+1 件 | 防单点丢失；正式并档后作废留痕 |
@@ -37,6 +38,7 @@
 | 署名规范 / worktree 署名机制 / 板归档口径 | `…/docs-旧档/规格与机制/` |
 | 首次瘦身件（PROGRESS/MODULES/ARCHITECTURE/旧任务单） | `2026-09-17-瘦身/` |
 | 桌面收编残留 / 冻结树 / 旧 memory 备份 | `桌面残留-20261003/`、`frozen_trees/` |
+| 外部助手残留 / Qoder 协同运行态 / git 事故残骸 / 旧 trae 技能件 | `2026-10-11-根目录清理/` |
 | 本机临时草稿包 | `2026-10-10-退役团队-归档/_trash_local-20261010.tar.gz`、`_trash_local-20260929.tar.gz` |
 | ⚠️ 实验数据 / 跑批日志 | **不在本区**：数据仓 `the-world-data/`（独立仓）与 `_rerun_logs/` |
 
