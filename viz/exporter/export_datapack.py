@@ -88,7 +88,8 @@ def capture_entities(eng: SphereEngine) -> np.ndarray:
     P = len(eng._id)
     rows, n_cols = eng.config.world.rows, eng.config.world.cols
     _check_flat(eng._flat[:P], rows * n_cols)
-    _check_sub(eng._sub_r[:P], eng._sub_c[:P], rows, n_cols, int(eng.config.subpos.subdiv))
+    _check_sub(eng._sub_r[:P], eng._sub_c[:P], rows, n_cols,
+               int(getattr(eng.config.subpos, "subdiv", 4)))
     arrs = [
         eng._flat[:P],
         eng._sub_r[:P],
@@ -235,7 +236,7 @@ def main(argv=None) -> int:
         "entities": {
             "columns": list(ENTITY_COLUMNS),
             "dtype": "float32",
-            "subdiv": int(eng.config.subpos.subdiv),  # 契约 v0 修订1：sub_r/sub_c 为亚格绝对坐标
+            "subdiv": int(getattr(eng.config.subpos, "subdiv", 4)),  # 契约 v0 修订1：与引擎同式（缺字段回退 4）
             "norm": {k: {kk: v[kk] for kk in ("p_lo", "p_hi")} for k, v in ent_norm.items()},
         },
         "source": {
