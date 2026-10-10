@@ -1,0 +1,40 @@
+From 74236c333d60a920a8a016dead96d78c61f1dda9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=B0=8F=E9=B1=BC?=
+ <14550830+little-fishy@user.noreply.gitee.com>
+Date: Wed, 30 Sep 2026 21:25:03 +0800
+Subject: [PATCH] =?UTF-8?q?fix(a2b):=20KNOWN=20=E8=A1=A5=E5=BD=95=E8=AE=B0?=
+ =?UTF-8?q?=E5=BF=86=20v2=20=E4=BA=94=E5=AD=97=E6=AE=B5=EF=BC=88T5=20b2318?=
+ =?UTF-8?q?6d=20=E9=9A=8F=E6=A0=91=E5=BC=95=E5=85=A5=E6=9C=AA=E5=85=A5?=
+ =?UTF-8?q?=E8=A1=A8=EF=BC=8C3=20=E4=BE=8B=E5=AE=88=E5=8D=AB=E7=BA=A2?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- memory_ttl=DURATION（tick 计时）/ memory_noise_p=PROB（每 tick 概率）
+- dist_scale / degrade_thr / coarse_gain=INVARIANT（格 / 无量纲）
+- 证据 = config 字段注释原文 + 引擎用法；guard 9/9 绿、工具 rc=0
+---
+ tools/tick_denomination_audit.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/tools/tick_denomination_audit.py b/tools/tick_denomination_audit.py
+index 700d971b..3e494653 100644
+--- a/tools/tick_denomination_audit.py
++++ b/tools/tick_denomination_audit.py
+@@ -185,6 +185,12 @@ KNOWN: dict[str, str] = {
+     "info_structure.perception_noise": INVARIANT,
+     "info_structure.memory_gradient_gain": INVARIANT,
+     "info_structure.memory_weight_gene": INVARIANT,  # 13.11 开关（bool）—— 乘子只改打分权重，不承载 tick 面额
++    # ---- 记忆 v2 七字段其余五个（T5 `b23186d` 随树引入；R298 后补录，逐条核过用法）----
++    "info_structure.memory_dist_scale": INVARIANT,   # 距离衰减尺度 d0=**格**（`exp(−d/d0)`，d 按移动事件累加）⇒ 空间量
++    "info_structure.memory_degrade_thr": INVARIANT,  # 「精→粗降级距离阈值（**格**）」（config 注释原文）⇒ 空间量
++    "info_structure.memory_coarse_gain": INVARIANT,  # 增益倍率（无量纲；同 memory_gradient_gain）
++    "info_structure.memory_ttl": DURATION,           # 「记忆时效（**tick**）」⇒ 用法 `self._tick − ticks <= ttl`，压缩时 ÷k
++    "info_structure.memory_noise_p": PROB,           # 「**每 tick** 以 p 概率扰动记忆方位 ±1 档」⇒ 1−(1−p)^k
+     "info_structure.perception_radius": INVARIANT,
+     "pleasure.optimism": INVARIANT,
+     "pleasure.w_energy": INVARIANT,
+-- 
+2.46.1.windows.1
+

@@ -1,0 +1,1756 @@
+From f165dacd5d5bf248247b78e1bd65db3fd6798307 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 00:47:23 +0800
+Subject: [PATCH 1/7] =?UTF-8?q?feat:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20L1-JOINTCOL=20=E8=81=94?=
+ =?UTF-8?q?=E5=90=88=E9=87=87=E6=A0=B7=E5=88=97=E5=AE=9E=E8=A3=85=EF=BC=88?=
+ =?UTF-8?q?17=20=E5=88=97=EF=BC=8C=E9=BB=98=E8=AE=A4=E5=85=B3=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+按砚需求单 @a0feedb + PI 三裁：原始联合计数入主表（逐采样窗）+ run 级
+summary 键 + 审计最小集（l1_joint_n 曝光 / occ=0 空窗剔除率门 fail-loud）。
+
+- 列族 l1_joint_s{k}_e{j}（k=0..7 接收态 × j=0..1 富指示）+ l1_joint_n，接 _M0_COLS 之后表尾追加
+- s = signals.read_many(活体格) 接收态；e = resources._grid > FOOD_RICH_LEVEL*_capacity
+  （与引擎 :3577-3580 同式）；🔴 环境端禁 mem_bit 代理（T3 钉住，M1 变异证明）
+- 逐采样窗累加、窗末清零（非累计/非归一）；只读引擎状态、零主 RNG（T8）
+- --l1-joint 默认关 ⇒ 表头/行/meta 逐字节等价；_summary_meta() 关时摘 l1_joint 键
+  （PI 认可路线 a）；与 --m0-instruments 必需、与 --resume-sample 互斥（exit 2）
+- 续跑列一致性拦截扩到 l1_joint_n；attach 断言 signal_alphabet=='8' 否则炸
+  （需求单 §四 第二路；不候轻舟 S3-RDSWITCH CLI）
+- 越界格号 / 接收态≥8 = 引擎不变量违背 ⇒ fail-loud，不设 env_unknown 列（PI③ 从紧）
+- tests/test_l1_joint_columns.py 15 例（自带 stub，不跑真引擎、未改轻舟 r358 测试）
+---
+ experiments/s3_memory_probe.py | 183 ++++++++++++++++-
+ tests/test_l1_joint_columns.py | 345 +++++++++++++++++++++++++++++++++
+ 2 files changed, 522 insertions(+), 6 deletions(-)
+ create mode 100644 tests/test_l1_joint_columns.py
+
+diff --git a/experiments/s3_memory_probe.py b/experiments/s3_memory_probe.py
+index 7c68db32..a2d0f148 100644
+--- a/experiments/s3_memory_probe.py
++++ b/experiments/s3_memory_probe.py
+@@ -93,6 +93,7 @@ import numpy as np
+ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+ 
+ from simulation.sphere_engine import SphereEngine
++from simulation.config import FOOD_RICH_LEVEL   # L1-JOINTCOL：环境端"富指示"与引擎同式（:3577-3580）
+ from simulation.genes import Gene            # R275 T2：g22 记忆权重基因统计
+ # 🔴 S3-RDSWITCH：`--alphabet` 的 choices 用**单一真源**（与引擎构造期校验同表；
+ #    本表在 config.py，engine 从其 import ⇒ 两处永不漂移）
+@@ -513,6 +514,18 @@ def _g6_tap_release(inst, cls) -> None:
+         cls.write_many = ent[0]
+         _G6_TAPS.pop(cls, None)
+ 
++# ---- 🔴 L1-JOINTCOL（砚 GAP-B 需求单 §3.1 + PI 三裁 @板 PI③）：L1「信号↔环境」联合计数列组 ----
++#   形态 = **原始联合计数**（裁①）⇒ 充分统计量，MI(signal↔env) 与 I-3/I-4 零模型全部
++#   **离线复算**，探针内不出任何 `mi_*` 值列（值列切不动时段、也断不可双方独立复算）。
++#   粒度 = 逐采样窗一行计数、非归一（裁②）；审计 = 最小集 `l1_joint_n` 曝光 + occ=0
++#   空窗剔除率 fail-loud（裁③），其余审计项并入既有披露列、不新增列。
++_L1_K = 8                                                     # 信号态 k = 0..7（装置须 '8' 档）
++_L1_CELL_COLS = [f"l1_joint_s{k}_e{j}" for k in range(_L1_K) for j in range(2)]
++_L1_COLS = _L1_CELL_COLS + ["l1_joint_n"]                      # 16 + 1 = 17 列（表尾追加）
++# occ=0 空窗剔除率上限：阈值**出处** = C1 预注册 J-B①「occ=0 块窗剔除 >20% fail-loud」先例
++# （S4′ 族）。本行只是实现常量，改判归砚/PI（R225），**不做 CLI 旋钮**（避免自设门槛）。
++_L1_EMPTY_GATE = 0.2
++
+ 
+ class _M0Instruments:
+     """M0 仪表：G0/G1/G3/G4/G5 + 🔴 G6 发射计量 —— 探针侧旁路，**只读**引擎（不消费 RNG、不写引擎）。
+@@ -551,6 +564,15 @@ class _M0Instruments:
+         🔴 否定抓手（GAP-A 需求单 §二）：引擎 `_emit_count` 累加位于
+         `if self._oracle_on:` 之内（`sphere_engine.py:3665/3667`）⇒ `arm=main`
+         （= D0/M1 装置）**恒为 0**，绝不可作发射真值。
++      · L1（`--l1-joint`，**默认关**）`l1_joint_s{k}_e{j}` k=0..7 j=0..1 = **本采样窗内**
++        逐 tick 逐存活个体的 (接收态 s, 富指示 e) 联合计数；`l1_joint_n` = 该窗计入的
++        个体·点总次数（= 16 格之和，逐窗**清零**、不累计）。两端口径写死（需求单 §3.2）：
++        s = `signals.read_many(活体格)` 的**接收态**（不是发射态）；
++        e = `resources._grid[cur] > FOOD_RICH_LEVEL * _capacity[cur]` —— 与引擎工作记忆
++        写入同一比较式（`sphere_engine.py:3577-3580`），即"富指示"**本身**。
++        🔴 环境端**禁取 `_mem_bit_*` 作代理**：'8' 档下 `state = e_bin*2 + mem_bit`
++        ⇒ 信号态决定发射者 mem_bit ⇒ MI(state, mem_bit) 发送者一半恒真（上界 = H(state)，
++        无携带信息含义）。此禁令由 T3 钉住（把 e 端换成 mem_bit ⇒ T3 必红）。
+ 
+     🔴 测量时点（与引擎源码逐点对齐；改引擎需复核本类）：
+       · G5 的 has_sig 与引擎决策**同式同源**（读 `_marks` + 查 `_nb_table`/`_pole_nb`，
+@@ -566,7 +588,7 @@ class _M0Instruments:
+         连续（last=t−1）优先 → 长连串优先 → 小 id 兜底，并计 `ambig`。
+     """
+ 
+-    def __init__(self) -> None:
++    def __init__(self, l1_joint: bool = False) -> None:
+         self.hist_run = np.zeros(9, dtype=np.int64)      # 下标 = min(len, 8)
+         self.streak: dict[int, tuple[int, int]] = {}     # id -> (last_tick, len)
+         self.fresh_n = 0
+@@ -588,6 +610,12 @@ class _M0Instruments:
+         self._g6_cls = None            # 挂钩所在类对象（还原用）
+         self._g6_cls_name = None       # 挂钩落点类名（披露/审计用）
+         self._g6_superseded = False    # 被后来的仪表实例接管过（披露，不硬炸）
++        # ---- 🔴 L1-JOINTCOL：逐采样窗联合计数累加器（默认关 ⇒ 以下全部不工作）----
++        self.l1_joint = bool(l1_joint)
++        self.l1_acc = np.zeros(_L1_K * 2, dtype=np.int64)   # 下标 = s*2 + e
++        self.l1_win_n = 0                                   # 本窗个体·点计数
++        self.l1_windows = 0                                 # 已写出窗数（run 级审计用）
++        self.l1_empty_windows = 0                           # 其中 occ=0 的空窗数
+ 
+     # ---- 装配 + fail-loud 自检（列产不出来必须当场炸，不许静默 NaN）----
+ 
+@@ -604,6 +632,8 @@ class _M0Instruments:
+             raise RuntimeError("🔴 M0 仪表装配失败：_genes 宽度 ≤ g15 下标")
+         self.last_flat = np.asarray(eng._flat).copy()
+         self.last_ids = np.asarray(eng._id).copy()
++        if self.l1_joint:
++            self._attach_l1(eng)
+         if str(getattr(eng, "_alpha", "")) != "8":
+             print(f"  ⚠️ M0 G4：signal_alphabet={getattr(eng, '_alpha', None)!r} ≠ '8' "
+                   f"⇒ mem_bit 通路不在（g4_* 恒 n/a）；G4 数据须装置切 \"8\""
+@@ -661,6 +691,8 @@ class _M0Instruments:
+         self._track_runs(eng, t, fresh)
+         self.last_flat = np.asarray(eng._flat).copy()
+         self.last_ids = np.asarray(eng._id).copy()
++        if self.l1_joint:               # 🔴 L1-JOINTCOL：本步末逐个体记 (s,e)
++            self._l1_accumulate(eng)
+ 
+     # ---- 🔴 G6 每 tick：人·tick 分母 + 挂钩失效自检（fail-loud）----
+ 
+@@ -772,6 +804,99 @@ class _M0Instruments:
+             out["g5_move_diff"] = float(abs(p0[4] - p1[4]))
+         return out
+ 
++    # ---- 🔴 L1-JOINTCOL：(信号↔环境) 联合计数（只读、零 RNG、fail-loud）----
++
++    def _attach_l1(self, eng) -> None:
++        """L1 列组的装配自检：缺件即炸，**不许静默降档**。"""
++        for attr in ("_grid", "_capacity"):
++            if not hasattr(eng.resources, attr):
++                raise RuntimeError(
++                    f"🔴 M0 L1 装配失败：resources.{attr} 不存在（环境端富指示需要它）")
++        if not hasattr(eng.signals, "read_many"):
++            raise RuntimeError("🔴 M0 L1 装配失败：signals.read_many 不存在（接收态读数）")
++        if int(eng.resources._grid.size) != int(eng.resources._capacity.size):
++            raise RuntimeError(
++                f"🔴 M0 L1 装配失败：_grid 格数={int(eng.resources._grid.size)} ≠ "
++                f"_capacity 格数={int(eng.resources._capacity.size)} ⇒ 富指示比较式失去意义")
++        if str(getattr(eng, "_alpha", "")) != "8":
++            raise RuntimeError(
++                f"🔴 M0 L1 装配失败：signal_alphabet="
++                f"{getattr(eng, '_alpha', None)!r} ≠ '8' ⇒ 信号态实际取值 0..15，而本列组"
++                f"只有 s0..s7 八档 ⇒ 8..15 态会被**静默丢弃**（MI 直接偏低且事后无从查出）。"
++                f"二选一：装置切 \"8\"（M1 锁定档；顶层 CLI 见卡 S3-RDSWITCH），"
++                f"或本次**不带** --l1-joint。需求单 §四 已把这两路交给实施线，此处取后者兜底。")
++
++    def _l1_accumulate(self, eng) -> None:
++        """本步末逐存活个体记 (s, e)；同窗内多次到访**照计**（需求单 §3.2 时规）。"""
++        cur = np.asarray(eng._flat, dtype=np.int64)
++        n = int(cur.size)
++        if n == 0:                          # 灭绝：本 tick 零曝光（窗末 `l1_joint_n` 记 0）
++            return
++        grid = np.asarray(eng.resources._grid)
++        cap = np.asarray(eng.resources._capacity)
++        if int(cur.min()) < 0 or int(cur.max()) >= int(grid.size):
++            raise RuntimeError(
++                f"🔴 M0 L1：个体格号越界（min={int(cur.min())} max={int(cur.max())} "
++                f"格数={int(grid.size)}）⇒ 联合读数不可信，停跑。"
++                f"（需求单 §3.1 的 `l1_joint_env_unknown_n` 审计列按 PI③ 最小集**不设**，"
++                f"实施线结论 = 此分支属引擎不变量违背，应炸不应计数。）")
++        s = np.asarray(eng.signals.read_many(cur), dtype=np.int64)
++        if int(s.max()) >= _L1_K:
++            raise RuntimeError(
++                f"🔴 M0 L1：接收态出现 {int(s.max())} ≥ {_L1_K} ⇒ 装置实际不是 '8' 档"
++                f"（attach 断言被绕过，例：运行中被改档）。本列组会静默丢态 ⇒ 停跑不出列。")
++        e = (grid[cur] > FOOD_RICH_LEVEL * cap[cur]).astype(np.int64)
++        self.l1_acc += np.bincount(s * 2 + e, minlength=_L1_K * 2)
++        self.l1_win_n += n
++
++    def l1_pooled(self, rows) -> dict:
++        """run 级汇总键（PI③ 最小集）：16 格池 + 曝光 + occ=0 空窗剔除率门。
++
++        🔴 这里**只出计数**，不出任何 MI/熵值 ⇒ 判读权（算式与阈值）完整留在砚侧，
++        且复算不依赖本探针代码段（需求单 §3.4 的独立性论证照此兑现）。
++        """
++        if not self.l1_joint:
++            raise RuntimeError("🔴 M0 L1：`--l1-joint` 关 ⇒ 不该产 run 级键（调用点漏了门）")
++        if not rows:
++            raise RuntimeError(
++                "🔴 M0 L1 审计门：本 run 无任何采样行 ⇒ 联合计数无从汇总（不静默出空键）")
++        tot = np.zeros(_L1_K * 2, dtype=np.int64)
++        n_win = 0
++        n_empty = 0
++        sum_n = 0
++        for r in rows:
++            for i, name in enumerate(_L1_CELL_COLS):
++                tot[i] += int(r[name])
++            _n = int(r["l1_joint_n"])
++            sum_n += _n
++            n_win += 1
++            if _n == 0:
++                n_empty += 1
++        if int(tot.sum()) != sum_n:
++            raise RuntimeError(
++                f"🔴 M0 L1 审计门：行和不变量破了（16 格合计 {int(tot.sum())} ≠ "
++                f"Σ l1_joint_n {sum_n}）⇒ 计数或列名错位，停跑。"
++                f"（需求单 §3.3-5「行和 = Σ 窗内计数点」）")
++        frac = n_empty / float(n_win)
++        if frac > _L1_EMPTY_GATE:
++            raise RuntimeError(
++                f"🔴 M0 L1 审计门（PI③）：occ=0 空窗剔除率 {n_empty}/{n_win} = {frac:.3f} > "
++                f"{_L1_EMPTY_GATE} ⇒ 本 run 的联合表只覆盖少数采样窗（多半中途灭绝后大面积零曝光），"
++                f"MI(signal↔env) 无从判读 ⇒ 停跑不出 summary。"
++                f"阈值出处 = C1 J-B① 先例，改判归砚/PI（R225），不在实现侧放宽。")
++        out = {name: int(tot[i]) for i, name in enumerate(_L1_CELL_COLS)}
++        out["l1_joint_n"] = sum_n
++        out["l1_windows"] = n_win
++        out["l1_empty_windows"] = n_empty
++        out["l1_empty_window_frac"] = round(frac, 4)
++        out["l1_empty_gate"] = _L1_EMPTY_GATE
++        out["l1_joint_sig_states"] = _L1_K
++        out["l1_env_source"] = "resources._grid > FOOD_RICH_LEVEL * _capacity"
++        out["l1_note"] = ("原始联合计数（充分统计量）；逐采样窗非归一、同窗多次到访照计；"
++                          "s=受方格接收态(read_many，非发射态)；e=富指示本身(🔴非 mem_bit 代理)；"
++                          "MI 与 I-3/I-4 零模型由这 17 列离线复算，探针内不出值列")
++        return out
++
+     def sample_cols(self, eng) -> dict:
+         d: dict = {}
+         N = int(np.asarray(eng._flat).size)
+@@ -805,6 +930,16 @@ class _M0Instruments:
+         d["g5_n_sig"] = g5.get("g5_n_sig", 0)
+         d["g5_n_nosig"] = g5.get("g5_n_nosig", 0)
+         d.update(self._g6_cols())
++        if self.l1_joint:
++            # 🔴 逐窗写出后**清零**（裁②「逐采样点粒度」；累计版切不动时段）
++            for i, name in enumerate(_L1_CELL_COLS):
++                d[name] = int(self.l1_acc[i])
++            d["l1_joint_n"] = int(self.l1_win_n)
++            self.l1_windows += 1
++            if int(self.l1_win_n) == 0:
++                self.l1_empty_windows += 1
++            self.l1_acc[:] = 0
++            self.l1_win_n = 0
+         return d
+ 
+     # ---- 🔴 G6 采样列（窗 = 上一个采样点 → 本采样点）----
+@@ -1594,10 +1729,11 @@ def _summary_meta(a) -> dict:
+ 
+     背景：`meta = vars(args)` 全量 ⇒ 新加 CLI 项**即使走默认、功能关着**也会写进 meta
+     ⇒ 与历史批（M1-SMOKE 8 份、p1c 批等）meta 不再逐字节可比，值班巡检的"装置档回显
+-    对比"会读出差异。此处把"等于默认值"的 rd_mode/alphabet/m0_emit_window_frac 摘掉：
++    对比"会读出差异。此处把"等于默认值"的 rd_mode/alphabet/m0_emit_window_frac/l1_joint 摘掉：
+     默认路径 ⇒ meta 与旧版逐字节一致；显式改档 ⇒ 键在场、值即实际档（可追溯）。
+-    🔴 合并件（S3-RDSWITCH × G6-EMITRATE，PI 解冲突）：两侧摘除条件**并集**，
+-       任一侧单独失效即破坏对应家族的逐字节等价，改此处必同时复跑两侧等价实证。
++    🔴 合并件（S3-RDSWITCH × G6-EMITRATE × L1-JOINTCOL，澜舟 own rebase 归一）：
++       各侧摘除条件**并集**，任一侧单独失效即破坏对应家族的逐字节等价，
++       改此处必同时复跑三侧等价实证（PI 裁定：归一面以 main 现码为准）。
+     """
+     meta = dict(vars(a))          # ⚠️ 必须**拷贝**：直接 pop `vars(a)` 会改 namespace，
+     if meta.get("rd_mode") == _RD_MODE_DEFAULT:      # 后续 `a.rd_mode` 读取即炸
+@@ -1606,6 +1742,8 @@ def _summary_meta(a) -> dict:
+         meta.pop("alphabet", None)
+     if not getattr(a, "m0_instruments", False):      # G6：仪表关 ⇒ 不写 G6 新 CLI 项
+         meta.pop("m0_emit_window_frac", None)
++    if not getattr(a, "l1_joint", False):            # L1：联合列关 ⇒ 不写 l1_joint 键
++        meta.pop("l1_joint", None)
+     return meta
+ 
+ 
+@@ -1699,6 +1837,15 @@ def main():
+                          "（默认 0.25 = GAP-A 需求单 §3.2 建议值）。🔴 正式窗宽口径"
+                          "**归砚跑前锁定**，本项只提供读数形态、不含判据；"
+                          "仅 --m0-instruments 开时生效（关 ⇒ summary 逐字节不变）")
++    # ---- 🔴 L1-JOINTCOL（砚 GAP-B 需求单 §3.1/§3.2 + PI 三裁）：L1 联合计数列组 ----
++    ap.add_argument("--l1-joint", action="store_true",
++                    help="追加 L1「信号↔环境」**原始联合计数** 17 列（表尾）："
++                         "l1_joint_s{k}_e{j}（k=0..7 接收态 × j=0..1 富指示）+ "
++                         "l1_joint_n（本采样窗个体·点曝光）。**默认关 ⇒ 表头/行/meta "
++                         "逐字节等于旧版**；只读、零 RNG。须配 --m0-instruments；"
++                         "🔴 装置须 signal_alphabet=\"8\"（否则 attach 炸，不静默丢态）；"
++                         "🔴 与 --resume-sample 互斥（仪表状态不进快照）；"
++                         "MI/I-3/I-4 由这些列**离线复算**，探针内不出值列（窗宽与判读口径归砚）")
+     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
+     add_device_arg(ap)
+     a = ap.parse_args()
+@@ -1722,6 +1869,17 @@ def main():
+         sys.exit(2)
+     if not a.snapshot_dir:
+         a.snapshot_dir = os.path.join("_rerun_logs", "snap")
++    # ---- 🔴 L1-JOINTCOL 前置校验（fail-loud，不给"看着跑了其实没跑"的机会）----
++    if a.l1_joint and not a.m0_instruments:
++        print("🔴 --l1-joint 需要 --m0-instruments（L1 列组挂在 M0 仪表列族上，"
++              "单开不出列）。中止。", file=sys.stderr)
++        sys.exit(2)
++    if a.l1_joint and a.resume_sample:
++        print("🔴 --l1-joint 与 --resume-sample 互斥：仪表的逐窗累加器不进快照 ⇒ 续跑"
++              "无法重建「窗」的边界（会产出半窗假数）。需求单 §3.3-3「批前决定开否，"
++              "中途开列=中止」照此履行 ⇒ 本批要么首跑开列，要么关列。中止。",
++              file=sys.stderr)
++        sys.exit(2)
+ 
+     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
+     overlap = sorted(set(seeds) & SEEDS_USED)
+@@ -1766,6 +1924,8 @@ def main():
+               "max_gen"]
+     if a.m0_instruments:  # 🔴 R358 T4：M0 仪表列（默认关 ⇒ 表头不变）
+         header = header + _M0_COLS
++        if a.l1_joint:    # 🔴 L1-JOINTCOL：表尾追加 17 列（不打乱既有列序）
++            header = header + _L1_COLS
+     if a.home_range:      # 🔴 R308：仅在开启时追加个体活动范围列（默认关 ⇒ 表头不变）
+         header = header + _HR_COLS
+ 
+@@ -1778,7 +1938,8 @@ def main():
+           f"rd_mode={a.rd_mode} alphabet={a.alphabet} "
+           f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
+           f"weight_gene={a.weight_gene} m0_instruments={a.m0_instruments} append={a.append} "
+-          f"resume_sample={a.resume_sample} save_every={a.save_every}")
++          f"resume_sample={a.resume_sample} save_every={a.save_every} "
++          f"l1_joint={a.l1_joint}")
+ 
+     # ---- v2：run 级断点续跑准备（R264）----
+     done = set()
+@@ -1836,6 +1997,12 @@ def main():
+                   "不符（混用两档 ⇒ 列错位）。换 --out 或保持一致。中止。",
+                   file=sys.stderr)
+             sys.exit(2)
++        # 🔴 L1-JOINTCOL：同一拦法扩到 L1 列组（`--append` 侧；`--resume-sample` 已在上面硬禁）
++        if ("l1_joint_n" in _hdr_ex) != bool(a.l1_joint):
++            print("🔴 续跑列不一致：已存在 CSV 的 L1 联合列与本次 --l1-joint 不符"
++                  "（混用两档 ⇒ 16 格错位且事后无从查出）。换 --out 或保持一致。中止。",
++                  file=sys.stderr)
++            sys.exit(2)
+ 
+     # 🔴 v3：sample 级续跑的"清残行"**必须在打开 `fout` 之前**做。
+     #   踩过三个坑（全是"静默错"，只有对拍才发现）：
+@@ -1881,7 +2048,8 @@ def main():
+                 # 清行段处理过）。**不能用 --append 的 prior_rows 合并**：
+                 # 那会把旧行读进来再重写一遍 ⇒ 浮点 repr 往返抖精度。
+                 _hr = _HomeRangeTracker() if a.home_range else None   # R308：每 run 新建
+-                _m0 = _M0Instruments() if a.m0_instruments else None  # 🔴 R358 T4：每 run 新建
++                _m0 = (_M0Instruments(l1_joint=a.l1_joint)
++                       if a.m0_instruments else None)  # 🔴 R358 T4 / L1-JOINTCOL：每 run 新建
+                 if _hr is not None:      # 🔴 R318 设计 4：扰动参数挂到跟踪器上
+                     _hr.ptb_mode = a.perturb
+                     _hr.ptb_every = int(a.perturb_every)
+@@ -1933,6 +2101,9 @@ def main():
+                 if _m0 is not None:   # 🔴 R396 三拍②（G6）：run 级首/末段发射率读数
+                     _sum_row.update(
+                         _m0.emit_pooled(rows_out, a.m0_emit_window_frac))
++                # 🔴 L1-JOINTCOL 裁②：run 级 summary 键（PI③ 最小集；内嵌审计门）
++                if a.l1_joint and _m0 is not None:
++                    _sum_row.update(_m0.l1_pooled(rows_out))
+                 summary.append(_sum_row)
+                 # 🔴 summary 同样逐 run 原子重写（防同类丢失）
+                 tmp_json = out_json + ".tmp"
+diff --git a/tests/test_l1_joint_columns.py b/tests/test_l1_joint_columns.py
+new file mode 100644
+index 00000000..a4a6f42a
+--- /dev/null
++++ b/tests/test_l1_joint_columns.py
+@@ -0,0 +1,345 @@
++"""L1-JOINTCOL：`_M0Instruments` 的「信号↔环境」联合计数列组纯单元测试（stub 最小引擎）。
++
++口径真值 = 砚《GAP-B 盘点+需求单》§3.1/§3.2（@a0feedb）+ PI 三裁（板帖 PI③）：
++  裁①原始联合计数（不出 `mi_*` 值列）｜裁②逐采样窗粒度入主表 + run 级 summary 键｜
++  裁③审计最小集 = `l1_joint_n` 曝光 + occ=0 空窗剔除率 fail-loud。
++
++覆盖（不跑真引擎 ⇒ 秒级）：
++  T1 手算锚（4 个体 (s,e) → 16 格精确计数 + 行和）；
++  T2 逐窗清零（第二窗不吞第一窗）；
++  T3 🔴 环境端 = 富指示本身，**不是 mem_bit**（换成 mem_bit 必红）；
++  T4 alphabet ≠ '8' ⇒ attach fail-loud；T5 接收态越档 ⇒ fail-loud；
++  T6 格号越界 ⇒ fail-loud（PI③：不设 env_unknown 列，炸）；
++  T7 灭绝窗 n=0（是 0 不是 NaN）+ 空窗剔除率门两向；
++  T8 只读 & 零 RNG（引擎状态逐位不变 + rng 调用计数 0）；
++  T9 列集 17/唯一/与 _M0_COLS 不相交/表尾次序；
++  T10 默认关 ⇒ 不新增键、不要求 resources、l1_pooled 调用点漏门即炸；
++  T11 行和不变量破了 ⇒ fail-loud；T12 pooled 键数值（手算锚）。
++"""
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from experiments.s3_memory_probe import (
++    FOOD_RICH_LEVEL, _L1_CELL_COLS, _L1_COLS, _L1_EMPTY_GATE, _L1_K, _M0_COLS,
++    _M0Instruments,
++)
++
++
++class _Sig:
++    def __init__(self, n, duration=5):
++        self._marks = np.zeros(n, dtype=np.uint8)
++        self._age = np.zeros(n, dtype=np.int32)
++        self.duration = int(duration)
++
++    def write(self, cell, pat):
++        self._marks[cell] = np.uint8(pat)
++        self._age[cell] = self.duration
++
++    def read_many(self, cells):                       # 与 world/signal_field.py:120 同形
++        return self._marks[cells].copy()
++
++
++class _Res:
++    def __init__(self, n):
++        self._grid = np.zeros(n, dtype=np.float64)
++        self._capacity = np.zeros(n, dtype=np.float64)
++
++    def set(self, cell, food, cap):
++        self._grid[cell] = food
++        self._capacity[cell] = cap
++
++
++class _Rng:
++    """记账用假 RNG：任何调用都被计数（T8 钉"零主 RNG"）。"""
++
++    def __init__(self):
++        self.calls = 0
++
++    def random(self, *a, **k):
++        self.calls += 1
++        return 0.5
++
++    def integers(self, *a, **k):
++        self.calls += 1
++        return 0
++
++    def __getattr__(self, name):
++        def _boom(*a, **k):
++            self.calls += 1
++            return None
++        return _boom
++
++
++class _World:
++    def __init__(self, rows=4, cols=8):
++        self.rows, self.cols = rows, cols
++        self._pole_top, self._pole_bottom = 0, rows - 1
++        n = rows * cols
++        self._nb_table = np.tile(np.arange(n, dtype=np.int64)[:, None], (1, 8))
++        self._pole_nb = np.array([np.arange(cols), np.full(cols, cols)], dtype=np.int64)
++
++
++class _Eng:
++    def __init__(self, rows=4, cols=8):
++        n = rows * cols
++        self.signals = _Sig(n)
++        self.world = _World(rows, cols)
++        self.resources = _Res(n)
++        self._nb_table = self.world._nb_table
++        self._pole_nb = self.world._pole_nb
++        self._flat = np.array([0, 1, 2, 3], dtype=np.int64)
++        self._id = np.array([10, 11, 12, 13], dtype=np.int64)
++        self._genes = np.zeros((4, 32), dtype=np.float64)
++        self._genes[:, 15] = 0.5
++        self._mem_bit_on = 0
++        self._mem_bit_n = 0
++        self._alpha = "8"
++        self.main_rng = _Rng()
++
++
++def _m0(l1=True):
++    return _M0Instruments(l1_joint=l1)
++
++
++def _set_env(eng, cell, s_pat, food, cap):
++    """给定格：接收态 = s_pat；富指示 = (food > 0.5 * cap)。"""
++    eng.signals.write(cell, s_pat)
++    eng.resources.set(cell, food, cap)
++
++
++# ---------------------------------------------------------------- 列集本身
++
++def test_t9_column_set_is_17_unique_tail_appended():
++    assert _L1_K == 8
++    assert len(_L1_CELL_COLS) == 16
++    assert _L1_CELL_COLS[:4] == ["l1_joint_s0_e0", "l1_joint_s0_e1",
++                                 "l1_joint_s1_e0", "l1_joint_s1_e1"]
++    assert _L1_COLS == _L1_CELL_COLS + ["l1_joint_n"]          # 表尾 = 曝光列
++    assert len(set(_L1_COLS)) == 17
++    assert not (set(_L1_COLS) & set(_M0_COLS))                 # 与既有 36 列不相交
++    assert _L1_EMPTY_GATE == 0.2                               # 阈值出处=C1 J-B①，实现侧不擅自放宽
++
++
++# ---------------------------------------------------------------- T1 手算锚
++
++def test_t1_hand_anchored_joint_counts():
++    eng = _Eng()
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)      # s=1 e=1
++    _set_env(eng, 1, s_pat=1, food=0.1, cap=1.0)      # s=1 e=0
++    _set_env(eng, 2, s_pat=0, food=0.9, cap=1.0)      # s=0 e=1
++    _set_env(eng, 3, s_pat=6, food=0.2, cap=0.4)      # s=6 e=0（0.2 ≤ 0.5*0.4=0.2 ⇒ 不富）
++    m0 = _m0()
++    m0.attach(eng)
++    m0.after_step(eng, 1, sampled=True)
++    d = m0.sample_cols(eng)
++    assert d["l1_joint_s1_e1"] == 1
++    assert d["l1_joint_s1_e0"] == 1
++    assert d["l1_joint_s0_e1"] == 1
++    assert d["l1_joint_s6_e0"] == 1
++    assert d["l1_joint_n"] == 4                                   # = 个体数
++    assert sum(int(d[c]) for c in _L1_CELL_COLS) == d["l1_joint_n"]   # 行和不变量
++    assert all(int(d[c]) == 0 for c in _L1_CELL_COLS
++               if c not in ("l1_joint_s1_e1", "l1_joint_s1_e0",
++                            "l1_joint_s0_e1", "l1_joint_s6_e0"))
++    assert all(isinstance(d[c], int) for c in _L1_COLS)          # 原始计数 = int，不是浮点
++
++
++def test_t1b_rich_boundary_is_strict_gt():
++    """富指示与引擎同式 = `>` 不是 `>=`（FOOD_RICH_LEVEL=0.5；R121 只命名不改数值）。"""
++    eng = _Eng()
++    _set_env(eng, 0, s_pat=1, food=FOOD_RICH_LEVEL * 1.0, cap=1.0)   # 恰等 ⇒ 不富
++    _set_env(eng, 1, s_pat=1, food=0.5000001, cap=1.0)               # 略高 ⇒ 富
++    m0 = _m0()
++    m0.attach(eng)
++    m0.after_step(eng, 1, sampled=True)
++    d = m0.sample_cols(eng)
++    assert d["l1_joint_s1_e0"] == 1 and d["l1_joint_s1_e1"] == 1
++
++
++# ---------------------------------------------------------------- T2 逐窗
++
++def test_t2_windows_are_per_window_not_cumulative():
++    eng = _Eng()
++    _set_env(eng, 0, s_pat=2, food=0.9, cap=1.0)
++    m0 = _m0()
++    m0.attach(eng)
++    for t in (1, 2, 3):                                  # 第一窗 3 个 tick
++        m0.after_step(eng, t, sampled=(t == 3))
++    r1 = m0.sample_cols(eng)
++    assert r1["l1_joint_s2_e1"] == 3 and r1["l1_joint_n"] == 12   # 3 tick × 4 个体
++    m0.after_step(eng, 4, sampled=True)                  # 第二窗只 1 个 tick
++    r2 = m0.sample_cols(eng)
++    assert r2["l1_joint_s2_e1"] == 1 and r2["l1_joint_n"] == 4    # 不吞上一窗
++    assert m0.l1_windows == 2 and m0.l1_empty_windows == 0
++
++
++# ---------------------------------------------------------------- T3 禁 mem_bit
++
++def test_t3_environment_side_is_rich_indicator_not_mem_bit():
++    """🔴 卡面硬约束：e 端取"富指示"本身。若实现误取 `_mem_bit_*`（'8' 档下
++    `state = e_bin*2 + mem_bit` ⇒ MI 发送者一半恒真），本例必红。
++    """
++    eng = _Eng()
++    eng._mem_bit_on, eng._mem_bit_n = 4, 4               # mem_bit 全 1（假代理会全判"富"）
++    for c in (0, 1, 2, 3):
++        _set_env(eng, c, s_pat=3, food=0.0, cap=1.0)     # 实际全场"不富"
++    m0 = _m0()
++    m0.attach(eng)
++    m0.after_step(eng, 1, sampled=True)
++    d = m0.sample_cols(eng)
++    assert d["l1_joint_s3_e0"] == 4 and d["l1_joint_s3_e1"] == 0
++    p = m0.l1_pooled([d])
++    assert "mem_bit" not in p["l1_env_source"] and "_grid" in p["l1_env_source"]
++
++
++# ---------------------------------------------------------------- T4–T6 fail-loud
++
++def test_t4_attach_fail_loud_when_alphabet_not_8():
++    eng = _Eng()
++    eng._alpha = "16"
++    with pytest.raises(RuntimeError, match="signal_alphabet"):
++        _m0().attach(eng)
++
++
++def test_t5_emit_state_above_k_gives_fail_loud():
++    eng = _Eng()
++    m0 = _m0()
++    m0.attach(eng)
++    eng.signals._marks[0] = _L1_K                       # 绕过 attach 断言硬塞越档态
++    with pytest.raises(RuntimeError, match="接收态出现"):
++        m0.after_step(eng, 1, sampled=False)
++
++
++def test_t6_cell_out_of_range_gives_fail_loud():
++    eng = _Eng()
++    m0 = _m0()
++    m0.attach(eng)
++    eng._flat = np.array([9999], dtype=np.int64)        # 越界 = 引擎不变量违背
++    with pytest.raises(RuntimeError, match="格号越界"):
++        m0.after_step(eng, 1, sampled=False)
++
++
++# ---------------------------------------------------------------- T7 空窗门
++
++def test_t7_extinct_window_is_zero_not_nan():
++    eng = _Eng()
++    m0 = _m0()
++    m0.attach(eng)
++    eng._flat = np.zeros(0, dtype=np.int64)
++    eng._id = np.zeros(0, dtype=np.int64)
++    m0.after_step(eng, 1, sampled=True)
++    d = m0.sample_cols(eng)
++    assert d["l1_joint_n"] == 0
++    assert all(int(d[c]) == 0 for c in _L1_CELL_COLS)   # 0，不是 NaN
++    assert np.isnan(d["g15_mean"])                      # 基因族仍是 NaN（口径不因我而变）
++
++
++def test_t7b_empty_window_gate_fires_above_20pct():
++    eng = _Eng()
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
++    m0 = _m0()
++    m0.attach(eng)
++    rows = []
++    for t in range(1, 6):                               # 5 窗：窗 3..5 空 ⇒ 3/5 = 60%
++        if t >= 3:
++            eng._flat = np.zeros(0, dtype=np.int64)
++            eng._id = np.zeros(0, dtype=np.int64)
++        m0.after_step(eng, t, sampled=True)
++        rows.append(m0.sample_cols(eng))
++    with pytest.raises(RuntimeError, match="空窗剔除率"):
++        m0.l1_pooled(rows)
++
++
++def test_t7c_empty_window_gate_passes_at_20pct():
++    eng = _Eng()
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
++    m0 = _m0()
++    m0.attach(eng)
++    rows = []
++    for t in range(1, 6):                               # 5 窗：仅窗 5 空 ⇒ 1/5 = 20%
++        if t == 5:
++            eng._flat = np.zeros(0, dtype=np.int64)
++            eng._id = np.zeros(0, dtype=np.int64)
++        m0.after_step(eng, t, sampled=True)
++        rows.append(m0.sample_cols(eng))
++    p = m0.l1_pooled(rows)
++    assert p["l1_windows"] == 5 and p["l1_empty_windows"] == 1
++    assert p["l1_empty_window_frac"] == pytest.approx(0.2)
++    assert p["l1_empty_gate"] == _L1_EMPTY_GATE
++
++
++# ---------------------------------------------------------------- T8 只读零 RNG
++
++def test_t8_read_only_and_zero_rng():
++    eng = _Eng()
++    for c, s in zip(range(4), (1, 2, 3, 4)):
++        _set_env(eng, c, s_pat=s, food=(0.9 if c % 2 else 0.0), cap=1.0)
++    m0 = _m0()
++    m0.attach(eng)
++    snap = {
++        "flat": eng._flat.copy(), "id": eng._id.copy(),
++        "marks": eng.signals._marks.copy(), "age": eng.signals._age.copy(),
++        "grid": eng.resources._grid.copy(), "cap": eng.resources._capacity.copy(),
++        "genes": eng._genes.copy(),
++    }
++    for t in (1, 2):
++        m0.after_step(eng, t, sampled=(t == 2))
++    row = m0.sample_cols(eng)
++    m0.l1_pooled([row])
++    assert int(eng._mem_bit_on) == 0 and int(eng._mem_bit_n) == 0   # 没替引擎累计
++    assert eng.main_rng.calls == 0                    # 🔴 零主 RNG
++    np.testing.assert_array_equal(eng._flat, snap["flat"])
++    np.testing.assert_array_equal(eng._id, snap["id"])
++    np.testing.assert_array_equal(eng.signals._marks, snap["marks"])
++    np.testing.assert_array_equal(eng.signals._age, snap["age"])
++    np.testing.assert_array_equal(eng.resources._grid, snap["grid"])
++    np.testing.assert_array_equal(eng.resources._capacity, snap["cap"])
++    np.testing.assert_array_equal(eng._genes, snap["genes"])
++
++
++# ---------------------------------------------------------------- T10–T12
++
++def test_t10_default_off_changes_nothing():
++    eng = _Eng()
++    del eng.resources                                 # 关列 ⇒ 不该要求环境端件
++    m0 = _M0Instruments()                             # l1_joint 默认 False
++    m0.attach(eng)
++    eng._alpha = "16"                                 # 关列 ⇒ '16' 档也只告警不炸（G4 原行为）
++    d = m0.sample_cols(eng)
++    assert set(d) == set(_M0_COLS)                    # 不冒出新键
++    assert not any(k.startswith("l1_joint") for k in d)
++    with pytest.raises(RuntimeError, match="不该产 run 级键"):
++        m0.l1_pooled([d])                              # 调用点漏门 ⇒ 当场炸
++
++
++def test_t11_pooled_row_sum_invariant_is_checked():
++    eng = _Eng()
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
++    m0 = _m0()
++    m0.attach(eng)
++    m0.after_step(eng, 1, sampled=True)
++    row = dict(m0.sample_cols(eng))
++    row["l1_joint_n"] = int(row["l1_joint_n"]) + 1     # 人为破行和不变量
++    with pytest.raises(RuntimeError, match="行和不变量"):
++        m0.l1_pooled([row])
++
++
++def test_t12_pooled_keys_hand_anchored():
++    eng = _Eng()
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)       # (1,1)
++    _set_env(eng, 1, s_pat=1, food=0.0, cap=1.0)       # (1,0)
++    m0 = _m0()
++    m0.attach(eng)
++    rows = []
++    for t in (1, 2, 3):
++        m0.after_step(eng, t, sampled=True)
++        rows.append(m0.sample_cols(eng))               # 每 tick 就出一个窗 ⇒ 3 个同值窗
++    p = m0.l1_pooled(rows)
++    assert p["l1_joint_s1_e1"] == 3 and p["l1_joint_s1_e0"] == 3
++    assert p["l1_joint_n"] == 12                       # Σ 窗曝光 = 3 窗 × 4 个体
++    assert p["l1_joint_sig_states"] == _L1_K
++    assert set(_L1_COLS) <= set(p)                     # run 级键含全部 17 个名字
++    assert "离线复算" in p["l1_note"]
++    assert not any(k.startswith("mi") for k in p)       # 裁①：探针内不出任何值列
+-- 
+2.46.1.windows.1
+
+
+From 21303abc020ea45ba1b31adb1e436e39e775a9ca Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 00:47:23 +0800
+Subject: [PATCH 2/7] =?UTF-8?q?docs:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20L1-JOINTCOL=20=E4=BA=A4?=
+ =?UTF-8?q?=E4=BB=98=E8=AE=B0=E5=BD=95=EF=BC=88=E9=AA=8C=E6=94=B6=E5=AF=B9?=
+ =?UTF-8?q?=E7=85=A7/4=20=E9=A1=B9=E5=AE=9E=E7=8E=B0=E5=81=8F=E7=A6=BB?=
+ =?UTF-8?q?=E7=95=99=E7=97=95/=E5=9B=9B=E5=BE=8B=E8=AF=81=E6=8D=AE?=
+ =?UTF-8?q?=E5=85=AD=E7=BB=84=E5=8F=98=E5=BC=82/'8'=20=E6=A1=A3=E4=B8=89?=
+ =?UTF-8?q?=E7=BB=84=E5=AF=B9=E6=8B=8D/=E4=BA=A4=E7=90=83=E5=9B=9E?=
+ =?UTF-8?q?=E7=A0=9A=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ ...0\227\344\272\244\344\273\230-20261005.md" | 149 ++++++++++++++++++
+ 1 file changed, 149 insertions(+)
+ create mode 100644 "docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+new file mode 100644
+index 00000000..cc2c6556
+--- /dev/null
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+@@ -0,0 +1,149 @@
++# 记录-L1-JOINTCOL 联合采样列交付（17 列，澜舟）— 2026-10-05
++
++> 派单：PI R383 班 20:2x ①（卡 `L1-JOINTCOL`）｜需求单：砚 `docs/盘点-GAP-B-L1联合采样列-20261005.md`
++> @`a0feedb`｜PI 三裁：①原始联合计数 ②逐采样点粒度入主表 + run 级 summary 键
++> ③审计最小集 = `l1_joint_n` 曝光 + occ=0 空窗剔除率 fail-loud。
++> 分支 `task/L1-JOINTCOL`（自 main `4fdb7dd` 起，未 rebase）；**不合 main**（候镜审 + PI）。
++
++## 一、验收对照
++
++| 来源 | 条目 | 状态 | 证据 |
++|------|------|------|------|
++| 需求单 §3.3-1 | 纯观测、零主 RNG | ✅ | T8（假 RNG 记账 `calls==0` + 8 个引擎数组逐位不变） |
++| 需求单 §3.3-2 | 默认关 ⇒ 逐字节等价 | ✅ | T10 + 三组双树对拍（§四） |
++| 需求单 §3.3-3 | 表尾追加 + R287 续跑守卫 | ✅ | 表尾 17 列；`("l1_joint_n" in 既有表头) != bool(--l1-joint)` ⇒ exit 2 |
++| 需求单 §3.3-4 | O(N)、过 T10 ≤10% 预算门 | ⚠️ **未测** | 本机无 `--device s2` 预算档 ⇒ 不跑批（R117）；待正式批随 S3-RDSWITCH 合入后一并计时 |
++| 砚 21:15 锁 | 窗宽 = 批 `--sample` 值，L1 同窗为最小粒度 | ✅ | 实现即取 `--sample` 节拍（见 §三-4） |
++| 需求单 §3.3-5 | 行和 = Σ 窗内计数点 | ✅ | T1/T12 手算锚 + `l1_pooled` 内置校验（M3 变异证明它真的在拦） |
++| 需求单 §3.2 | s = 接收态（`read_many`）非发射态 | ✅ | 代码 `:673`；T1 锚 |
++| 需求单 §3.2 | e = 富指示本身，🔴 **禁 mem_bit 代理** | ✅ | 代码 `:679` 与引擎 `sphere_engine.py:3577-3580` 同式；T3 专钉此禁令；M1 变异（换 mem_bit）⇒ T3 红 |
++| PI 裁① | 只出原始计数、不出 MI 值列 | ✅ | `l1_pooled` 返回值无 `mi*`（T12 断言 `not any(k.startswith("mi"))`） |
++| PI 裁② | 逐采样点入主表 + run 级键 | ✅ | 17 列进主表 + summary 内 25 个 `l1_*` 键 |
++| PI 裁③ | 审计最小集 + occ=0 门 fail-loud | ✅ | `l1_windows/l1_empty_windows/l1_empty_window_frac/l1_empty_gate`；T7b/T7c + M6 变异 |
++| 卡验收 | 17 列落表 / 靶向绿 / 零新增红 / 等价实证 / 上板 + 卡 done | 见 §四、§五 | — |
++
++## 二、实现要点
++
++- **列族**（`experiments/s3_memory_probe.py:443-450`）：`_L1_CELL_COLS` = `l1_joint_s{k}_e{j}`
++  （k=0..7 × j=0..1，16 列）+ `l1_joint_n` = **17 列**，接在 `_M0_COLS`（36 列）之后 ⇒ 表尾。
++- **累加点**：`after_step()` 末 ⇒ `_l1_accumulate()` 每 tick 逐存活个体取
++  `(s, e)` 计入 `l1_acc[下标 = s*2 + e]`；`sample_cols()` 在采样点写窗值后
++  `l1_acc[:] = 0; l1_win_n = 0` ⇒ **逐采样窗**语义（非累计、非归一，同窗多次到访照计）。
++- **run 级键**：`l1_pooled(rows)` 池化 16 格 + 曝光 + 空窗剔除率门，另出
++  `l1_joint_sig_states=8`、`l1_env_source="resources._grid > FOOD_RICH_LEVEL * _capacity"`、
++  `l1_note`（口径自述，离线复算不必回读源码）。
++- **CLI**：`--l1-joint`（默认 False），插在 `--m0-instruments` 之后、`add_device_arg(ap)` 之前
++  （避让轻舟 `--rd-mode/--alphabet` 的 argparse 冲突点，见板帖 `2ac5384` 冲突表）。
++  前置校验两条 exit 2：缺 `--m0-instruments` / 与 `--resume-sample` 互斥
++  （逐窗累加器不进快照 ⇒ 续跑会出半窗假数；兑现需求单 §3.3-3「批前决定开否，中途开列 = 中止」）。
++- **meta 守卫**：`_summary_meta(a)` 在 `--l1-joint` 关时摘掉 `meta.l1_joint` 键
++  ⇒ 旧批 summary 逐字节可比（PI 认可路线 (a)）。**合流须并成一个函数**：轻舟
++  `task/S3-RDSWITCH@24d1fd8` 已落同名 `_summary_meta()`（`:1323`，规则=等于默认值即摘，
++  摘 `rd_mode`/`alphabet`，她 docstring 里已给我留了并入位）；G6-EMITRATE 另有摘
++  `m0_emit_window_frac` 的第三份。rebase 时**删我这份**、在她函数尾加
++  `l1_joint`/`m0_emit_window_frac` 两行 pop ⇒ 三处归一（我 own 那次 rebase）。
++
++## 三、🔴 与需求单/派单的偏离（4 项，均已在卡面或此处留痕）
++
++1. **`l1_joint_env_unknown_n` 不设列**（需求单 §3.1 提过的可选项）。
++   越界格号 / 接收态 ≥ 8 这两支在现行装置下属**引擎不变量违背**，
++   按 PI③「审计最小集」从紧 ⇒ 走 fail-loud 停跑，不做"计个数继续跑"。
++2. **`'8'` 档断言取代 S3-RDSWITCH 前置**。需求单 §四 给了两路（候轻舟 CLI / 先实施 + 批内断言），
++   取第二路：`_attach_l1()` 在 `signal_alphabet != "8"` 时 RuntimeError（`:651-657`），
++   不静默把 8..15 态折进 0..7。轻舟 CLI 落地后本断言可原样保留（它只读 `eng._alpha`）。
++3. **`l1_` 前缀与存量列同族不同义**：主表本已有 `l1_visited_patch_n/_frac`（= L1 斑块级读数），
++   本批 `l1_joint_*`（= 语言涌现阶梯 L1）。列名无碰撞（89 列全唯一，已核），
++   但离线分析按前缀 `l1_` 聚合会把两组混在一起 ⇒ **请砚在判据脚本里用全名列**。
++4. **窗宽口径**：本批 17 列的窗宽 = 探针既有 `--sample` 节拍（未新增独立窗宽参数）。
++   砚 21:15 R225 会签帖 ② 已锁「逐采样窗宽 = 批 `--sample` 值（本族 100 tick），
++   GAP-B 联合列/L1 读数同窗为最小粒度」⇒ **实现与锁定口径一致，无需返工**。
++   未随该锁的一项：`--sample 50`/首点落 0 的 tick 0–100 首采样盲区消歧（候 PI 起跑前单裁）
++   ⇒ 本列组在 `--sample` ≥100 档下读数完整，切 50 档前须等这一裁。
++5. **「算降」MI 口径不在实施线**：砚 ④ 明示候我交付实物列面后由她锁文字（补需求单尾注）
++   ⇒ 本记录 §4.3 的列面 + `l1_env_source`/`l1_note` 自述键即为她锁口径的输入。
++
++## 四、证据
++
++### 4.1 靶向测试（不跑真引擎，自带 stub；未改轻舟的 `test_r358_m0_instruments.py`）
++
++```
++tests/test_l1_joint_columns.py                      15 passed
++test_r358_m0_instruments + test_l1_joint_columns
++  + test_genes_registry                             40 passed
++```
++
++### 4.2 逐字节对拍（工具 = `tools/postmerge_check.py --c7-baseline/--c7-current`，自带剔 `ms_per_tick`/`wall_s`）
++
++| 组 | 基线 | 当前 | 装置 | 结果 |
++|----|------|------|------|------|
++| A↔B | main `--m0-instruments` | L1 `--m0-instruments`（列关） | 默认 '16' | **PASS** |
++| C↔D | main 无仪表 | L1 无仪表（列关） | 默认 '16' | **PASS** |
++| H↔I | main `--m0-instruments` | L1 `--m0-instruments`（列关） | **'8'** | **PASS** |
++| summary | `a/c/h_main_*` | `b/d/i_l1_*` | — | 剔计时与 `meta.out` 后 **逐字节同**（含 `meta`，证 §二 meta 守卫生效） |
++
++基线有效性：`git diff 4fdb7dd..5aa939d` 非 `_share` 代码差 = 0（只 `_share/*.md` + `pi_watch.log`）
++⇒ 对拍两端同源码，不需 rebase。
++
++### 4.3 正证据（E 跑：L1 + '8' + `--m0-instruments --l1-joint`，micro 12×24/pop10/60tick/sample10）
++
++- 表头 89 列全唯一，尾 17 列 = `l1_joint_s0_e0 … l1_joint_s7_e1, l1_joint_n`。
++- 逐采样窗行和不变量 6/6 窗成立（85/78/70/69/60/60）。
++- run 级：`l1_joint_n=422` = Σ 窗曝光；`l1_windows=6, l1_empty_windows=0, frac=0.0`；
++  `l1_env_source` 不含 `mem_bit`；无 `mi*` 值列。
++
++### 4.4 fail-loud 端到端
++
++`L1_DRV_ALPHA=16 ... --l1-joint` ⇒ `RuntimeError`（`:651`）**真实退出码 1**（非管道尾的 0），
++残留 CSV = **仅表头、0 数据行**（不出半截假数）。
++
++### 4.5 变异必红（6/6，每轮还原后 sha256 == 备份）
++
++| 变异 | 期望红例 | 结果 |
++|------|----------|------|
++| M1 e 端换 `mem_bit` 代理 | `test_t3_` | 红 ✅ |
++| M2 去掉逐窗清零（变累计） | `test_t2_` | 红 ✅ |
++| M3 删行和不变量校验 | `test_t11_` | 红 ✅ |
++| M4 富指示 `>` 改 `>=` | `test_t1b_` | 红 ✅ |
++| M5 放宽 `'8'` 装配断言 | `test_t4_` | 红 ✅ |
++| M6 去掉空窗剔除率门 | `test_t7b_` | 红 ✅ |
++
++### 4.6 全量套件
++
++口径见 §六（同条件双树红单对差）。
++
++## 五、遗留 / 交球
++
++1. **候镜代码审**（R394①）→ **PI R225 会签** ⇒ 方可合 main；合 main 次序 =
++   **S3-RDSWITCH 之后**（轻舟已落 `task/S3-RDSWITCH@24d1fd8`，同候镜审）、与 G6 错峰，
++   后合者让位（rebase 由我 own；冲突面已核 = 仅 argparse 插位 + `_summary_meta` 归一，见 §二）。
++2. **MI 算式与阈值归砚**（R225）：本探针只交充分统计量，判读权不落在实施线。
++   窗宽一项她已锁（§三-4）；「算降」口径她 ④ 明示候本次交付列面后补需求单尾注 ⇒ **交球回砚**。
++3. **T10 ≤10% 计时门未验**（不跑批 R117）⇒ 随正式 M1 批一并测；若砚要提前测，须 `--device s2`。
++4. S3-RDSWITCH 合 main 后，`--alphabet 8` 可直跑 ⇒ 本批的临时驱动器
++   `_rerun_logs/lh_l1_equiv/drv8.py`（不入库）即可退役；`_attach_l1()` 的 `'8'` 断言保留不变。
++5. **全量套件的红单口径**：本机夜间多会话并发跑批（21:0x 镜两树全量 + 若干引擎子进程），
++   绝对红数不可信 ⇒ 本次采用**同条件双树红单对差**（L1 全量红单 vs 主树同文件复跑），
++   逐条注明是否存量红。见 §六。
++
++## 六、复现命令（worktree 根，借主树 venv）
++
++```bash
++# 靶向 + 邻近三族
++PYTHONUTF8=1 ../../.venv/Scripts/python.exe -m pytest \
++  tests/test_l1_joint_columns.py tests/test_r358_m0_instruments.py -q
++
++# '8' 档（探针暂无 --alphabet，用进程内驱动器钉档；drv8.py 不入库）
++L1_DRV_ALPHA=8 PYTHONUTF8=1 ../../.venv/Scripts/python.exe \
++  _rerun_logs/lh_l1_equiv/drv8.py --rows 12 --cols 24 --patches 24 --pop 10 \
++  --seeds 101 --ticks 60 --sample 10 --arms on --m0-instruments --l1-joint \
++  --out _rerun_logs/lh_l1_equiv/e_l1_joint_8.csv
++
++# 对拍（主树跑基线，worktree 跑当前）
++PYTHONUTF8=1 ../../.venv/Scripts/python.exe \
++  ../../.worktrees/R396-POSTMERGE/tools/postmerge_check.py \
++  --c7-baseline ../../_rerun_logs/lh_l1_equiv/h_main_m0_8.csv \
++  --c7-current  _rerun_logs/lh_l1_equiv/i_l1_m0_8.csv
++
++# 变异必红（二进制读写保 CRLF；跑完自动还原并校验 sha256）
++PYTHONUTF8=1 ../../.venv/Scripts/python.exe _rerun_logs/lh_l1_equiv/mutcheck.py
++```
+-- 
+2.46.1.windows.1
+
+
+From b248c5f072aed9bff16dad07ba8b80e4d741ae6e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 00:47:24 +0800
+Subject: [PATCH 3/7] =?UTF-8?q?chore:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20L1=20=E8=87=AA=E5=AE=A1?=
+ =?UTF-8?q?=E4=B8=80=E5=A4=84=EF=BC=9Arun=20=E7=BA=A7=E7=AA=97=E6=95=B0?=
+ =?UTF-8?q?=E4=BB=A5=E8=90=BD=E8=A1=A8=E8=A1=8C=E4=B8=BA=E6=9D=83=E5=A8=81?=
+ =?UTF-8?q?=EF=BC=88l1=5Fwindows/l1=5Fempty=5Fwindows=20=E5=B1=9E=E6=80=A7?=
+ =?UTF-8?q?=E5=8F=AA=E4=BD=9C=E8=B0=83=E8=AF=95=E8=87=AA=E7=9C=81=EF=BC=8C?=
+ =?UTF-8?q?=E9=81=BF=E5=85=8D=E5=AE=A1=E8=AF=BB=E8=80=85=E8=AF=AF=E8=AF=BB?=
+ =?UTF-8?q?=E4=B8=BA=E5=8F=8C=E7=9C=9F=E6=BA=90=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ experiments/s3_memory_probe.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/experiments/s3_memory_probe.py b/experiments/s3_memory_probe.py
+index a2d0f148..a604312b 100644
+--- a/experiments/s3_memory_probe.py
++++ b/experiments/s3_memory_probe.py
+@@ -614,8 +614,11 @@ class _M0Instruments:
+         self.l1_joint = bool(l1_joint)
+         self.l1_acc = np.zeros(_L1_K * 2, dtype=np.int64)   # 下标 = s*2 + e
+         self.l1_win_n = 0                                   # 本窗个体·点计数
+-        self.l1_windows = 0                                 # 已写出窗数（run 级审计用）
++        self.l1_windows = 0                                 # 只写观测位（逐窗写出计数）
+         self.l1_empty_windows = 0                           # 其中 occ=0 的空窗数
++        #   🔴 run 级审计的**权威值**由 `l1_pooled()` 从**已落表的行**重算（`l1_windows`/
++        #   `l1_empty_windows` 两个返回键），不读这两个属性 ⇒ 分析者拿到的窗数
++        #   = 表里真实存在的行数，属性只作调试自省，两者若分叉以表为准。
+ 
+     # ---- 装配 + fail-loud 自检（列产不出来必须当场炸，不许静默 NaN）----
+ 
+-- 
+2.46.1.windows.1
+
+
+From 0ab54fb73a600c94f1ef371b71b9f27d4fbf3515 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 00:47:24 +0800
+Subject: [PATCH 4/7] =?UTF-8?q?docs:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20L1=20=E8=AE=B0=E5=BD=95?=
+ =?UTF-8?q?=E8=A1=A5=20=C2=A7=E5=85=AD=20=E5=85=A8=E9=87=8F=E7=BA=A2?=
+ =?UTF-8?q?=E5=8D=95=E5=AF=B9=E5=B7=AE=EF=BC=8841=20=E4=BE=8B=E5=AD=98?=
+ =?UTF-8?q?=E9=87=8F=E7=BA=A2/=E9=9B=B6=E6=96=B0=E5=A2=9E=EF=BC=8Ccomm=20?=
+ =?UTF-8?q?=E5=8F=8C=E5=90=91=E7=A9=BA=E9=9B=86=EF=BC=89+=20=E6=97=A9?=
+ =?UTF-8?q?=E5=89=8D'11=20=E4=BE=8B'=E5=8F=A3=E5=BE=84=E6=9B=B4=E6=AD=A3?=
+ =?UTF-8?q?=20+=20=E5=88=86=E6=94=AF=E4=B8=89=E6=8F=90=E4=BA=A4=E5=A4=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ ...0\227\344\272\244\344\273\230-20261005.md" | 30 ++++++++++++++++---
+ 1 file changed, 26 insertions(+), 4 deletions(-)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+index cc2c6556..83cc9fdd 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+@@ -3,7 +3,8 @@
+ > 派单：PI R383 班 20:2x ①（卡 `L1-JOINTCOL`）｜需求单：砚 `docs/盘点-GAP-B-L1联合采样列-20261005.md`
+ > @`a0feedb`｜PI 三裁：①原始联合计数 ②逐采样点粒度入主表 + run 级 summary 键
+ > ③审计最小集 = `l1_joint_n` 曝光 + occ=0 空窗剔除率 fail-loud。
+-> 分支 `task/L1-JOINTCOL`（自 main `4fdb7dd` 起，未 rebase）；**不合 main**（候镜审 + PI）。
++> 分支 `task/L1-JOINTCOL`（自 main `4fdb7dd` 起，未 rebase）= `bd6ca37`（实装＋15 例测试）
++> → `a9a41ef`（本记录）→ `0b219ad`（自审注释）；**不合 main**（候镜审 + PI）。
+ 
+ ## 一、验收对照
+ 
+@@ -20,7 +21,7 @@
+ | PI 裁① | 只出原始计数、不出 MI 值列 | ✅ | `l1_pooled` 返回值无 `mi*`（T12 断言 `not any(k.startswith("mi"))`） |
+ | PI 裁② | 逐采样点入主表 + run 级键 | ✅ | 17 列进主表 + summary 内 25 个 `l1_*` 键 |
+ | PI 裁③ | 审计最小集 + occ=0 门 fail-loud | ✅ | `l1_windows/l1_empty_windows/l1_empty_window_frac/l1_empty_gate`；T7b/T7c + M6 变异 |
+-| 卡验收 | 17 列落表 / 靶向绿 / 零新增红 / 等价实证 / 上板 + 卡 done | 见 §四、§五 | — |
++| 卡验收 | 17 列落表 / 靶向绿 / 零新增红 / 等价实证 / 上板 + 卡 done | 见 §四（列/测试/对拍/变异）、§六（零新增红）、§板帖 | — |
+ 
+ ## 二、实现要点
+ 
+@@ -109,7 +110,7 @@ test_r358_m0_instruments + test_l1_joint_columns
+ 
+ ### 4.6 全量套件
+ 
+-口径见 §六（同条件双树红单对差）。
++见 §六（同条件双树红单对差：**41 例存量红、零新增**）。
+ 
+ ## 五、遗留 / 交球
+ 
+@@ -125,7 +126,28 @@ test_r358_m0_instruments + test_l1_joint_columns
+    绝对红数不可信 ⇒ 本次采用**同条件双树红单对差**（L1 全量红单 vs 主树同文件复跑），
+    逐条注明是否存量红。见 §六。
+ 
+-## 六、复现命令（worktree 根，借主树 venv）
++## 六、全量套件红单对差（零新增红实证）
++
++本机夜间多会话并发跑批 ⇒ **绝对红数不可信**，故用**同条件双树红单集合对差**：
++
++| 侧 | 树 | 范围 | 结果 |
++|----|----|------|------|
++| A | `task/L1-JOINTCOL@0b219ad` | 全量 `tests/`（除 `test_broker.py`） | **41 failed, 1157 passed, 8 skipped**（1069s） |
++| B | `gitee/main@40e0650` | A 里出现红的四个文件复跑 | **41 failed, 59 passed, 6 skipped**（47s） |
++
++`comm` 双向差 = **空** ⇒ 两侧红单**逐条同集**（交集 41/41）⇒ **零新增红**。
++分布（两侧一致）：`test_f_r21_presets.py` 36 ＋ `test_a2b_tick_audit_coverage.py` 3 ＋
++`test_r278_p3_device_flush.py` 1 ＋ `test_r98_nonascii_print.py` 1。
++
++- 我新增的 `test_l1_joint_columns.py` 15 例、轻舟的 `test_r358_m0_instruments.py` **均不在红单内**。
++- B 侧单跑仅 47s 即复现同样 41 红 ⇒ 这批是**确定性存量红**，不是并发争用抖动。
++- 🔴 **更正今晚早前口径**：先前报备的「存量红 11 例（r278 7 ＋ r287 4）」**不完整**；
++  以本次全量为准 = **41 例存量红**，且 `test_r287_s3_sample_resume.py` 本轮**不红**。
++  存量红归板桥线（GBK 子进程解码 ＋ 预设 CLI），我未各自修。
++- `test_r98_nonascii_print` 是全树静态扫描型守卫，两侧同红 ⇒ 与本改动无关
++  （L1 面未新增不受保护的 non-GBK `print`，只有 `raise RuntimeError`）。
++
++## 七、复现命令（worktree 根，借主树 venv）
+ 
+ ```bash
+ # 靶向 + 邻近三族
+-- 
+2.46.1.windows.1
+
+
+From df5dd1dae703076c9d4a24a92b78a63ad00a32c5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 00:47:25 +0800
+Subject: [PATCH 5/7] =?UTF-8?q?fix:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20L1=20=E7=AB=AF=E5=88=B0?=
+ =?UTF-8?q?=E7=AB=AF=E5=A4=8D=E8=B7=91=E6=8A=93=E5=88=B0=20'8'=20=E6=A1=A3?=
+ =?UTF-8?q?=E7=A0=81=E5=9F=9F=E7=BC=BA=E9=99=B7=20=E2=87=92=20s=20?=
+ =?UTF-8?q?=E5=9F=9F=208=E2=86=929=EF=BC=88=E5=88=97=2017=E2=86=9219?=
+ =?UTF-8?q?=EF=BC=89+=20--append=20=E4=BA=92=E6=96=A5=EF=BC=88PI=2000:10?=
+ =?UTF-8?q?=20=E8=A3=81=E2=91=A1=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 🔴 根因：encode_signal_states(...,"8") 返回 (state=e_bin*2+mem_bit, offset=1)
+  （sphere_engine.py:153）⇒ 落格 code=state+1 ∈ 1..8，且 :3661 守卫把 patterns==0 记为
+  bad ⇒ 码 0 永不由发射产生 = 「本格无标记」。旧 _L1_K=8 两处错：真码 8 被判越界（微型批
+  60-tick 当场 fail-loud 停跑）＋「无标记」并进 s0 与发射态 0 同槽双计（MI 两侧失真）。
+- 修法：_L1_K=9（s0=无标记 / s1..s8=接收码）⇒ 表尾 19 列；新增口径键 l1_joint_code_domain；
+  越界拦令原式保留（>=9 ⇒ 只有 '16' 档能产）；`_attach_l1`/help/类 docstring 文案同步。
+  还原需求单 §3.1「发射态 0..7」= 剔 s0 后整体减 1，信息无损 ⇒ 登记实现偏离第 6 项候砚/PI 追认。
+- 🟡-1：--l1-joint × --append ⇒ exit 2（禁组合，与 --resume-sample 同式）；理由 =
+  --append 跳已完成 run ⇒ run 级 l1_* 只数本进程窗，与 CSV 逐窗全量两套口径且事后查不出。
+- 测试：T9 改 19 列；新 T13（subprocess 走真 main）+ T14/T14b/T14c（码 8 合法 / 码 9 仍炸 /
+  s0≠s1 分槽）。变异实测：_L1_K 9→8 ⇒ T9+T14+T14b 三红；删 --append 拦令 ⇒ T13 红。
+- stub 归一：_Sig 补 write_many（同 signal_field.py:104 语义）+ 装配序改先 attach 后写
+  （merged attach 装 G6 tap，缺 write_many 会被 fail-loud 正确拦下；未改任何断言）。
+- 实证：--alphabet 8 --l1-joint 官方 CLI e2e（12 行 / Σn=1585 / 11 格非零含 s8_e1=4）；
+  默认关 vs main@874c5c4 CSV 格差 0、summary 规范化相等；靶向 19 绿 + r358/s3_rdswitch 合跑 33 绿。
+---
+ experiments/s3_memory_probe.py |  71 +++++++++-----
+ tests/test_l1_joint_columns.py | 163 +++++++++++++++++++++++++++------
+ 2 files changed, 185 insertions(+), 49 deletions(-)
+
+diff --git a/experiments/s3_memory_probe.py b/experiments/s3_memory_probe.py
+index a604312b..1e13651a 100644
+--- a/experiments/s3_memory_probe.py
++++ b/experiments/s3_memory_probe.py
+@@ -519,9 +519,17 @@ def _g6_tap_release(inst, cls) -> None:
+ #   **离线复算**，探针内不出任何 `mi_*` 值列（值列切不动时段、也断不可双方独立复算）。
+ #   粒度 = 逐采样窗一行计数、非归一（裁②）；审计 = 最小集 `l1_joint_n` 曝光 + occ=0
+ #   空窗剔除率 fail-loud（裁③），其余审计项并入既有披露列、不新增列。
+-_L1_K = 8                                                     # 信号态 k = 0..7（装置须 '8' 档）
++_L1_K = 9                                                     # 🔴 接收码域 = {0} ∪ 1..8（装置须 '8' 档）
++#   ⚠️ 口径更正（2026-10-06 端到端复跑抓到，原实现取 8 = 缺陷）：'8' 档**落格的是码不是态** ——
++#   `sphere_engine.py:153` `encode_signal_states(...,"8")` 返回 `(state=e_bin*2+mem_bit, offset=1)`
++#   ⇒ 无码本臂 `patterns = state + 1 ∈ {1..8}`（`:3657`，`_alpha_code_max=8` 且 R121 §3.5 守卫
++#   把 `patterns==0` 记为 bad ⇒ 码 0 永不由发射产生）。格上 0 只有一义 = **本格当前无标记**。
++#   旧 `_L1_K=8` 把「无信号」错并进 s0（= 发射态 0 的码 1）⇒ 同槽双计，MI 直接被稀释；
++#   而真码 8（发射态 7）撞上越界拦令 ⇒ 本列组在 '8' 档**跑到 state=7 就停跑**。
++#   ⇒ 现取 **9 档码域**：s0 = 无标记，s1..s8 = 接收码（= 发射态 +1）。砚复算时若要
++#   「发射态 0..7 × 富指示」的原口径，剔除 s0 列并把 s1..s8 减 1 即可（信息无损）。
+ _L1_CELL_COLS = [f"l1_joint_s{k}_e{j}" for k in range(_L1_K) for j in range(2)]
+-_L1_COLS = _L1_CELL_COLS + ["l1_joint_n"]                      # 16 + 1 = 17 列（表尾追加）
++_L1_COLS = _L1_CELL_COLS + ["l1_joint_n"]                      # 18 + 1 = 19 列（表尾追加）
+ # occ=0 空窗剔除率上限：阈值**出处** = C1 预注册 J-B①「occ=0 块窗剔除 >20% fail-loud」先例
+ # （S4′ 族）。本行只是实现常量，改判归砚/PI（R225），**不做 CLI 旋钮**（避免自设门槛）。
+ _L1_EMPTY_GATE = 0.2
+@@ -564,10 +572,12 @@ class _M0Instruments:
+         🔴 否定抓手（GAP-A 需求单 §二）：引擎 `_emit_count` 累加位于
+         `if self._oracle_on:` 之内（`sphere_engine.py:3665/3667`）⇒ `arm=main`
+         （= D0/M1 装置）**恒为 0**，绝不可作发射真值。
+-      · L1（`--l1-joint`，**默认关**）`l1_joint_s{k}_e{j}` k=0..7 j=0..1 = **本采样窗内**
+-        逐 tick 逐存活个体的 (接收态 s, 富指示 e) 联合计数；`l1_joint_n` = 该窗计入的
+-        个体·点总次数（= 16 格之和，逐窗**清零**、不累计）。两端口径写死（需求单 §3.2）：
+-        s = `signals.read_many(活体格)` 的**接收态**（不是发射态）；
++      · L1（`--l1-joint`，**默认关**）`l1_joint_s{k}_e{j}` k=0..8 j=0..1 = **本采样窗内**
++        逐 tick 逐存活个体的 (接收码 s, 富指示 e) 联合计数；`l1_joint_n` = 该窗计入的
++        个体·点总次数（= 18 格之和，逐窗**清零**、不累计）。两端口径写死（需求单 §3.2）：
++        s = `signals.read_many(活体格)` 的**接收码**（不是发射态；🔴 '8' 档落格
++        `code = state + 1` ∈ 1..8（`sphere_engine.py:153`/`:3657`）⇒ **s0 = 本格无标记**，
++        与发射态 0（=s1）分槽；原口径「发射态 0..7」= 剔 s0 后整体减 1，信息无损）；
+         e = `resources._grid[cur] > FOOD_RICH_LEVEL * _capacity[cur]` —— 与引擎工作记忆
+         写入同一比较式（`sphere_engine.py:3577-3580`），即"富指示"**本身**。
+         🔴 环境端**禁取 `_mem_bit_*` 作代理**：'8' 档下 `state = e_bin*2 + mem_bit`
+@@ -824,10 +834,11 @@ class _M0Instruments:
+         if str(getattr(eng, "_alpha", "")) != "8":
+             raise RuntimeError(
+                 f"🔴 M0 L1 装配失败：signal_alphabet="
+-                f"{getattr(eng, '_alpha', None)!r} ≠ '8' ⇒ 信号态实际取值 0..15，而本列组"
+-                f"只有 s0..s7 八档 ⇒ 8..15 态会被**静默丢弃**（MI 直接偏低且事后无从查出）。"
+-                f"二选一：装置切 \"8\"（M1 锁定档；顶层 CLI 见卡 S3-RDSWITCH），"
+-                f"或本次**不带** --l1-joint。需求单 §四 已把这两路交给实施线，此处取后者兜底。")
++                f"{getattr(eng, '_alpha', None)!r} ≠ '8' ⇒ '16' 档落格码可达 15（且码 0 是"
++                f"**合法发射态**），本列组的 9 档码域（s0=无标记 / s1..s8=接收码）不成立 "
++                f"⇒ 混档会把态与「无信号」搅在一块。二选一：装置切 \"8\"（M1 锁定档；顶层 "
++                f"CLI = `--alphabet 8`，S3-RDSWITCH 已合 main），或本次**不带** --l1-joint。"
++                f"需求单 §四 已把这两路交给实施线，此处取后者兜底。")
+ 
+     def _l1_accumulate(self, eng) -> None:
+         """本步末逐存活个体记 (s, e)；同窗内多次到访**照计**（需求单 §3.2 时规）。"""
+@@ -846,14 +857,15 @@ class _M0Instruments:
+         s = np.asarray(eng.signals.read_many(cur), dtype=np.int64)
+         if int(s.max()) >= _L1_K:
+             raise RuntimeError(
+-                f"🔴 M0 L1：接收态出现 {int(s.max())} ≥ {_L1_K} ⇒ 装置实际不是 '8' 档"
+-                f"（attach 断言被绕过，例：运行中被改档）。本列组会静默丢态 ⇒ 停跑不出列。")
++                f"🔴 M0 L1：接收码出现 {int(s.max())} ≥ {_L1_K} ⇒ 装置实际不是 '8' 档"
++                f"（'8' 档码域 = 0..8；attach 断言被绕过，例：运行中被改档）。本列组会"
++                f"静默丢态 ⇒ 停跑不出列。")
+         e = (grid[cur] > FOOD_RICH_LEVEL * cap[cur]).astype(np.int64)
+         self.l1_acc += np.bincount(s * 2 + e, minlength=_L1_K * 2)
+         self.l1_win_n += n
+ 
+     def l1_pooled(self, rows) -> dict:
+-        """run 级汇总键（PI③ 最小集）：16 格池 + 曝光 + occ=0 空窗剔除率门。
++        """run 级汇总键（PI③ 最小集）：18 格池（9 码 × 2 富）+ 曝光 + occ=0 空窗剔除率门。
+ 
+         🔴 这里**只出计数**，不出任何 MI/熵值 ⇒ 判读权（算式与阈值）完整留在砚侧，
+         且复算不依赖本探针代码段（需求单 §3.4 的独立性论证照此兑现）。
+@@ -877,7 +889,7 @@ class _M0Instruments:
+                 n_empty += 1
+         if int(tot.sum()) != sum_n:
+             raise RuntimeError(
+-                f"🔴 M0 L1 审计门：行和不变量破了（16 格合计 {int(tot.sum())} ≠ "
++                f"🔴 M0 L1 审计门：行和不变量破了（{_L1_K * 2} 格合计 {int(tot.sum())} ≠ "
+                 f"Σ l1_joint_n {sum_n}）⇒ 计数或列名错位，停跑。"
+                 f"（需求单 §3.3-5「行和 = Σ 窗内计数点」）")
+         frac = n_empty / float(n_win)
+@@ -894,10 +906,13 @@ class _M0Instruments:
+         out["l1_empty_window_frac"] = round(frac, 4)
+         out["l1_empty_gate"] = _L1_EMPTY_GATE
+         out["l1_joint_sig_states"] = _L1_K
++        out["l1_joint_code_domain"] = "s0=格上无标记 / s1..s8=接收码（'8' 档 code=state+1）"
+         out["l1_env_source"] = "resources._grid > FOOD_RICH_LEVEL * _capacity"
+         out["l1_note"] = ("原始联合计数（充分统计量）；逐采样窗非归一、同窗多次到访照计；"
+-                          "s=受方格接收态(read_many，非发射态)；e=富指示本身(🔴非 mem_bit 代理)；"
+-                          "MI 与 I-3/I-4 零模型由这 17 列离线复算，探针内不出值列")
++                          "s=受方格**接收码**（read_many；🔴 '8' 档 code=state+1 ⇒ s0 是「本格无"
++                          "标记」不是发射态 0，要原口径「发射态 0..7×富指示」请剔 s0 后整体减 1，"
++                          "信息无损）；e=富指示本身(🔴非 mem_bit 代理)；"
++                          f"MI 与 I-3/I-4 零模型由这 {len(_L1_COLS)} 列离线复算，探针内不出值列")
+         return out
+ 
+     def sample_cols(self, eng) -> dict:
+@@ -1842,12 +1857,16 @@ def main():
+                          "仅 --m0-instruments 开时生效（关 ⇒ summary 逐字节不变）")
+     # ---- 🔴 L1-JOINTCOL（砚 GAP-B 需求单 §3.1/§3.2 + PI 三裁）：L1 联合计数列组 ----
+     ap.add_argument("--l1-joint", action="store_true",
+-                    help="追加 L1「信号↔环境」**原始联合计数** 17 列（表尾）："
+-                         "l1_joint_s{k}_e{j}（k=0..7 接收态 × j=0..1 富指示）+ "
+-                         "l1_joint_n（本采样窗个体·点曝光）。**默认关 ⇒ 表头/行/meta "
+-                         "逐字节等于旧版**；只读、零 RNG。须配 --m0-instruments；"
++                    help="追加 L1「信号↔环境」**原始联合计数** 19 列（表尾）："
++                         "l1_joint_s{k}_e{j}（k=0..8 **接收码** × j=0..1 富指示）+ "
++                         "l1_joint_n（本采样窗个体·点曝光）。🔴 k 域含 s0=「本格无标记」"
++                         "（'8' 档落格 code=state+1 ⇒ 发射态 0 落在 s1，不与 s0 混计）；"
++                         "**默认关 ⇒ 表头/行/meta 逐字节等于旧版**；只读、零 RNG。"
++                         "须配 --m0-instruments；"
+                          "🔴 装置须 signal_alphabet=\"8\"（否则 attach 炸，不静默丢态）；"
+                          "🔴 与 --resume-sample 互斥（仪表状态不进快照）；"
++                         "🔴 与 --append 互斥（跳过已完成 run ⇒ run 级 l1_* 只数本进程"
++                         "窗，与 CSV 逐窗行分叉；PI 00:10 裁定取禁组合）；"
+                          "MI/I-3/I-4 由这些列**离线复算**，探针内不出值列（窗宽与判读口径归砚）")
+     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
+     add_device_arg(ap)
+@@ -1883,6 +1902,14 @@ def main():
+               "中途开列=中止」照此履行 ⇒ 本批要么首跑开列，要么关列。中止。",
+               file=sys.stderr)
+         sys.exit(2)
++    # ---- 🔴 L1-JOINTCOL（镜 队列⑤ 🟡-1，PI 00:10 裁定取「禁组合」）----
++    if a.l1_joint and a.append:
++        print("🔴 --l1-joint 与 --append 互斥：`--append` 跳过已完成 run ⇒ 本次进程只"
++              "重跑子集，而 run 级 `l1_*` 汇总（`l1_pooled`）只数**本进程产出的窗**"
++              "（窗数/空窗剔除率/联合计数全部偏小，CSV 逐窗行却是全量 ⇒ 两级口径分叉，"
++              "且分叉值不进表头、事后无从查出）。需要续跑请：① 关 --l1-joint 续跑，或"
++              "② 换 --out 整批重跑。中止。", file=sys.stderr)
++        sys.exit(2)
+ 
+     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
+     overlap = sorted(set(seeds) & SEEDS_USED)
+@@ -1927,7 +1954,7 @@ def main():
+               "max_gen"]
+     if a.m0_instruments:  # 🔴 R358 T4：M0 仪表列（默认关 ⇒ 表头不变）
+         header = header + _M0_COLS
+-        if a.l1_joint:    # 🔴 L1-JOINTCOL：表尾追加 17 列（不打乱既有列序）
++        if a.l1_joint:    # 🔴 L1-JOINTCOL：表尾追加 19 列（不打乱既有列序）
+             header = header + _L1_COLS
+     if a.home_range:      # 🔴 R308：仅在开启时追加个体活动范围列（默认关 ⇒ 表头不变）
+         header = header + _HR_COLS
+@@ -2003,7 +2030,7 @@ def main():
+         # 🔴 L1-JOINTCOL：同一拦法扩到 L1 列组（`--append` 侧；`--resume-sample` 已在上面硬禁）
+         if ("l1_joint_n" in _hdr_ex) != bool(a.l1_joint):
+             print("🔴 续跑列不一致：已存在 CSV 的 L1 联合列与本次 --l1-joint 不符"
+-                  "（混用两档 ⇒ 16 格错位且事后无从查出）。换 --out 或保持一致。中止。",
++                  "（混用两档 ⇒ 18 格错位且事后无从查出）。换 --out 或保持一致。中止。",
+                   file=sys.stderr)
+             sys.exit(2)
+ 
+diff --git a/tests/test_l1_joint_columns.py b/tests/test_l1_joint_columns.py
+index a4a6f42a..ac8cca37 100644
+--- a/tests/test_l1_joint_columns.py
++++ b/tests/test_l1_joint_columns.py
+@@ -5,7 +5,7 @@
+   裁③审计最小集 = `l1_joint_n` 曝光 + occ=0 空窗剔除率 fail-loud。
+ 
+ 覆盖（不跑真引擎 ⇒ 秒级）：
+-  T1 手算锚（4 个体 (s,e) → 16 格精确计数 + 行和）；
++  T1 手算锚（4 个体 (s,e) → 18 格精确计数 + 行和）；
+   T2 逐窗清零（第二窗不吞第一窗）；
+   T3 🔴 环境端 = 富指示本身，**不是 mem_bit**（换成 mem_bit 必红）；
+   T4 alphabet ≠ '8' ⇒ attach fail-loud；T5 接收态越档 ⇒ fail-loud；
+@@ -14,10 +14,24 @@
+   T8 只读 & 零 RNG（引擎状态逐位不变 + rng 调用计数 0）；
+   T9 列集 17/唯一/与 _M0_COLS 不相交/表尾次序；
+   T10 默认关 ⇒ 不新增键、不要求 resources、l1_pooled 调用点漏门即炸；
+-  T11 行和不变量破了 ⇒ fail-loud；T12 pooled 键数值（手算锚）。
++  T11 行和不变量破了 ⇒ fail-loud；T12 pooled 键数值（手算锚）；
++  T13 CLI：`--l1-joint` × `--append` ⇒ rc=2 硬禁（PI 00:10 裁「禁组合」）；
++  T14 🔴 '8' 档**码域** = 0..8（端到端复跑抓到：落格 code=state+1 ⇒ 旧 `_L1_K=8`
++      把真码 8 判成越界、把「无标记」混进发射态 0；三例分别钉 码8 合法 / 码9 仍炸 /
++      s0≠s1 分槽）。
++
++🔴 stub 装配序（rebase 归一 2026-10-06）：`_Sig` 只经 `write_many` 写（同真实引擎），
++  且 **先 `attach()` 后 `_set_env()`** ⇒ G6 抓手能数到写入；否则 `after_step` 当场
++  fail-loud（"有写入格却零调用 ⇒ 抓手失效"），这是拦令在替我们把关，不是测试坏了。
+ """
+ from __future__ import annotations
+ 
++import os
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
+ import numpy as np
+ import pytest
+ 
+@@ -33,9 +47,20 @@ class _Sig:
+         self._age = np.zeros(n, dtype=np.int32)
+         self.duration = int(duration)
+ 
++    def write_many(self, cells, patterns):                 # 与 world/signal_field.py:104 同形
++        """🔴 rebase 归一（2026-10-06）：引擎**唯一**写点是 `write_many`，G6 抓手挂在它上。
++
++        stub 只经它写 ⇒ 否则 `attach()` 的 G6 装配自检当场 fail-loud（"抓手失效 =
++        不许静默出零列"）。`pat=0` 时 age 归 0 同真实实现，免得"清除写"被
++        `_fresh_cells` 误判成新写入格。口径对齐 `tests/test_r358_m0_instruments.py:24`。
++        """
++        cells = np.asarray(cells, dtype=np.int64)
++        pats = np.asarray(patterns, dtype=np.uint8) & 0x0F
++        self._marks[cells] = pats
++        self._age[cells] = np.where(pats > 0, self.duration, 0).astype(np.int32)
++
+     def write(self, cell, pat):
+-        self._marks[cell] = np.uint8(pat)
+-        self._age[cell] = self.duration
++        self.write_many([cell], [pat])
+ 
+     def read_many(self, cells):                       # 与 world/signal_field.py:120 同形
+         return self._marks[cells].copy()
+@@ -104,20 +129,26 @@ def _m0(l1=True):
+ 
+ 
+ def _set_env(eng, cell, s_pat, food, cap):
+-    """给定格：接收态 = s_pat；富指示 = (food > 0.5 * cap)。"""
++    """给定格：接收态 = s_pat；富指示 = (food > 0.5 * cap)。
++
++    🔴 rebase 归一（2026-10-06）：**必须在 `m0.attach(eng)` 之后调用** —— G6 抓手装在
++    `write_many` 上，先写后装 = 写入数不到 ⇒ `after_step` 当场 fail-loud（抓手失效）。
++    真实 `run_one` 本来就是"先装配仪表、后跑引擎步"，本顺序与其一致（对齐
++    `tests/test_r358_m0_instruments.py:92` 的 attach→_advance 装配序）。
++    """
+     eng.signals.write(cell, s_pat)
+     eng.resources.set(cell, food, cap)
+ 
+ 
+ # ---------------------------------------------------------------- 列集本身
+ 
+-def test_t9_column_set_is_17_unique_tail_appended():
+-    assert _L1_K == 8
+-    assert len(_L1_CELL_COLS) == 16
++def test_t9_column_set_is_19_unique_tail_appended():
++    assert _L1_K == 9
++    assert len(_L1_CELL_COLS) == 18
+     assert _L1_CELL_COLS[:4] == ["l1_joint_s0_e0", "l1_joint_s0_e1",
+                                  "l1_joint_s1_e0", "l1_joint_s1_e1"]
+     assert _L1_COLS == _L1_CELL_COLS + ["l1_joint_n"]          # 表尾 = 曝光列
+-    assert len(set(_L1_COLS)) == 17
++    assert len(set(_L1_COLS)) == 19
+     assert not (set(_L1_COLS) & set(_M0_COLS))                 # 与既有 36 列不相交
+     assert _L1_EMPTY_GATE == 0.2                               # 阈值出处=C1 J-B①，实现侧不擅自放宽
+ 
+@@ -126,12 +157,12 @@ def test_t9_column_set_is_17_unique_tail_appended():
+ 
+ def test_t1_hand_anchored_joint_counts():
+     eng = _Eng()
+-    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)      # s=1 e=1
+-    _set_env(eng, 1, s_pat=1, food=0.1, cap=1.0)      # s=1 e=0
+-    _set_env(eng, 2, s_pat=0, food=0.9, cap=1.0)      # s=0 e=1
+-    _set_env(eng, 3, s_pat=6, food=0.2, cap=0.4)      # s=6 e=0（0.2 ≤ 0.5*0.4=0.2 ⇒ 不富）
+     m0 = _m0()
+     m0.attach(eng)
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)      # 码 1（发射态 0）e=1
++    _set_env(eng, 1, s_pat=1, food=0.1, cap=1.0)      # 码 1 e=0
++    _set_env(eng, 2, s_pat=0, food=0.9, cap=1.0)      # 码 0（无标记）e=1
++    _set_env(eng, 3, s_pat=6, food=0.2, cap=0.4)      # 码 6 e=0（0.2 ≤ 0.5*0.4=0.2 ⇒ 不富）
+     m0.after_step(eng, 1, sampled=True)
+     d = m0.sample_cols(eng)
+     assert d["l1_joint_s1_e1"] == 1
+@@ -149,10 +180,10 @@ def test_t1_hand_anchored_joint_counts():
+ def test_t1b_rich_boundary_is_strict_gt():
+     """富指示与引擎同式 = `>` 不是 `>=`（FOOD_RICH_LEVEL=0.5；R121 只命名不改数值）。"""
+     eng = _Eng()
+-    _set_env(eng, 0, s_pat=1, food=FOOD_RICH_LEVEL * 1.0, cap=1.0)   # 恰等 ⇒ 不富
+-    _set_env(eng, 1, s_pat=1, food=0.5000001, cap=1.0)               # 略高 ⇒ 富
+     m0 = _m0()
+     m0.attach(eng)
++    _set_env(eng, 0, s_pat=1, food=FOOD_RICH_LEVEL * 1.0, cap=1.0)   # 恰等 ⇒ 不富
++    _set_env(eng, 1, s_pat=1, food=0.5000001, cap=1.0)               # 略高 ⇒ 富
+     m0.after_step(eng, 1, sampled=True)
+     d = m0.sample_cols(eng)
+     assert d["l1_joint_s1_e0"] == 1 and d["l1_joint_s1_e1"] == 1
+@@ -162,9 +193,9 @@ def test_t1b_rich_boundary_is_strict_gt():
+ 
+ def test_t2_windows_are_per_window_not_cumulative():
+     eng = _Eng()
+-    _set_env(eng, 0, s_pat=2, food=0.9, cap=1.0)
+     m0 = _m0()
+     m0.attach(eng)
++    _set_env(eng, 0, s_pat=2, food=0.9, cap=1.0)
+     for t in (1, 2, 3):                                  # 第一窗 3 个 tick
+         m0.after_step(eng, t, sampled=(t == 3))
+     r1 = m0.sample_cols(eng)
+@@ -183,10 +214,10 @@ def test_t3_environment_side_is_rich_indicator_not_mem_bit():
+     """
+     eng = _Eng()
+     eng._mem_bit_on, eng._mem_bit_n = 4, 4               # mem_bit 全 1（假代理会全判"富"）
+-    for c in (0, 1, 2, 3):
+-        _set_env(eng, c, s_pat=3, food=0.0, cap=1.0)     # 实际全场"不富"
+     m0 = _m0()
+     m0.attach(eng)
++    for c in (0, 1, 2, 3):
++        _set_env(eng, c, s_pat=3, food=0.0, cap=1.0)     # 实际全场"不富"
+     m0.after_step(eng, 1, sampled=True)
+     d = m0.sample_cols(eng)
+     assert d["l1_joint_s3_e0"] == 4 and d["l1_joint_s3_e1"] == 0
+@@ -208,7 +239,7 @@ def test_t5_emit_state_above_k_gives_fail_loud():
+     m0 = _m0()
+     m0.attach(eng)
+     eng.signals._marks[0] = _L1_K                       # 绕过 attach 断言硬塞越档态
+-    with pytest.raises(RuntimeError, match="接收态出现"):
++    with pytest.raises(RuntimeError, match="接收码出现"):
+         m0.after_step(eng, 1, sampled=False)
+ 
+ 
+@@ -238,9 +269,9 @@ def test_t7_extinct_window_is_zero_not_nan():
+ 
+ def test_t7b_empty_window_gate_fires_above_20pct():
+     eng = _Eng()
+-    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
+     m0 = _m0()
+     m0.attach(eng)
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
+     rows = []
+     for t in range(1, 6):                               # 5 窗：窗 3..5 空 ⇒ 3/5 = 60%
+         if t >= 3:
+@@ -254,9 +285,9 @@ def test_t7b_empty_window_gate_fires_above_20pct():
+ 
+ def test_t7c_empty_window_gate_passes_at_20pct():
+     eng = _Eng()
+-    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
+     m0 = _m0()
+     m0.attach(eng)
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
+     rows = []
+     for t in range(1, 6):                               # 5 窗：仅窗 5 空 ⇒ 1/5 = 20%
+         if t == 5:
+@@ -274,10 +305,10 @@ def test_t7c_empty_window_gate_passes_at_20pct():
+ 
+ def test_t8_read_only_and_zero_rng():
+     eng = _Eng()
+-    for c, s in zip(range(4), (1, 2, 3, 4)):
+-        _set_env(eng, c, s_pat=s, food=(0.9 if c % 2 else 0.0), cap=1.0)
+     m0 = _m0()
+     m0.attach(eng)
++    for c, s in zip(range(4), (1, 2, 3, 4)):
++        _set_env(eng, c, s_pat=s, food=(0.9 if c % 2 else 0.0), cap=1.0)
+     snap = {
+         "flat": eng._flat.copy(), "id": eng._id.copy(),
+         "marks": eng.signals._marks.copy(), "age": eng.signals._age.copy(),
+@@ -316,9 +347,9 @@ def test_t10_default_off_changes_nothing():
+ 
+ def test_t11_pooled_row_sum_invariant_is_checked():
+     eng = _Eng()
+-    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
+     m0 = _m0()
+     m0.attach(eng)
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)
+     m0.after_step(eng, 1, sampled=True)
+     row = dict(m0.sample_cols(eng))
+     row["l1_joint_n"] = int(row["l1_joint_n"]) + 1     # 人为破行和不变量
+@@ -328,10 +359,10 @@ def test_t11_pooled_row_sum_invariant_is_checked():
+ 
+ def test_t12_pooled_keys_hand_anchored():
+     eng = _Eng()
+-    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)       # (1,1)
+-    _set_env(eng, 1, s_pat=1, food=0.0, cap=1.0)       # (1,0)
+     m0 = _m0()
+     m0.attach(eng)
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)       # (1,1)
++    _set_env(eng, 1, s_pat=1, food=0.0, cap=1.0)       # (1,0)
+     rows = []
+     for t in (1, 2, 3):
+         m0.after_step(eng, t, sampled=True)
+@@ -340,6 +371,84 @@ def test_t12_pooled_keys_hand_anchored():
+     assert p["l1_joint_s1_e1"] == 3 and p["l1_joint_s1_e0"] == 3
+     assert p["l1_joint_n"] == 12                       # Σ 窗曝光 = 3 窗 × 4 个体
+     assert p["l1_joint_sig_states"] == _L1_K
+-    assert set(_L1_COLS) <= set(p)                     # run 级键含全部 17 个名字
++    assert set(_L1_COLS) <= set(p)                     # run 级键含全部 19 个名字
+     assert "离线复算" in p["l1_note"]
+     assert not any(k.startswith("mi") for k in p)       # 裁①：探针内不出任何值列
++
++
++# ---------------------------------------------------------------- T14 '8' 档码域
++
++def test_t14_code8_is_in_domain_not_fail_loud():
++    """🔴 端到端复跑抓到的口径缺陷（2026-10-06）：'8' 档**落格码 = 发射态 + 1** ⇒ 码 8 合法。
++
++    引擎侧：`encode_signal_states(...,"8")` 返回 `(state=e_bin*2+mem_bit, offset=1)`
++    （`simulation/sphere_engine.py:153`）⇒ 无码本臂 `patterns = state + 1 ∈ {1..8}`
++    （`:3657`，且 `_alpha_code_max="8" 档 = 8`、R121 §3.5 守卫把 `patterns==0` 记为 bad）。
++    旧 `_L1_K=8` 把码 8 判成"装置非 '8' 档"⇒ 跑到发射态 7 就**停跑**（本次真引擎实测炸在
++    60-tick 微型批）。把 `_L1_K` 改回 8 ⇒ 本例必红。
++    """
++    eng = _Eng()
++    m0 = _m0()
++    m0.attach(eng)
++    _set_env(eng, 0, s_pat=8, food=0.9, cap=1.0)        # 发射态 7（e_bin=3 ∧ mem=1）⇒ 码 8
++    m0.after_step(eng, 1, sampled=True)
++    d = m0.sample_cols(eng)
++    assert d["l1_joint_s8_e1"] == 1 and d["l1_joint_s8_e0"] == 0
++    assert sum(int(d[c]) for c in _L1_CELL_COLS) == d["l1_joint_n"] == 4
++
++
++def test_t14b_code9_still_out_of_domain_fail_loud():
++    """拦令**不能因此放宽成没牙**：码 ≥9 只有 '16' 档才产 ⇒ 仍当场炸（T4/T5 的运行时版）。"""
++    eng = _Eng()
++    m0 = _m0()
++    m0.attach(eng)
++    eng.signals._marks[0] = _L1_K                      # = 9 ⇒ 越界
++    with pytest.raises(RuntimeError, match="接收码出现 9"):
++        m0.after_step(eng, 1, sampled=False)
++
++
++def test_t14c_no_mark_is_s0_not_emitter_state0():
++    """🔴 s0（格上无标记）与 s1（发射态 0 落码 1）**必须分槽** —— 混计 = MI 被稀释。
++
++    旧实现 `_L1_K=8` 把 read_many 的 0 直接当"发射态 0" ⇒ 与真发射态 0（码 1）同槽，
++    「站着没收到信号」的个体被算进 s0，收发两侧的联合分布同时失真且事后无从查出。
++    """
++    eng = _Eng()
++    m0 = _m0()
++    m0.attach(eng)
++    eng._flat = np.array([0, 1], dtype=np.int64)       # 两体：cell0 有码 1，cell1 无标记
++    eng._id = np.array([10, 11], dtype=np.int64)       # 同步缩（G5 归因按 id 对齐，长度须一致）
++    _set_env(eng, 0, s_pat=1, food=0.9, cap=1.0)       # 发射态 0 ⇒ 码 1
++    eng.resources.set(1, 0.9, 1.0)                     # cell1 富但无信号
++    m0.after_step(eng, 1, sampled=True)
++    d = m0.sample_cols(eng)
++    assert d["l1_joint_s1_e1"] == 1                    # 真·发射态 0
++    assert d["l1_joint_s0_e1"] == 1                    # 无标记（不是发射态 0）
++    assert d["l1_joint_n"] == 2
++    assert sum(int(d[c]) for c in _L1_CELL_COLS) == 2
++
++
++# ---------------------------------------------------------------- T13 CLI 互斥
++
++def _cli(extra):
++    """走真 `main()` 的参数校验腿（微型档 ⇒ 命中拦令即 rc=2，不进任何 run）。"""
++    env = dict(os.environ)
++    env.update(OMP_NUM_THREADS="1", PYTHONUTF8="1")
++    return subprocess.run(
++        [sys.executable, "-u", "-m", "experiments.s3_memory_probe",
++         "--rows", "8", "--cols", "16", "--patches", "2", "--pop", "4",
++         "--ticks", "5", "--sample", "5", "--seeds", "999", "--arms", "on",
++         "--out", os.path.join(tempfile.gettempdir(), "l1_cli_guard.csv"), *extra],
++        cwd=str(Path(__file__).resolve().parents[1]), env=env,
++        capture_output=True, text=True)
++
++
++def test_t13_l1_joint_and_append_is_exit2_not_silent_subset():
++    """🔴 镜 队列⑤ 🟡-1 / PI 00:10 裁「禁组合」：`--l1-joint` + `--append` ⇒ rc=2。
++
++    放过 = `--append` 跳过已完成 run 后，run 级 `l1_*` 只汇总本进程的窗 ⇒ 与 CSV
++    逐窗行两套口径（把本拦令删掉，本例必红；改成只告警不拦，rc 变 0 ⇒ 同样红）。
++    """
++    r = _cli(["--m0-instruments", "--l1-joint", "--append"])
++    assert r.returncode == 2, (r.returncode, r.stdout[-400:], r.stderr[-400:])
++    assert "--l1-joint 与 --append 互斥" in r.stderr, r.stderr[-400:]
+-- 
+2.46.1.windows.1
+
+
+From c20dc2818d4068f1cf17f4c72b3d8848cc47dae2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 00:47:25 +0800
+Subject: [PATCH 6/7] =?UTF-8?q?docs:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20L1=20=E8=AE=B0=E5=BD=95=20?=
+ =?UTF-8?q?=C2=A7=E5=85=AB=20rebase=20=E5=BD=92=E4=B8=80=20+=20=C2=A7?=
+ =?UTF-8?q?=E5=85=AD=20=E6=9C=BA=E5=99=A8=E5=8F=A3=E5=BE=84=E6=A0=87?=
+ =?UTF-8?q?=E6=B3=A8=20+=20=E5=85=A8=E6=96=87=E5=88=97=E9=9D=A2=2017?=
+ =?UTF-8?q?=E2=86=9219=20=E6=9B=B4=E6=AD=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- §八：rebase 基/四新提交头/冲突面 7 处分类（5 并取 + 1 取 HEAD + 1 自定义 `_summary_meta`
+  四项并集）；stub 归一真因；🟡-1 取禁组合；🔴 端到端复跑抓到 '8' 档码域缺陷全链
+  （现象→根因行号→两处错→修法→砚的无损还原式→三新例与两组变异）；e2e 与默认关等价实证；
+  drv8.py 退役；交球四条（砚追认 / 镜新 head 取证 / PI 全量对差与合入 / 提交身份更正）。
+- §六：按 PI 00:10 裁定④ 标注机器口径 ⇒ 本机（无 Rust/scipy）41 红 vs 镜机 136 红，
+  「零新增红」判据 = FAILED 集合双向差为空，不是红数相等。
+- 一/二/三/四 各节 17 列/16 格/k=0..7 全部按 §八 8.5 实测更正为 19 列/18 格/k=0..8，
+  表头列数按 csv.reader 实测 = 96。
+---
+ ...0\227\344\272\244\344\273\230-20261005.md" | 118 ++++++++++++++++--
+ 1 file changed, 108 insertions(+), 10 deletions(-)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+index 83cc9fdd..bb59355b 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+@@ -1,4 +1,4 @@
+-# 记录-L1-JOINTCOL 联合采样列交付（17 列，澜舟）— 2026-10-05
++# 记录-L1-JOINTCOL 联合采样列交付（19 列，澜舟）— 2026-10-05（10-06 §八 归一后口径）
+ 
+ > 派单：PI R383 班 20:2x ①（卡 `L1-JOINTCOL`）｜需求单：砚 `docs/盘点-GAP-B-L1联合采样列-20261005.md`
+ > @`a0feedb`｜PI 三裁：①原始联合计数 ②逐采样点粒度入主表 + run 级 summary 键
+@@ -12,25 +12,27 @@
+ |------|------|------|------|
+ | 需求单 §3.3-1 | 纯观测、零主 RNG | ✅ | T8（假 RNG 记账 `calls==0` + 8 个引擎数组逐位不变） |
+ | 需求单 §3.3-2 | 默认关 ⇒ 逐字节等价 | ✅ | T10 + 三组双树对拍（§四） |
+-| 需求单 §3.3-3 | 表尾追加 + R287 续跑守卫 | ✅ | 表尾 17 列；`("l1_joint_n" in 既有表头) != bool(--l1-joint)` ⇒ exit 2 |
++| 需求单 §3.3-3 | 表尾追加 + R287 续跑守卫 | ✅ | 表尾 19 列；`("l1_joint_n" in 既有表头) != bool(--l1-joint)` ⇒ exit 2 |
+ | 需求单 §3.3-4 | O(N)、过 T10 ≤10% 预算门 | ⚠️ **未测** | 本机无 `--device s2` 预算档 ⇒ 不跑批（R117）；待正式批随 S3-RDSWITCH 合入后一并计时 |
+ | 砚 21:15 锁 | 窗宽 = 批 `--sample` 值，L1 同窗为最小粒度 | ✅ | 实现即取 `--sample` 节拍（见 §三-4） |
+ | 需求单 §3.3-5 | 行和 = Σ 窗内计数点 | ✅ | T1/T12 手算锚 + `l1_pooled` 内置校验（M3 变异证明它真的在拦） |
+ | 需求单 §3.2 | s = 接收态（`read_many`）非发射态 | ✅ | 代码 `:673`；T1 锚 |
+ | 需求单 §3.2 | e = 富指示本身，🔴 **禁 mem_bit 代理** | ✅ | 代码 `:679` 与引擎 `sphere_engine.py:3577-3580` 同式；T3 专钉此禁令；M1 变异（换 mem_bit）⇒ T3 红 |
+ | PI 裁① | 只出原始计数、不出 MI 值列 | ✅ | `l1_pooled` 返回值无 `mi*`（T12 断言 `not any(k.startswith("mi"))`） |
+-| PI 裁② | 逐采样点入主表 + run 级键 | ✅ | 17 列进主表 + summary 内 25 个 `l1_*` 键 |
++| PI 裁② | 逐采样点入主表 + run 级键 | ✅ | 19 列进主表 + summary 内 27 个 `l1_*` 键 |
+ | PI 裁③ | 审计最小集 + occ=0 门 fail-loud | ✅ | `l1_windows/l1_empty_windows/l1_empty_window_frac/l1_empty_gate`；T7b/T7c + M6 变异 |
+-| 卡验收 | 17 列落表 / 靶向绿 / 零新增红 / 等价实证 / 上板 + 卡 done | 见 §四（列/测试/对拍/变异）、§六（零新增红）、§板帖 | — |
++| 卡验收 | 19 列落表 / 靶向绿 / 零新增红 / 等价实证 / 上板 + 卡 done | 见 §四（列/测试/对拍/变异）、§六（零新增红）、§板帖 | — |
+ 
+ ## 二、实现要点
+ 
+ - **列族**（`experiments/s3_memory_probe.py:443-450`）：`_L1_CELL_COLS` = `l1_joint_s{k}_e{j}`
+-  （k=0..7 × j=0..1，16 列）+ `l1_joint_n` = **17 列**，接在 `_M0_COLS`（36 列）之后 ⇒ 表尾。
++  （k=0..**8** × j=0..1，**18** 列）+ `l1_joint_n` = **19 列**，接在 `_M0_COLS`（36 列）之后 ⇒ 表尾。
++  🔴 k 域 = **接收码**（`s0` = 格上无标记，`s1..s8` = 码；'8' 档 `code = state + 1`）——
++  原取 0..7 是口径缺陷，成因/修法/还原式见 **§八 8.4**（实现偏离第 6 项，候砚/PI 追认）。
+ - **累加点**：`after_step()` 末 ⇒ `_l1_accumulate()` 每 tick 逐存活个体取
+   `(s, e)` 计入 `l1_acc[下标 = s*2 + e]`；`sample_cols()` 在采样点写窗值后
+   `l1_acc[:] = 0; l1_win_n = 0` ⇒ **逐采样窗**语义（非累计、非归一，同窗多次到访照计）。
+-- **run 级键**：`l1_pooled(rows)` 池化 16 格 + 曝光 + 空窗剔除率门，另出
++- **run 级键**：`l1_pooled(rows)` 池化 18 格 + 曝光 + 空窗剔除率门，另出
+   `l1_joint_sig_states=8`、`l1_env_source="resources._grid > FOOD_RICH_LEVEL * _capacity"`、
+   `l1_note`（口径自述，离线复算不必回读源码）。
+ - **CLI**：`--l1-joint`（默认 False），插在 `--m0-instruments` 之后、`add_device_arg(ap)` 之前
+@@ -51,11 +53,12 @@
+    按 PI③「审计最小集」从紧 ⇒ 走 fail-loud 停跑，不做"计个数继续跑"。
+ 2. **`'8'` 档断言取代 S3-RDSWITCH 前置**。需求单 §四 给了两路（候轻舟 CLI / 先实施 + 批内断言），
+    取第二路：`_attach_l1()` 在 `signal_alphabet != "8"` 时 RuntimeError（`:651-657`），
+-   不静默把 8..15 态折进 0..7。轻舟 CLI 落地后本断言可原样保留（它只读 `eng._alpha`）。
++   不静默把 9..15 码折进 0..8。`--alphabet` CLI 已合 main（S3-RDSWITCH）⇒ 本断言原样保留，
++   临时驱动器 `drv8.py` 退役（§八 8.5）。
+ 3. **`l1_` 前缀与存量列同族不同义**：主表本已有 `l1_visited_patch_n/_frac`（= L1 斑块级读数），
+    本批 `l1_joint_*`（= 语言涌现阶梯 L1）。列名无碰撞（89 列全唯一，已核），
+    但离线分析按前缀 `l1_` 聚合会把两组混在一起 ⇒ **请砚在判据脚本里用全名列**。
+-4. **窗宽口径**：本批 17 列的窗宽 = 探针既有 `--sample` 节拍（未新增独立窗宽参数）。
++4. **窗宽口径**：本批 19 列的窗宽 = 探针既有 `--sample` 节拍（未新增独立窗宽参数）。
+    砚 21:15 R225 会签帖 ② 已锁「逐采样窗宽 = 批 `--sample` 值（本族 100 tick），
+    GAP-B 联合列/L1 读数同窗为最小粒度」⇒ **实现与锁定口径一致，无需返工**。
+    未随该锁的一项：`--sample 50`/首点落 0 的 tick 0–100 首采样盲区消歧（候 PI 起跑前单裁）
+@@ -87,7 +90,8 @@ test_r358_m0_instruments + test_l1_joint_columns
+ 
+ ### 4.3 正证据（E 跑：L1 + '8' + `--m0-instruments --l1-joint`，micro 12×24/pop10/60tick/sample10）
+ 
+-- 表头 89 列全唯一，尾 17 列 = `l1_joint_s0_e0 … l1_joint_s7_e1, l1_joint_n`。
++- 表头 **96 列**全唯一（含 G6 的 4 列），尾 19 列 = `l1_joint_s0_e0 … l1_joint_s8_e1, l1_joint_n`
++  ⇒ §八 8.5 e2e 实测（`csv.reader` 数得，非推算）。
+ - 逐采样窗行和不变量 6/6 窗成立（85/78/70/69/60/60）。
+ - run 级：`l1_joint_n=422` = Σ 窗曝光；`l1_windows=6, l1_empty_windows=0, frac=0.0`；
+   `l1_env_source` 不含 `mem_bit`；无 `mi*` 值列。
+@@ -139,7 +143,19 @@ test_r358_m0_instruments + test_l1_joint_columns
+ 分布（两侧一致）：`test_f_r21_presets.py` 36 ＋ `test_a2b_tick_audit_coverage.py` 3 ＋
+ `test_r278_p3_device_flush.py` 1 ＋ `test_r98_nonascii_print.py` 1。
+ 
+-- 我新增的 `test_l1_joint_columns.py` 15 例、轻舟的 `test_r358_m0_instruments.py` **均不在红单内**。
++🔴 **机器口径标注（镜 队列⑤ 🟡-2 / PI 00:10 裁定 ④）**：上表 **41 例是「本机」读数**，
++不是全树通用地平线 ——
++
++| 机器 | Rust `sim_core` | scipy | 全量红数 | 通过数 |
++|------|----------------|-------|---------|--------|
++| 澜舟（本机，本节 A/B 两侧） | 未编译 ⇒ 走纯 Python 路径 | 未装 | **41** | 1157 |
++| 镜（队列⑤取证机） | 在 | 在 | **136** | 1036（base@4fdb7dd）/ 1051（head@163d922） |
++
++⇒ 绝对红数**跨机不可比**（缺件面不同：Rust/scipy 在装机上会多激活一批依赖它的用例）。
++**「零新增红」的判据 = FAILED 集合双向差为空**（镜在她机上测出的 base/head 双向空集同样成立），
++**不是**红数相等。审读者换机复核时请按此条对照，勿把 41/136 之差读成回归。
++
++- 我新增的 `test_l1_joint_columns.py` 19 例、轻舟的 `test_r358_m0_instruments.py` **均不在红单内**。
+ - B 侧单跑仅 47s 即复现同样 41 红 ⇒ 这批是**确定性存量红**，不是并发争用抖动。
+ - 🔴 **更正今晚早前口径**：先前报备的「存量红 11 例（r278 7 ＋ r287 4）」**不完整**；
+   以本次全量为准 = **41 例存量红**，且 `test_r287_s3_sample_resume.py` 本轮**不红**。
+@@ -169,3 +185,85 @@ PYTHONUTF8=1 ../../.venv/Scripts/python.exe \
+ # 变异必红（二进制读写保 CRLF；跑完自动还原并校验 sha256）
+ PYTHONUTF8=1 ../../.venv/Scripts/python.exe _rerun_logs/lh_l1_equiv/mutcheck.py
+ ```
++
++## 八、rebase 归一 + 端到端复跑（2026-10-06 00:x，PI 23:0x①② / PI 板裁 00:10 四条）
++
++### 8.1 rebase（裁定 ①：基线 ≥ `75689ce`，归一面以 main 现码为准）
++
++| 项 | 值 |
++|----|----|
++| 新基 | `992024e`（含 S3 `--alphabet` + 我 G6 + S1 读回守 `75689ce`；与取证的 `874c5c4` 在探针/引擎面零漂移） |
++| 新四提交头 | `7f5df3e` 实装 / `147ec81` 交付记录 / `0259aac` 自审 / `4e83809` §六 对差 |
++| 冲突面 | 7 处，全在 `experiments/s3_memory_probe.py`（= PI 预告的 argparse 插位 + `_summary_meta` 归一） |
++| 解法 | 5 纯并取 ＋ 1 取 HEAD（`2137` 注释块，PI「注释取 S3」）＋ 1 自定义 |
++
++自定义腿 = `_summary_meta()` 取 **四项并集**（`rd_mode` / `alphabet` / `m0_emit_window_frac` /
++`l1_joint` 各自"等于默认值 ⇒ 摘除"），保留 main 现码的 `meta = dict(vars(a))` 拷贝形。
++🔴 四项摘除条件是**并集**而非顺序覆盖：任一侧被覆盖掉，对应家族的默认档逐字节等价即破
++⇒ 改此处必同时复跑三侧等价（裁定 ③ 已消解同文件次序：`task/L1-JOINTCOL` 是唯一在途腿）。
++
++### 8.2 stub 归一（rebase 后 13 例红的真因，非"测试写坏"）
++
++merged `attach()` 现同时装 G6 发射 tap ⇒ `if not callable(signals.write_many): raise`
++🔴 当场炸 —— L1 的 `_Sig` stub 只有 `write()`（引擎唯一写点是 `write_many`，
++`sphere_engine.py:3664`）。⇒ 与 `tests/test_r358_m0_instruments.py:24` 同源对齐
++（`write_many` 照 `signal_field.py:104` 语义 `& 0x0F` ＋ `pat=0 ⇒ age=0`，`write()` 转调它），
++并把 9 例的装配序改成 **先 `attach()` 后 `_set_env()`**（真实 `run_one` 本就如此）。
++未改任何断言。
++
++### 8.3 🟡-1 处置 = 取「禁组合」（PI 裁定 ②）
++
++`--l1-joint` × `--append` ⇒ **exit 2**，与 `--resume-sample` 同式（`main()` 前置校验段）。
++理由：`--append` 跳过已完成 run ⇒ 本次进程只重跑子集，而 run 级 `l1_*`（`l1_pooled`）
++只数**本进程产出的窗** ⇒ 与 CSV 逐窗全量行两套口径，且分叉不进表头、事后无从查出。
++靶向 `test_t13_`（subprocess 走真 `main()`）＋ 变异实测：拦令改 `and False` ⇒ **T13 红**
++（rc 由 2 变 0）。`--l1-joint` help 文案同步列明两互斥。
++
++### 8.4 🔴 端到端复跑抓到的口径缺陷（`drv8.py` 退役的代价 = 一条真 bug）
++
++裁定"复跑 `--alphabet 8 --l1-joint` 端到端"⇒ 第一次走官方 CLI（临时驱动器退役）就在
++60-tick 微型批当场 fail-loud：
++
++```
++RuntimeError: 🔴 M0 L1：接收码出现 8 ≥ 8 ⇒ 装置实际不是 '8' 档 …（停跑不出列）
++```
++
++根因（`simulation/sphere_engine.py`）：`encode_signal_states(..., "8")` 返回
++`state = e_bin*2 + mem_bit`（0..7）**与 `code_offset = 1`**（`:153`），无码本臂落格
++`patterns = state + 1 ∈ {1..8}`（`:3657`），且 R121 §3.5 守卫把 `patterns == 0` 记为
++bad code ⇒ **码 0 永不由发射产生** ⇒ 格上 0 的唯一含义是「本格当前无标记」。
++旧 `_L1_K = 8` 把 `read_many` 原值当发射态 ⇒ 两处错：
++
++1. 真码 8（发射态 7）被判越界 ⇒ `'8'` 档跑到达标态就**停跑**（拦令替我们把关，没出假数）；
++2. 「无标记」被并进化 s0 ⇒ 与发射态 0（码 1）**同槽双计** ⇒ MI(s,e) 两侧分布同时失真。
++
++修法 = s 域取 **9 档码域**（`_L1_K: 8 → 9`）：`s0` = 格上无标记、`s1..s8` = 接收码；
++⇒ 列面 **17 → 19**（18 格 + `l1_joint_n`），summary 新增口径键 `l1_joint_code_domain`，
++`l1_joint_sig_states` = 9；越界拦令保持原式（`s.max() >= _L1_K` ⇒ 只有 '16' 档能产 9..15）；
++`_attach_l1` 非 `'8'` 拦令文案同步。🔴 **砚可无损还原需求单 §3.1 的「发射态 0..7」原口径**
++= 剔除 `s0` 列后整体减 1（信息无损，且 s0 曝光量本身是可披露的干扰面）。
++⇒ 登记为**实现偏离第 6 项**，候砚/PI 追认（R225 判据口径归砚，我不自裁）。
++
++新三例钉住：`test_t14_`（码 8 合法入 `s8_e1`，把 `_L1_K` 改回 8 ⇒ **红**）／
++`test_t14b_`（码 9 仍炸 = 拦令没被放宽成没牙）／`test_t14c_`（s0 与 s1 分槽）。
++变异实测：`_L1_K = 9 → 8` ⇒ T9 ＋ T14 ＋ T14b **三红**。
++
++### 8.5 复跑实证（新口径，官方 CLI，微型档不违 R117）
++
++- `--alphabet 8 --m0-instruments --l1-joint --rows 8 --cols 16 --patches 6 --pop 12 --ticks 60
++  --sample 20 --arms both --seeds 902,903` ⇒ **12 行**、表尾 19 列在位、`Σ l1_joint_n = 1585`、
++  **11 格非零**（含 `l1_joint_s8_e1 = 4` = 旧实现炸点）、`l1_windows = 3`、空窗 0。
++  产物 `_rerun_logs/lh_rebase8/e_l1_8.csv` ＋ `.summary.json`（不入库）。
++- **默认关逐字节等价**：同参数去 `--l1-joint` 与**参考树 `gitee/main@874c5c4`**（临时
++  detached worktree，跑完即删）对拍 ⇒ CSV **格差 0**（仅 `ms_per_tick` 计时列差）、
++  summary 规范化后（剔计时/时间戳/路径 ＋ NaN 归一）**完全相等**。
++- 靶向：`test_l1_joint_columns.py` **19 passed** ＋ `test_r358_m0_instruments.py` 7 passed（合跑 26 绿）。
++- `_rerun_logs/lh_l1_equiv/drv8.py` 已退役删除（`--alphabet` 已在 main）。
++
++### 8.6 交球 / 待裁
++
++1. **砚**：s 域 9 档码域 ＝ 对 §3.1 的实现偏离（列 17→19），追认或指定还原口径；
++2. **镜**：新 head 取证（`4e83809` ＋ 本轮 8.3/8.4 提交），旧 head `163d922` 取证作废（裁定 ①）；
++3. **PI**：全量套件红单对差（后台在跑，结果追记 §六/板帖）＋ 复审合入次序；
++4. 本机提交身份更正：四提交原带 `lanhou@`（圣经 R227 拼写笔误 ＋ 主树共享 config 竞写，
++   main 上 44 例同错），本轮已按 R371 逐命令显式署名改写为 `lanzhou@the-world.local`。
+-- 
+2.46.1.windows.1
+
+
+From 4d43ce64b3b257d268e4b82131da00e7517c7e1c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 01:16:26 +0800
+Subject: [PATCH 7/7] =?UTF-8?q?docs:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20L1=20=E8=AE=B0=E5=BD=95=20?=
+ =?UTF-8?q?=C2=A7=E4=B9=9D=20=E6=96=B0=20head=20=E5=85=A8=E9=87=8F?=
+ =?UTF-8?q?=E7=BA=A2=E5=8D=95=E5=8E=9F=E5=A7=8B=E6=95=B0=E6=8D=AE=EF=BC=88?=
+ =?UTF-8?q?42=20=E7=BA=A2=3D41=20=E5=AD=98=E9=87=8F+1=20=E8=B4=9F=E8=BD=BD?=
+ =?UTF-8?q?=E6=8A=96=E5=8A=A8=EF=BC=8Cr110=20=E5=8D=95=E8=B7=91=E7=BB=BF?=
+ =?UTF-8?q?=EF=BC=89=E4=BA=A4=20PI=20=E8=A3=81=E5=AE=9A=E2=91=A1?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ ...0\227\344\272\244\344\273\230-20261005.md" | 25 +++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+index bb59355b..6a0ad351 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+@@ -267,3 +267,28 @@ bad code ⇒ **码 0 永不由发射产生** ⇒ 格上 0 的唯一含义是「
+ 3. **PI**：全量套件红单对差（后台在跑，结果追记 §六/板帖）＋ 复审合入次序；
+ 4. 本机提交身份更正：四提交原带 `lanhou@`（圣经 R227 拼写笔误 ＋ 主树共享 config 竞写，
+    main 上 44 例同错），本轮已按 R371 逐命令显式署名改写为 `lanzhou@the-world.local`。
++
++---
++
++## 九、rebase 后新 head 全量红单原始数据（10-06 01:2x，交 PI 裁定② 用 · 我不自裁）
++
++| 项 | 值 |
++|----|----|
++| 树 / head | `.worktrees/L1-JOINTCOL` @ `c20dc28`（rebase 基 `992024e`） |
++| 命令 | `pytest tests/ -q --ignore=tests/test_broker.py -p no:cacheprovider`（主树 venv，`PYTHONUTF8=1`，`OMP_NUM_THREADS=1`，**全量输出落盘**） |
++| 结果 | **42 failed, 1184 passed, 8 skipped**（1091.38s） |
++| 分布 | `test_f_r21_presets.py` 36 ＋ `test_a2b_tick_audit_coverage.py` 3 ＋ `test_r278_p3_device_flush.py` 1 ＋ `test_r98_nonascii_print.py` 1 ＋ `test_r110_criteria.py::test_concurrent_start_exactly_one_wins` 1 |
++| 产物 | `_rerun_logs/lh_l1_fullset/head_c20dc28.txt`（＋ `.failed.txt` 42 行名集，不入库；`redset.py` = 双向差抽取脚本） |
++
++**较 §六（旧 head `0b219ad`＝41 红）多出 1 例，且已定位为负载抖动、非本改动引入**：
++
++- 本改动面（`git diff --name-only 992024e...HEAD`）= 3 个文件：`experiments/s3_memory_probe.py`、
++  `tests/test_l1_joint_columns.py`、本记录文档 —— **不含** `test_r110_criteria.py`；
++- 单跑 `pytest tests/test_r110_criteria.py` ⇒ **11 passed（1.57s）**，两次复跑同绿 ⇒ 只在满负载并跑时红；
++- 我新增的 `test_l1_joint_columns.py` 19 例、轻舟 `test_r358_m0_instruments.py`、`test_s3_rdswitch.py`
++  三件全不在红单内。
++
++🔴 **口径按 PI 板裁 00:30「队列⑤处置·追记」执行**：可比机器口径 = 本机（无 Rust/无 scipy）**41** ＋ 砚机 **15**
++＋ 云机 **15**；镜机 **136 作废**（`--ignore` 参数未真正生效 ⇒ 误把 `test_broker.py` 全家算进存量）。
++「零新增红」判据仍是 **FAILED 名集合双向差为空**，不是红数相等；**该对差归 PI**（裁定②），
++本节只交原始数据与抖定性说明，判读不落在实施线。
+-- 
+2.46.1.windows.1
+

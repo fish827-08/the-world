@@ -1,0 +1,601 @@
+From e6e97bc224faf2ead12daf1069aa0de7c4a689db Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=9D=92=E6=A2=A7?= <qingwu@the-world.local>
+Date: Wed, 30 Sep 2026 15:34:31 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?[=E4=BA=91=E7=AB=AF=E5=BC=80=E5=8F=91=C2=B7?=
+ =?UTF-8?q?=E9=9D=92=E6=A2=A7]=20=E6=89=B9A2=E6=B0=94=E5=91=B3=E6=A8=A1?=
+ =?UTF-8?q?=E7=B3=8A=E6=80=A7=E9=AA=8C=E8=AF=81:=E6=8E=A2=E9=92=88?=
+ =?UTF-8?q?=E5=88=9D=E7=A8=BF+=E9=A2=84=E6=B3=A8=E5=86=8C=E7=A8=BF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 单斑块世界+ID匹配轨迹记录+距离分箱角度误差
+- 方法1:距离-角度误差曲线(主) 方法2:远距寻获时间(佐证)
+- 8seed(173-180)x2臂x2000t,主门A=近距离angle<60,主门B=远距离≈随机
+- 冒烟通过:on臂近距离气味2.25/远距离0,angle有值
+- 分支交付,等天平验收
+---
+ ...0\241\347\263\212\346\200\247-20260930.md" |  99 ++++++
+ experiments/batch_a2_smell_fuzziness_probe.py | 310 ++++++++++++++++++
+ 2 files changed, 409 insertions(+)
+ create mode 100644 "docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md"
+ create mode 100644 experiments/batch_a2_smell_fuzziness_probe.py
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md"
+new file mode 100644
+index 00000000..ca08bd0b
+--- /dev/null
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md"
+@@ -0,0 +1,99 @@
++# 预注册：批 A2 气味场模糊性验证
++
++**日期**：2026-09-30
++**负责人**：青梧（探针 + 本机跑批）
++**立项**：天平 R283 §二（fish 提议，裁定立项为批 A2）
++**科学问题**：气味场提供的是「模糊近场梯度」（红线安全）还是「精确全局导航」（违反罗盘红线）？
++
++---
++
++## 一、实验目的
++
++批 A 已证明气味 food 通道能提升探索（l1 23/24 通过）。但批 A 只测了"有没有用"，没测"怎么用"。
++
++本实验验证气味的**信息精度**：
++- **精确信息**：生物在任意距离都能知道斑块方向 → 移动方向误差≈0°（全距离）→ 违反罗盘红线
++- **模糊信息**：只有近距离能闻到气味，远距离瞎逛 → 移动方向误差随距离增大 → 红线安全
++
++## 二、方法（天平 R283 裁定：方法1 + 方法2）
++
++### 方法1：距离-角度误差曲线（主方法）
++- 单斑块世界，记录每 N tick 所有存活个体的：
++  - 到斑块距离（环面欧几里得）
++  - 移动方向（上一 tick → 当前 tick 的位移，用 ID 匹配）
++  - 移动方向与「生物→斑块中心」方向的夹角（度）
++  - 当前格气味值（food 通道）
++- 按距离分箱（0-5/5-10/10-20/20-30/30-50/50-80/80-120/120-200/200+）统计角度误差均值/中位数
++- **判据**：
++  - 精确信息：所有距离 bin 的 angle_mean ≈ 0°
++  - 模糊信息：近距离 angle_mean 显著 < 90°（随机），远距离 ≈ 90°
++
++### 方法2：远距投放寻获时间（佐证）
++- 单斑块世界随机投放（平均距离 ~280 格，天然远距）
++- 统计每个生物首次到达斑块的 tick（found_frac 随时间变化）
++- **判据**：
++  - 精确信息：寻获时间 ≈ 距离/速度（直奔）
++  - 模糊信息：寻获时间 ≈ 瞎逛时间 + 碰巧进气味范围
++
++## 三、实验配置
++
++| 参数 | 值 | 说明 |
++|---|---|---|
++| 世界 | 480×960 | k=2.5 时间压缩 |
++| patches | **1** | 单斑块（消除多斑块混淆） |
++| pop | 500 | 单斑块养不活太多，500 保证前 100tick 有足够样本 |
++| rgm | 1.195 | 与批 A 同装置 |
++| bg_low | frac=0.4, cap_mult=0.05 | 与批 A 同装置 |
++| rd | 全开 | 与批 A 同装置 |
++| ticks | 2000 | 足够观察寻获+灭绝 |
++| 轨迹采样 | 每 20 tick | 平衡数据量与精度 |
++| 汇总采样 | 每 100 tick | |
++| seeds | 173-180（8 seed） | 与历史 42-172 错开（R255） |
++| arms | sm_on（food+use_in_move）vs sm_off（无气味） | 唯一变量=气味 |
++
++## 四、主门判据
++
++### 主门 A：近距离角度误差显著低于随机
++- 距离 bin 0-20 格内，sm_on 臂 angle_median < 60°（随机=90°）的 seed ≥ 6/8
++- 且 sm_on 臂 angle_median < sm_off 臂 angle_median 的 seed ≥ 6/8
++- **通过 ⇒ 气味在近距离提供方向引导（模糊信息成立）**
++
++### 主门 B：远距离角度误差≈随机（无精确导航）
++- 距离 bin 100+ 格内，sm_on 臂 angle_median 在 [75°, 105°] 区间的 seed ≥ 6/8
++- 且 sm_on 与 sm_off 在远距离无显著差异（配对差 < 15°）
++- **通过 ⇒ 远距离无精确导航（红线安全）**
++
++### 支持门 C：寻获率 on > off
++- t=500 时 found_frac（到达过斑块的个体占比）sm_on > sm_off 的 seed ≥ 6/8
++- **通过 ⇒ 气味确实帮助寻获（与批 A 结论一致）**
++
++### 支持门 D：气味值随距离衰减
++- sm_on 臂 smell_mean 在 0-5 格 > 1.0，50+ 格 < 0.01
++- **通过 ⇒ 气味场是近场衰减的（物理机制支持模糊性）**
++
++## 五、反例登记
++
++- 若某 seed 灭绝过早（t<100 时 pop<10）⇒ 该 seed 轨迹数据不足，登记为"早灭反例"，不计入主门
++- 若斑块中心被 rd 搬走（单斑块 rd 可能搬移）⇒ 用实时质心重算，登记为"斑块搬移反例"
++- 若 sm_on 臂远距离 angle_median < 45° ⇒ 登记为"疑似精确导航反例"，需排查是否有罗盘漏洞
++
++## 六、资源与 ETA
++
++- 本机 4 进程分片（on/off × seeds 173-176/177-180）
++- 单 run ≈ 15-30s（pop=500，单斑块，轻量）
++- 总 ETA ≈ **5-10 min**
++- 输出：`results/batch_a2_fuzziness.csv`（汇总）+ `results/batch_a2_track.csv`（轨迹）+ `.summary.json`
++
++## 七、与其他实验的关系
++
++- 批 A2 是批 A 的归因深化，不阻塞主路线
++- 若主门 A+B 通过 ⇒ 气味=模糊近场梯度确认，红线安全，可进入 C3（信号/语言）
++- 若主门 B 不通过（远距离有精确导航）⇒ 需排查实现层漏洞，可能触发罗盘红线审查
++- 不影响 S3.5b、旗舰 60k、C3 设计稿
++
++## 八、交付物
++
++1. 探针 `experiments/batch_a2_smell_fuzziness_probe.py`（分支 `qingwu/batch_a2_smell_fuzziness`）
++2. 本预注册稿
++3. 实验数据（汇总 CSV + 轨迹 CSV + summary.json）
++4. 判读报告（上讨论板，含距离-角度误差曲线 + on/off 对比 + 主门判定）
+diff --git a/experiments/batch_a2_smell_fuzziness_probe.py b/experiments/batch_a2_smell_fuzziness_probe.py
+new file mode 100644
+index 00000000..e447fe56
+--- /dev/null
++++ b/experiments/batch_a2_smell_fuzziness_probe.py
+@@ -0,0 +1,310 @@
++#!/usr/bin/env python3
++"""
++批 A2：气味场「模糊信息 vs 精确信息」验证探针（R283 立项，fish 提议，青梧实施）。
++
++验证目标：气味场提供的是模糊近场梯度（红线安全）还是精确全局导航（违反罗盘红线）。
++
++方法1（距离-角度误差曲线）：
++  单斑块世界，记录每 tick 生物移动方向与「生物→斑块中心」方向的夹角，
++  按到斑块距离分组统计。精确信息应全距离误差≈0；模糊信息应误差随距离增大。
++
++方法2（远距投放寻获时间）：
++  统计每个生物首次到达斑块的时间。精确信息≈直奔（距离/速度）；模糊信息≈瞎逛+碰巧进气味范围。
++
++装置：patch_count=1（单斑块），默认随机投放（单斑块世界里随机≈远距投放）。
++两组：sm_on（food 气味 + use_in_move）vs sm_off（无气味）。
++输出：个体级轨迹 CSV（每 N tick 采样一次）+ 种群级汇总 CSV。
++
++🔴 只读记录，不改仿真逻辑；C7 digest 不变（新增探针不影响引擎）。
++"""
++import argparse
++import csv
++import os
++import sys
++import time
++from pathlib import Path
++
++import numpy as np
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from simulation.config import SimConfig
++from simulation.sphere_engine import SphereEngine
++from experiments.steady_k_probe import rescale_config, apply_post_build
++
++
++# 与 S2/S3 同装置基线（k=2.5 时间压缩）
++DEVICE = dict(rows=480, cols=960, patches=1, pop=500, rgm=1.195,
++              bg_low_prod_frac=0.4, bg_low_cap_mult=0.05)
++S1_BASE = dict(rows=480, cols=960, speed_max=0.125, gain=0.125,
++               subdiv=80, k=2.5, max_count=30000)
++SEEDS_USED = set(range(42, 173))  # S2/S3/S3.5 已用区间
++
++
++def _patch_centroid(eng) -> tuple[int, int]:
++    """算斑块质心（行, 列）。单斑块世界用 patch_mask。"""
++    mask = getattr(eng.resources, "_patch_mask", None)
++    if mask is None or not mask.any():
++        return (eng.world.rows // 2, eng.world.cols // 2)
++    cells = np.flatnonzero(mask)
++    rr, cc = np.divmod(cells, eng.world.cols)
++    return (int(rr.mean()), int(cc.mean()))
++
++
++def _torus_direction(from_cell: np.ndarray, to_r: int, to_c: int,
++                     rows: int, cols: int) -> tuple[np.ndarray, np.ndarray]:
++    """算从 from_cell 到 (to_r, to_c) 的最短环面方向向量 (dr, dc)，范围 [-rows/2, rows/2] × [-cols/2, cols/2]。"""
++    fr, fc = np.divmod(from_cell, cols)
++    dr = to_r - fr
++    dc = to_c - fc
++    # 环面最短路径
++    dr = np.where(dr > rows // 2, dr - rows, dr)
++    dr = np.where(dr < -rows // 2, dr + rows, dr)
++    dc = np.where(dc > cols // 2, dc - cols, dc)
++    dc = np.where(dc < -cols // 2, dc + cols, dc)
++    return dr.astype(np.float64), dc.astype(np.float64)
++
++
++def _angle_error(move_dr: np.ndarray, move_dc: np.ndarray,
++                 target_dr: np.ndarray, target_dc: np.ndarray) -> np.ndarray:
++    """算移动方向与目标方向的夹角（度）。不移动（0,0）的个体返回 NaN。"""
++    move_norm = np.sqrt(move_dr ** 2 + move_dc ** 2)
++    target_norm = np.sqrt(target_dr ** 2 + target_dc ** 2)
++    valid = (move_norm > 1e-9) & (target_norm > 1e-9)
++    cos_angle = np.zeros_like(move_norm)
++    cos_angle[valid] = ((move_dr[valid] * target_dr[valid] + move_dc[valid] * target_dc[valid])
++                        / (move_norm[valid] * target_norm[valid]))
++    cos_angle = np.clip(cos_angle, -1.0, 1.0)
++    degrees = np.degrees(np.arccos(cos_angle))
++    degrees[~valid] = np.nan
++    return degrees
++
++
++def _torus_distance(cells: np.ndarray, to_r: int, to_c: int,
++                    rows: int, cols: int) -> np.ndarray:
++    """环面欧几里得距离。"""
++    dr, dc = _torus_direction(cells, to_r, to_c, rows, cols)
++    return np.sqrt(dr ** 2 + dc ** 2)
++
++
++def run_one(seed: int, ticks: int, sample: int, smell_on: bool,
++            track_every: int = 5) -> tuple[list[dict], list[dict], dict]:
++    """跑一个 run，返回 (汇总行列表, 轨迹行列表, meta)。"""
++    c = SimConfig(seed=seed)
++    c.world.rows, c.world.cols = DEVICE["rows"], DEVICE["cols"]
++    c.resources.distribution = "patchy"
++    c.resources.bg_production_zero = True
++    c.resources.patch_regeneration_mult = DEVICE["rgm"]
++    c.resources.patch_count = DEVICE["patches"]  # 🔴 单斑块
++    c.resources.bg_low_prod_frac = DEVICE["bg_low_prod_frac"]
++    c.resources.bg_cap_mult = DEVICE["bg_low_cap_mult"]
++    c.population.initial_count = DEVICE["pop"]
++    c.simulation.use_sim_core = False  # Python 路径（与 S2/S3 一致）
++    c.resource_dynamics.enabled = True  # rd 全开（与批 A 同装置）
++
++    if smell_on:
++        c.smell.channels = ("food",)
++        c.smell.use_in_move = True
++    else:
++        c.smell.channels = ()
++        c.smell.use_in_move = False
++
++    notes = rescale_config(c, S1_BASE["k"])
++    eng = SphereEngine(c)
++    apply_post_build(eng, notes)
++
++    patch_r, patch_c = _patch_centroid(eng)
++    rows, cols = eng.world.rows, eng.world.cols
++    N0 = len(eng._id)
++
++    # 记录初始位置（用于方法2的寻获时间）
++    init_flat = eng._flat[:N0].copy()
++    init_dist = _torus_distance(init_flat, patch_r, patch_c, rows, cols)
++
++    patch_mask = eng.resources._patch_mask.copy()
++
++    # ID → 上一 tick 位置（用于算个体移动方向）
++    prev_pos: dict[int, int] = {int(eng._id[i]): int(eng._flat[i]) for i in range(N0)}
++
++    # 寻获时间：ID → 首次到达斑块的 tick
++    first_patch: dict[int, int] = {}
++
++    summary_rows = []
++    track_rows = []
++    t0 = time.perf_counter()
++
++    for t in range(1, ticks + 1):
++        eng.step()
++        N = len(eng._id)
++        cur_ids = eng._id[:N]
++        cur_flat = eng._flat[:N]
++
++        # 寻获时间登记
++        if N > 0:
++            on_patch = patch_mask[cur_flat]
++            for i in range(N):
++                if on_patch[i]:
++                    oid = int(cur_ids[i])
++                    if oid not in first_patch:
++                        first_patch[oid] = t
++
++        # 轨迹采样（每 track_every tick）
++        if t % track_every == 0 and N > 0:
++            # 用 ID 匹配算个体移动方向
++            move_dr = np.full(N, np.nan)
++            move_dc = np.full(N, np.nan)
++            for i in range(N):
++                oid = int(cur_ids[i])
++                if oid in prev_pos:
++                    pf = prev_pos[oid]
++                    cf = int(cur_flat[i])
++                    if pf != cf:
++                        pdr, pdc = _torus_direction(np.array([pf]), 0, 0, rows, cols)
++                        cdr, cdc = _torus_direction(np.array([cf]), 0, 0, rows, cols)
++                        dr = float(cdr[0] - pdr[0])
++                        dc = float(cdc[0] - pdc[0])
++                        # 环面修正
++                        if dr > rows // 2: dr -= rows
++                        elif dr < -rows // 2: dr += rows
++                        if dc > cols // 2: dc -= cols
++                        elif dc < -cols // 2: dc += cols
++                        move_dr[i] = dr
++                        move_dc[i] = dc
++
++            # 到斑块方向和距离
++            tdr, tdc = _torus_direction(cur_flat, patch_r, patch_c, rows, cols)
++            dist = np.sqrt(tdr ** 2 + tdc ** 2)
++            angle_err = _angle_error(move_dr, move_dc, tdr, tdc)
++
++            # 气味值（sm_on 组才有）
++            smell_val = np.zeros(N)
++            if smell_on and eng.smell is not None:
++                smell_val = eng.smell.at(cur_flat, "food")
++
++            # 按距离分箱统计
++            bins = [0, 5, 10, 20, 30, 50, 80, 120, 200, 9999]
++            for bi in range(len(bins) - 1):
++                lo, hi = bins[bi], bins[bi + 1]
++                mask = (dist >= lo) & (dist < hi)
++                cnt = int(mask.sum())
++                if cnt == 0:
++                    continue
++                valid_angle = angle_err[mask]
++                valid_angle = valid_angle[~np.isnan(valid_angle)]
++                track_rows.append({
++                    "seed": seed, "arm": "sm_on" if smell_on else "sm_off",
++                    "tick": t, "dist_bin": f"{lo}-{hi}",
++                    "n": cnt,
++                    "n_moved": int(len(valid_angle)),
++                    "angle_mean": round(float(valid_angle.mean()), 2) if len(valid_angle) > 0 else "",
++                    "angle_median": round(float(np.median(valid_angle)), 2) if len(valid_angle) > 0 else "",
++                    "smell_mean": round(float(smell_val[mask].mean()), 4),
++                    "on_patch_frac": round(float(patch_mask[cur_flat[mask]].mean()), 4),
++                })
++
++        # 汇总采样（每 sample tick）
++        if t % sample == 0 or t == ticks:
++            N = len(eng._id)
++            dist = _torus_distance(eng._flat[:N], patch_r, patch_c, rows, cols) if N > 0 else np.array([])
++            on_patch = float(patch_mask[eng._flat[:N]].mean()) if N > 0 else 0.0
++            # 寻获率（到达过斑块的个体占初始种群的比例）
++            found_frac = round(len(first_patch) / max(N0, 1), 4)
++            summary_rows.append({
++                "seed": seed, "arm": "sm_on" if smell_on else "sm_off",
++                "tick": t, "pop": N,
++                "dist_mean": round(float(dist.mean()), 2) if N > 0 else "",
++                "dist_median": round(float(np.median(dist)), 2) if N > 0 else "",
++                "dist_min": round(float(dist.min()), 2) if N > 0 else "",
++                "on_patch_frac": round(on_patch, 4),
++                "found_frac": found_frac,
++                "ms_per_tick": round((time.perf_counter() - t0) / t * 1e3, 1),
++            })
++
++        # 更新上一 tick 位置字典
++        prev_pos = {int(cur_ids[i]): int(cur_flat[i]) for i in range(N)}
++
++    meta = {
++        "seed": seed, "arm": "sm_on" if smell_on else "sm_off",
++        "patch_centroid": f"({patch_r},{patch_c})",
++        "init_dist_mean": round(float(init_dist.mean()), 2),
++        "init_dist_median": round(float(np.median(init_dist)), 2),
++        "final_pop": len(eng._id),
++        "elapsed_sec": round(time.perf_counter() - t0, 1),
++    }
++    return summary_rows, track_rows, meta
++
++
++def main():
++    ap = argparse.ArgumentParser(description="批 A2：气味模糊性验证探针")
++    ap.add_argument("--seeds", type=str, default="173,174,175,176,177,178,179,180",
++                    help="逗号分隔种子（默认 173-180，与历史 42-172 错开）")
++    ap.add_argument("--ticks", type=int, default=2000)
++    ap.add_argument("--sample", type=int, default=100, help="汇总采样间隔")
++    ap.add_argument("--track-every", type=int, default=10, help="轨迹采样间隔（tick）")
++    ap.add_argument("--arms", type=str, default="both", choices=["both", "on", "off"])
++    ap.add_argument("--out", type=str, default="results/batch_a2_fuzziness.csv")
++    ap.add_argument("--track-out", type=str, default="results/batch_a2_track.csv")
++    ap.add_argument("--append", action="store_true")
++    args = ap.parse_args()
++
++    seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
++    overlap = sorted(set(seeds) & SEEDS_USED)
++    if overlap:
++        print(f"🔴 种子 {overlap} 与已用区间 42-172 重叠 ⇒ 违反 R255。中止。", file=sys.stderr)
++        sys.exit(2)
++
++    arms = ([True, False] if args.arms == "both"
++            else [args.arms == "on"])
++
++    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
++    summary_header = ["seed", "arm", "tick", "pop", "dist_mean", "dist_median",
++                      "dist_min", "on_patch_frac", "found_frac", "ms_per_tick"]
++    track_header = ["seed", "arm", "tick", "dist_bin", "n", "n_moved", "angle_mean",
++                    "angle_median", "smell_mean", "on_patch_frac"]
++
++    need_header_s = (not args.append) or (not os.path.exists(args.out))
++    need_header_t = (not args.append) or (not os.path.exists(args.track_out))
++
++    all_summary = []
++    all_track = []
++    metas = []
++
++    for smell_on in arms:
++        for seed in seeds:
++            arm = "sm_on" if smell_on else "sm_off"
++            print(f"▶ seed={seed} arm={arm} ...", flush=True)
++            srows, trows, meta = run_one(seed, args.ticks, args.sample, smell_on, args.track_every)
++            all_summary.extend(srows)
++            all_track.extend(trows)
++            metas.append(meta)
++            print(f"  ✓ pop={meta['final_pop']} 耗时={meta['elapsed_sec']}s "
++                  f"初始距离均值={meta['init_dist_mean']} 斑块中心={meta['patch_centroid']}", flush=True)
++
++    # 写汇总 CSV
++    with open(args.out, "a" if args.append else "w", newline="", encoding="utf-8") as f:
++        w = csv.DictWriter(f, fieldnames=summary_header, extrasaction="ignore")
++        if need_header_s:
++            w.writeheader()
++        w.writerows(all_summary)
++
++    # 写轨迹 CSV
++    with open(args.track_out, "a" if args.append else "w", newline="", encoding="utf-8") as f:
++        w = csv.DictWriter(f, fieldnames=track_header, extrasaction="ignore")
++        if need_header_t:
++            w.writeheader()
++        w.writerows(all_track)
++
++    # summary.json
++    import json
++    out_json = os.path.splitext(args.out)[0] + ".summary.json"
++    with open(out_json, "w", encoding="utf-8") as f:
++        json.dump({"metas": metas, "n_summary_rows": len(all_summary),
++                   "n_track_rows": len(all_track), "config": vars(args)}, f, indent=2, ensure_ascii=False)
++
++    print(f"\n✅ 完成：{len(all_summary)} 汇总行 + {len(all_track)} 轨迹行")
++    print(f"   汇总：{args.out}")
++    print(f"   轨迹：{args.track_out}")
++    print(f"   meta：{out_json}")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.46.1.windows.1
+
+
+From 2de36cad01ca673af21a01b762d71b6b3ab7dbf0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=9D=92=E6=A2=A7?= <qingwu@the-world.local>
+Date: Wed, 30 Sep 2026 15:57:05 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?[=E4=BA=91=E7=AB=AF=E5=BC=80=E5=8F=91=C2=B7?=
+ =?UTF-8?q?=E9=9D=92=E6=A2=A7]=20=E6=89=B9A2=20R286=E4=BF=AE=E5=A4=8D:?=
+ =?UTF-8?q?=E5=88=86=E5=B1=82=E6=8A=95=E6=94=BE(5/10/20/40=E6=A0=BC?=
+ =?UTF-8?q?=E6=AF=8F=E7=8E=AF250)+pop1000+ticks500?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 原随机投放均值277格物理不可达(需2200tick超总时长+能量不够)
+- 分层投放把距离从随机副产品变成自变量,各距离带样本可控
+- 冒烟通过:t=20时各距离带3-13个移动个体,angle/气味数据正常
+- 预注册稿同步更新
+---
+ ...0\241\347\263\212\346\200\247-20260930.md" | 16 +++---
+ experiments/batch_a2_smell_fuzziness_probe.py | 55 ++++++++++++++++++-
+ 2 files changed, 61 insertions(+), 10 deletions(-)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md"
+index ca08bd0b..8e947eda 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\351\242\204\346\263\250\345\206\214-\346\211\271A2\346\260\224\345\221\263\346\250\241\347\263\212\346\200\247-20260930.md"
+@@ -29,28 +29,30 @@
+   - 模糊信息：近距离 angle_mean 显著 < 90°（随机），远距离 ≈ 90°
+ 
+ ### 方法2：远距投放寻获时间（佐证）
+-- 单斑块世界随机投放（平均距离 ~280 格，天然远距）
+-- 统计每个生物首次到达斑块的 tick（found_frac 随时间变化）
++- 分层投放（固定距离环），统计每个生物首次到达斑块的 tick（found_frac 随时间变化）
+ - **判据**：
+   - 精确信息：寻获时间 ≈ 距离/速度（直奔）
+   - 模糊信息：寻获时间 ≈ 瞎逛时间 + 碰巧进气味范围
+ 
+-## 三、实验配置
++## 三、实验配置（R286 修订：分层投放）
+ 
+ | 参数 | 值 | 说明 |
+ |---|---|---|
+ | 世界 | 480×960 | k=2.5 时间压缩 |
+ | patches | **1** | 单斑块（消除多斑块混淆） |
+-| pop | 500 | 单斑块养不活太多，500 保证前 100tick 有足够样本 |
++| pop | 1000 | 每距离环 250 个体 |
++| **投放方式** | **分层投放** | 固定距离环 5/10/20/40 格，每环 250 个体（R286 修复） |
+ | rgm | 1.195 | 与批 A 同装置 |
+ | bg_low | frac=0.4, cap_mult=0.05 | 与批 A 同装置 |
+ | rd | 全开 | 与批 A 同装置 |
+-| ticks | 2000 | 足够观察寻获+灭绝 |
+-| 轨迹采样 | 每 20 tick | 平衡数据量与精度 |
+-| 汇总采样 | 每 100 tick | |
++| ticks | 500 | 前 50tick 有足够轨迹样本；初始能量 60 只够 ~80tick |
++| 轨迹采样 | 每 10 tick | 加密采样，保证前 50tick 有 5 个采样点 |
++| 汇总采样 | 每 50 tick | |
+ | seeds | 173-180（8 seed） | 与历史 42-172 错开（R255） |
+ | arms | sm_on（food+use_in_move）vs sm_off（无气味） | 唯一变量=气味 |
+ 
++**R286 修复说明**：原随机投放均值 277 格，速度 0.125 格/tick ⇒ 需 2200tick 直线行走，超总时长且能量不够 ⇒ 开局即死。分层投放把"距离"从随机副产品变成自变量，各距离带样本量可控。
++
+ ## 四、主门判据
+ 
+ ### 主门 A：近距离角度误差显著低于随机
+diff --git a/experiments/batch_a2_smell_fuzziness_probe.py b/experiments/batch_a2_smell_fuzziness_probe.py
+index e447fe56..82c3cdf8 100644
+--- a/experiments/batch_a2_smell_fuzziness_probe.py
++++ b/experiments/batch_a2_smell_fuzziness_probe.py
+@@ -33,7 +33,7 @@ from experiments.steady_k_probe import rescale_config, apply_post_build
+ 
+ 
+ # 与 S2/S3 同装置基线（k=2.5 时间压缩）
+-DEVICE = dict(rows=480, cols=960, patches=1, pop=500, rgm=1.195,
++DEVICE = dict(rows=480, cols=960, patches=1, pop=1000, rgm=1.195,
+               bg_low_prod_frac=0.4, bg_low_cap_mult=0.05)
+ S1_BASE = dict(rows=480, cols=960, speed_max=0.125, gain=0.125,
+                subdiv=80, k=2.5, max_count=30000)
+@@ -86,9 +86,49 @@ def _torus_distance(cells: np.ndarray, to_r: int, to_c: int,
+     return np.sqrt(dr ** 2 + dc ** 2)
+ 
+ 
++def _stratified_placement(eng, patch_r: int, patch_c: int,
++                          rings: list[int], per_ring: int,
++                          rng: np.random.Generator) -> dict[int, int]:
++    """分层投放：把前 len(rings)*per_ring 个生物按距离环投放。
++
++    每个环在以斑块中心为圆心、半径≈D 的圆上随机选点（球面模运算）。
++    返回 {id: 初始距离} 用于 meta 记录。
++    🔴 只改初始位置，不改能量/基因/世界规则。
++    """
++    rows, cols = eng.world.rows, eng.world.cols
++    N = min(len(eng._id), len(rings) * per_ring)
++    id_to_dist = {}
++    idx = 0
++    for D in rings:
++        for _ in range(per_ring):
++            if idx >= N:
++                break
++            # 圆上随机角度
++            theta = rng.uniform(0, 2 * np.pi)
++            dr = int(round(D * np.sin(theta)))
++            dc = int(round(D * np.cos(theta)))
++            r = (patch_r + dr) % rows
++            c = (patch_c + dc) % cols
++            cell = r * cols + c
++            eng._flat[idx] = cell
++            # 同步子位置（格中心）
++            if hasattr(eng, "_sub_r") and idx < len(eng._sub_r):
++                eng._sub_r[idx] = 0.5
++                eng._sub_c[idx] = 0.5
++            oid = int(eng._id[idx])
++            id_to_dist[oid] = D
++            idx += 1
++    return id_to_dist
++
++
+ def run_one(seed: int, ticks: int, sample: int, smell_on: bool,
+-            track_every: int = 5) -> tuple[list[dict], list[dict], dict]:
+-    """跑一个 run，返回 (汇总行列表, 轨迹行列表, meta)。"""
++            track_every: int = 5,
++            rings: tuple = (5, 10, 20, 40),
++            per_ring: int = 250) -> tuple[list[dict], list[dict], dict]:
++    """跑一个 run，返回 (汇总行列表, 轨迹行列表, meta)。
++
++    R286 修复：分层投放（固定距离环），解决随机投放均值277格物理不可达问题。
++    """
+     c = SimConfig(seed=seed)
+     c.world.rows, c.world.cols = DEVICE["rows"], DEVICE["cols"]
+     c.resources.distribution = "patchy"
+@@ -114,6 +154,11 @@ def run_one(seed: int, ticks: int, sample: int, smell_on: bool,
+ 
+     patch_r, patch_c = _patch_centroid(eng)
+     rows, cols = eng.world.rows, eng.world.cols
++    rng = np.random.default_rng(seed + 9999)  # 投放用独立 rng，不影响仿真 rng
++
++    # 🔴 R286 修复：分层投放（固定距离环）
++    init_id_dist = _stratified_placement(eng, patch_r, patch_c, list(rings), per_ring, rng)
++
+     N0 = len(eng._id)
+ 
+     # 记录初始位置（用于方法2的寻获时间）
+@@ -227,6 +272,10 @@ def run_one(seed: int, ticks: int, sample: int, smell_on: bool,
+         "patch_centroid": f"({patch_r},{patch_c})",
+         "init_dist_mean": round(float(init_dist.mean()), 2),
+         "init_dist_median": round(float(np.median(init_dist)), 2),
++        "placement": "stratified",
++        "rings": list(rings),
++        "per_ring": per_ring,
++        "n_placed": len(init_id_dist),
+         "final_pop": len(eng._id),
+         "elapsed_sec": round(time.perf_counter() - t0, 1),
+     }
+-- 
+2.46.1.windows.1
+

@@ -1,0 +1,3880 @@
+From 335842ce672a3042044e9bf1f0a720b7a4c19070 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanhou@the-world.local>
+Date: Sun, 4 Oct 2026 12:31:43 +0800
+Subject: [PATCH 1/5] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C=E8=88=9F?=
+ =?UTF-8?q?]=20L1:=20experiments/tier1=5Freadout.py=20+=2028=20=E9=9D=B6?=
+ =?UTF-8?q?=E5=90=91=E6=B5=8B=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+读 the-world-data/p1c_erase/*.summary.json（4 seed），按 R363 已锁判据
+（设计-R358-T1 §三）计算 pep_frac_read_moore / pep_d_med / ΔR / K64，
+含一致性锁（≥3/4 同带）、池化离界≥2×SD、H2 需 SNR≥2。
+输出 markdown 附表（砚判读稿直接引用）+ 结论行。
+真实数据跑判：H1 x4/4，与 PI 初步读数一致。
+
+测试覆盖：classify_band 各指标边界、一致性锁、池化离界余量、
+H2 SNR 计算、全流程端到端（H1/H2/不定）、K64 次判列、ΔR 计算。
+---
+ experiments/tier1_readout.py | 313 +++++++++++++++++++++++++++++++++++
+ tests/test_tier1_readout.py  | 297 +++++++++++++++++++++++++++++++++
+ 2 files changed, 610 insertions(+)
+ create mode 100644 experiments/tier1_readout.py
+ create mode 100644 tests/test_tier1_readout.py
+
+diff --git a/experiments/tier1_readout.py b/experiments/tier1_readout.py
+new file mode 100644
+index 00000000..923734a1
+--- /dev/null
++++ b/experiments/tier1_readout.py
+@@ -0,0 +1,313 @@
++"""Tier-1 擦除集判读（P1-c 根因判别）—— 读 summary.json，按 R363 已锁判据出附表 + 结论。
++
++用法::
++
++    python experiments/tier1_readout.py [--data-dir PATH] [--out PATH]
++
++判据来源：``docs/设计文档/设计-R358-T1-根因判别-H1H2-20261003.md`` §三（天平 R363 锁定）。
++数据落点：``the-world-data/p1c_erase/*.summary.json``（4 seed）。
++
++退出码：0=H1, 1=H2, 2=不定, 3=数据不足。
++"""
++
++import argparse
++import json
++import math
++import sys
++from collections import Counter
++from pathlib import Path
++from typing import Dict, List, Optional, Tuple
++
++THRESHOLDS = {
++    "pep_frac_read_moore": {"H1": 0.80, "H2": 0.50},
++    "pep_d_med":            {"H1": 2.0,  "H2": 3.0},
++    "delta_R":              {"H1": 0.05, "H2": 0.25},
++    "consensus_min":        3,
++    "consensus_total":      4,
++    "pool_margin_sd":       2.0,
++    "h2_snr_min":           2.0,
++    "p1c_baseline":         0.862,
++}
++
++SEEDS = [207, 208, 209, 210]
++
++
++def classify_band(value: float, metric: str) -> str:
++    """单值判带：H1 / gray / H2。
++
++    pep_frac_read_moore: ≥0.80→H1, ≤0.50→H2
++    pep_d_med:           ≤2.0→H1, ≥3.0→H2
++    delta_R:             ≤0.05→H1, ≥0.25→H2
++    """
++    th = THRESHOLDS[metric]
++    if metric in ("pep_d_med", "delta_R"):
++        if value <= th["H1"]:
++            return "H1"
++        if value >= th["H2"]:
++            return "H2"
++    else:
++        if value >= th["H1"]:
++            return "H1"
++        if value <= th["H2"]:
++            return "H2"
++    return "gray"
++
++
++def _stdev(values: List[float]) -> float:
++    n = len(values)
++    if n < 2:
++        return 0.0
++    mu = sum(values) / n
++    return math.sqrt(sum((x - mu) ** 2 for x in values) / (n - 1))
++
++
++def load_seed(data_dir: Path, seed: int) -> Optional[Dict]:
++    """读单个 summary.json，提取判据所需字段。"""
++    fp = data_dir / f"p1c_erase_s{seed}_t3000.summary.json"
++    if not fp.exists():
++        return None
++    with fp.open(encoding="utf-8") as f:
++        d = json.load(f)
++    p = d["pooled"]
++    return {
++        "seed": seed,
++        "pep_frac_read_moore": p["pep"]["frac_read_moore"],
++        "pep_d_med": p["pep"]["d_med"],
++        "pos_frac_read_moore": p["pos_frac_read_moore"],
++        "delta_R": p["pos_frac_read_moore"] - p["pep"]["frac_read_moore"],
++        "pep64_frac_read_moore": p["pep64"]["frac_read_moore"],
++        "n_samples": p["n_samples"],
++    }
++
++
++def load_all_seeds(data_dir: Path) -> Dict[int, Dict]:
++    result = {}
++    for seed in SEEDS:
++        s = load_seed(data_dir, seed)
++        if s is not None:
++            result[seed] = s
++    return result
++
++
++def check_consensus(bands: List[str]) -> Tuple[bool, Optional[str], str]:
++    """≥3/4 同带 ⇒ True。gray 不参与同带计数。"""
++    cnt = Counter(b for b in bands if b != "gray")
++    if not cnt:
++        return False, None, "全部灰区"
++    top_band, top_n = cnt.most_common(1)[0]
++    total = THRESHOLDS["consensus_total"]
++    ok = top_n >= THRESHOLDS["consensus_min"]
++    return ok, top_band if ok else None, f"{top_n}/{total} {top_band}"
++
++
++def check_pool_margin(pool_val: float, sd: float, metric: str) -> Tuple[bool, str]:
++    """池化值离最近带界 ≥ 2×SD。"""
++    band = classify_band(pool_val, metric)
++    th = THRESHOLDS[metric]
++    if band == "H1":
++        if metric in ("pep_d_med", "delta_R"):
++            boundary = th["H1"]
++            margin = boundary - pool_val
++        else:
++            boundary = th["H1"]
++            margin = pool_val - boundary
++    elif band == "H2":
++        if metric in ("pep_d_med", "delta_R"):
++            boundary = th["H2"]
++            margin = pool_val - boundary
++        else:
++            boundary = th["H2"]
++            margin = boundary - pool_val
++    else:
++        return False, f"池化值 {pool_val:.4f} 在灰区，离界检查不适用"
++    required = THRESHOLDS["pool_margin_sd"] * sd
++    ok = margin >= required
++    return ok, f"|{pool_val:.4f} - {boundary}| = {margin:.4f} {'>=' if ok else '<'} {required:.4f} (2xSD={sd:.4f})"
++
++
++def judge(data_dir: Path) -> Dict:
++    """主判读流程，返回结构化结果。"""
++    seeds = load_all_seeds(data_dir)
++    metrics = ["pep_frac_read_moore", "pep_d_med", "delta_R"]
++    result: Dict = {
++        "seeds": seeds,
++        "n_loaded": len(seeds),
++        "metrics": {},
++        "k64": {},
++        "notes": [],
++        "final_verdict": None,
++    }
++
++    if len(seeds) < 2:
++        result["final_verdict"] = "不定（数据不足）"
++        return result
++
++    for metric in metrics:
++        per_seed = {s: d[metric] for s, d in seeds.items()}
++        vals = list(per_seed.values())
++        pool = sum(vals) / len(vals)
++        sd = _stdev(vals)
++        bands = [classify_band(v, metric) for v in vals]
++        con_ok, con_band, con_msg = check_consensus(bands)
++        margin_ok, margin_msg = check_pool_margin(pool, sd, metric)
++        result["metrics"][metric] = {
++            "per_seed": per_seed,
++            "pool_mean": pool,
++            "sd": sd,
++            "bands": dict(zip(seeds.keys(), bands)),
++            "consensus_ok": con_ok,
++            "consensus_band": con_band,
++            "consensus_msg": con_msg,
++            "margin_ok": margin_ok,
++            "margin_msg": margin_msg,
++        }
++
++    k64_vals = {s: d["pep64_frac_read_moore"] for s, d in seeds.items()}
++    k64_pool = sum(k64_vals.values()) / len(k64_vals)
++    k64_sd = _stdev(list(k64_vals.values()))
++    k64_bands = [classify_band(v, "pep_frac_read_moore") for v in k64_vals.values()]
++    k64_con_ok, k64_con_band, k64_con_msg = check_consensus(k64_bands)
++    result["k64"] = {
++        "per_seed": k64_vals,
++        "pool_mean": k64_pool,
++        "sd": k64_sd,
++        "bands": dict(zip(seeds.keys(), k64_bands)),
++        "consensus_ok": k64_con_ok,
++        "consensus_band": k64_con_band,
++        "consensus_msg": k64_con_msg,
++    }
++
++    primary_bands = [result["metrics"][m]["consensus_band"] for m in metrics]
++    all_consensus = all(result["metrics"][m]["consensus_ok"] for m in metrics)
++    all_margin = all(result["metrics"][m]["margin_ok"] for m in metrics)
++    non_gray = [b for b in primary_bands if b is not None]
++    primary_agree = len(set(non_gray)) <= 1 and len(non_gray) == len(primary_bands)
++
++    if not all_consensus:
++        failed = [m for m in metrics if not result["metrics"][m]["consensus_ok"]]
++        result["final_verdict"] = "不定（一致性锁不满足）"
++        result["notes"].append(f"一致性锁失败: {', '.join(failed)}")
++    elif not primary_agree:
++        result["final_verdict"] = "不定（主判据间方向冲突）"
++        result["notes"].append(f"主判据方向: {primary_bands}")
++    else:
++        verdict = non_gray[0]
++        if not all_margin:
++            failed = [m for m in metrics if not result["metrics"][m]["margin_ok"]]
++            result["final_verdict"] = f"{verdict}（离界余量不足，弱信号）"
++            result["notes"].append(f"离界余量不足: {', '.join(failed)}")
++        elif verdict == "H2":
++            pep_pool = result["metrics"]["pep_frac_read_moore"]["pool_mean"]
++            pep_sd = result["metrics"]["pep_frac_read_moore"]["sd"]
++            snr = (THRESHOLDS["p1c_baseline"] - pep_pool) / pep_sd if pep_sd > 0 else float("inf")
++            if snr < THRESHOLDS["h2_snr_min"]:
++                result["final_verdict"] = f"不定（H2 但 SNR={snr:.2f}<2）"
++                result["notes"].append(f"SNR = {snr:.2f} < {THRESHOLDS['h2_snr_min']}")
++            else:
++                result["final_verdict"] = f"H2(SNR={snr:.2f}>=2)"
++        else:
++            result["final_verdict"] = verdict
++
++    return result
++
++
++def format_markdown(r: Dict) -> str:
++    seeds = r["seeds"]
++    seed_ids = sorted(seeds.keys())
++    lines = [
++        "# Tier-1 擦除集判读附表（P1-c 根因判别）",
++        "",
++        "> 判据来源：`docs/设计文档/设计-R358-T1-根因判别-H1H2-20261003.md` §三（天平 R363 锁定）",
++        "> 数据：`the-world-data/p1c_erase/*.summary.json`",
++        "",
++        "## 附表 1：逐 seed 主判据",
++        "",
++        "| seed | `pep_frac_read_moore` | band | `pep_d_med` | band | dR (pos-pep) | band |",
++        "|---:|---:|:---:|---:|:---:|---:|:---:|",
++    ]
++    for s in seed_ids:
++        d = seeds[s]
++        lines.append(
++            f"| {s} "
++            f"| {d['pep_frac_read_moore']:.4f} | {classify_band(d['pep_frac_read_moore'], 'pep_frac_read_moore')} "
++            f"| {d['pep_d_med']:.4f} | {classify_band(d['pep_d_med'], 'pep_d_med')} "
++            f"| {d['delta_R']:.4f} | {classify_band(d['delta_R'], 'delta_R')} |"
++        )
++
++    lines += ["", "## 附表 2：池化统计与一致性锁", ""]
++    lines.append("| 指标 | 池化均值 | seed-SD | 一致 | 离界 |")
++    lines.append("|---|---:|---:|:---:|---|")
++    for metric in ["pep_frac_read_moore", "pep_d_med", "delta_R"]:
++        m = r["metrics"][metric]
++        con = "PASS" if m["consensus_ok"] else "FAIL"
++        lines.append(
++            f"| `{metric}` | {m['pool_mean']:.4f} | {m['sd']:.4f} "
++            f"| {con} ({m['consensus_msg']}) | {m['margin_msg']} |"
++        )
++
++    k = r["k64"]
++    lines += [
++        "",
++        "## 附表 3：K64 次判列",
++        "",
++        "| seed | `pep64_frac_read_moore` | band |",
++        "|---:|---:|:---:|",
++    ]
++    for s in seed_ids:
++        v = k["per_seed"][s]
++        lines.append(f"| {s} | {v:.4f} | {classify_band(v, 'pep_frac_read_moore')} |")
++    lines.append(f"| **pool** | **{k['pool_mean']:.4f}** | — |")
++
++    lines += [
++        "",
++        "---",
++        "",
++        f"**结论：{r['final_verdict']}**",
++        "",
++    ]
++    if r["notes"]:
++        for n in r["notes"]:
++            lines.append(f"- {n}")
++        lines.append("")
++    return "\n".join(lines)
++
++
++def main():
++    ap = argparse.ArgumentParser(description="Tier-1 擦除集判读（summary.json → 附表 + 结论）")
++    ap.add_argument("--data-dir", default=None,
++                    help="summary.json 所在目录（默认：仓库根 the-world-data/p1c_erase/）")
++    ap.add_argument("--out", default=None, help="输出 Markdown 路径（默认 stdout）")
++    args = ap.parse_args()
++
++    if args.data_dir:
++        data_dir = Path(args.data_dir)
++    else:
++        data_dir = Path.cwd() / "the-world-data" / "p1c_erase"
++        if not data_dir.exists():
++            data_dir = Path(__file__).resolve().parent.parent / "the-world-data" / "p1c_erase"
++
++    if not data_dir.exists():
++        print(f"数据目录不存在: {data_dir}", file=sys.stderr)
++        return 3
++
++    r = judge(data_dir)
++    md = format_markdown(r)
++
++    if args.out:
++        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
++        Path(args.out).write_text(md, encoding="utf-8")
++    else:
++        print(md)
++
++    v = r["final_verdict"] or ""
++    if v.startswith("H1"):
++        return 0
++    if v.startswith("H2"):
++        return 1
++    if v.startswith("不定"):
++        return 2
++    return 3
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/test_tier1_readout.py b/tests/test_tier1_readout.py
+new file mode 100644
+index 00000000..efd8bed2
+--- /dev/null
++++ b/tests/test_tier1_readout.py
+@@ -0,0 +1,297 @@
++"""Tier-1 readout 靶向测试——合成 summary.json 钉判据边界。
++
++覆盖：
++  ① classify_band 各指标边界（H1/H2/灰区）
++  ② 一致性锁（≥3/4 同带 PASS、<3 FAIL）
++  ③ 池化离界余量（≥2×SD PASS、<2×SD FAIL）
++  ④ H2 SNR 门（≥2 PASS、<2 FAIL）
++  ⑤ 全流程端到端（合成数据 → H1 判定）
++  ⑥ 全流程端到端（合成数据 → H2 判定 + SNR 检查）
++  ⑦ K64 次判列
++"""
++
++import json
++import math
++import sys
++from pathlib import Path
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from experiments.tier1_readout import (
++    THRESHOLDS,
++    check_consensus,
++    check_pool_margin,
++    classify_band,
++    format_markdown,
++    judge,
++)
++
++
++# ---------------------------------------------------------------------------
++# helpers
++# ---------------------------------------------------------------------------
++
++def _make_summary(
++    seed: int,
++    pep_frac_read_moore: float = 0.90,
++    pep_d_med: float = 1.0,
++    pos_frac_read_moore: float = 0.86,
++    pep64_frac_read_moore: float = 0.82,
++    n_samples: int = 30,
++) -> dict:
++    return {
++        "probe": "p1c_erasure_probe",
++        "seed": seed,
++        "ticks": 3000,
++        "pooled": {
++            "n_samples": n_samples,
++            "pos_frac_read_moore": pos_frac_read_moore,
++            "pep": {
++                "frac_read_moore": pep_frac_read_moore,
++                "d_med": pep_d_med,
++            },
++            "pep64": {
++                "frac_read_moore": pep64_frac_read_moore,
++            },
++        },
++    }
++
++
++def _write_seeds(tmp_path: Path, seeds: dict) -> Path:
++    """写合成 summary.json 到 tmp_path，返回 data_dir。"""
++    data_dir = tmp_path / "data"
++    data_dir.mkdir()
++    for seed, kwargs in seeds.items():
++        obj = _make_summary(seed=seed, **kwargs)
++        fp = data_dir / f"p1c_erase_s{seed}_t3000.summary.json"
++        fp.write_text(json.dumps(obj), encoding="utf-8")
++    return data_dir
++
++
++# ---------------------------------------------------------------------------
++# ① classify_band 边界
++# ---------------------------------------------------------------------------
++
++class TestClassifyBand:
++    # pep_frac_read_moore: ≥0.80→H1, ≤0.50→H2, else gray
++    def test_pep_frac_read_moore_h1_boundary(self):
++        assert classify_band(0.80, "pep_frac_read_moore") == "H1"
++        assert classify_band(0.90, "pep_frac_read_moore") == "H1"
++
++    def test_pep_frac_read_moore_h2_boundary(self):
++        assert classify_band(0.50, "pep_frac_read_moore") == "H2"
++        assert classify_band(0.30, "pep_frac_read_moore") == "H2"
++
++    def test_pep_frac_read_moore_gray(self):
++        assert classify_band(0.65, "pep_frac_read_moore") == "gray"
++        assert classify_band(0.799, "pep_frac_read_moore") == "gray"
++
++    # pep_d_med: ≤2.0→H1, ≥3.0→H2, else gray
++    def test_pep_d_med_h1_boundary(self):
++        assert classify_band(2.0, "pep_d_med") == "H1"
++        assert classify_band(1.0, "pep_d_med") == "H1"
++
++    def test_pep_d_med_h2_boundary(self):
++        assert classify_band(3.0, "pep_d_med") == "H2"
++        assert classify_band(5.0, "pep_d_med") == "H2"
++
++    def test_pep_d_med_gray(self):
++        assert classify_band(2.5, "pep_d_med") == "gray"
++
++    # delta_R: ≤0.05→H1, ≥0.25→H2, else gray
++    def test_delta_r_h1_boundary(self):
++        assert classify_band(0.05, "delta_R") == "H1"
++        assert classify_band(-0.03, "delta_R") == "H1"
++        assert classify_band(0.0, "delta_R") == "H1"
++
++    def test_delta_r_h2_boundary(self):
++        assert classify_band(0.25, "delta_R") == "H2"
++        assert classify_band(0.50, "delta_R") == "H2"
++
++    def test_delta_r_gray(self):
++        assert classify_band(0.15, "delta_R") == "gray"
++
++
++# ---------------------------------------------------------------------------
++# ② 一致性锁
++# ---------------------------------------------------------------------------
++
++class TestConsensus:
++    def test_3_of_4_pass(self):
++        ok, band, msg = check_consensus(["H1", "H1", "H1", "H2"])
++        assert ok
++        assert band == "H1"
++
++    def test_4_of_4_pass(self):
++        ok, band, msg = check_consensus(["H1", "H1", "H1", "H1"])
++        assert ok
++        assert band == "H1"
++
++    def test_2_of_4_fail(self):
++        ok, band, msg = check_consensus(["H1", "H1", "H2", "H2"])
++        assert not ok
++        assert band is None
++
++    def test_gray_excluded(self):
++        ok, band, msg = check_consensus(["H1", "H1", "H1", "gray"])
++        assert ok
++        assert band == "H1"
++
++    def test_all_gray(self):
++        ok, band, msg = check_consensus(["gray", "gray", "gray", "gray"])
++        assert not ok
++
++
++# ---------------------------------------------------------------------------
++# ③ 池化离界余量
++# ---------------------------------------------------------------------------
++
++class TestPoolMargin:
++    def test_h1_pass_large_margin(self):
++        ok, msg = check_pool_margin(0.90, 0.02, "pep_frac_read_moore")
++        assert ok
++
++    def test_h1_fail_small_margin(self):
++        ok, msg = check_pool_margin(0.82, 0.02, "pep_frac_read_moore")
++        assert not ok
++
++    def test_h2_pass(self):
++        ok, msg = check_pool_margin(0.30, 0.05, "pep_frac_read_moore")
++        assert ok
++
++    def test_gray_fail(self):
++        ok, msg = check_pool_margin(0.65, 0.01, "pep_frac_read_moore")
++        assert not ok
++
++    def test_d_med_h1_pass(self):
++        ok, msg = check_pool_margin(1.0, 0.3, "pep_d_med")
++        assert ok
++
++    def test_delta_r_h1_pass(self):
++        ok, msg = check_pool_margin(-0.03, 0.005, "delta_R")
++        assert ok
++
++
++# ---------------------------------------------------------------------------
++# ④ 全流程 → H1
++# ---------------------------------------------------------------------------
++
++class TestJudgeH1:
++    def test_all_h1_clear(self, tmp_path):
++        data_dir = _write_seeds(tmp_path, {
++            207: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.86, "pep64_frac_read_moore": 0.82},
++            208: {"pep_frac_read_moore": 0.91, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.87, "pep64_frac_read_moore": 0.83},
++            209: {"pep_frac_read_moore": 0.89, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.85, "pep64_frac_read_moore": 0.81},
++            210: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.86, "pep64_frac_read_moore": 0.82},
++        })
++        r = judge(data_dir)
++        assert r["final_verdict"].startswith("H1")
++        md = format_markdown(r)
++        assert "结论" in md
++        assert "H1" in md
++
++    def test_3_of_4_h1_pass(self, tmp_path):
++        data_dir = _write_seeds(tmp_path, {
++            207: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.86},
++            208: {"pep_frac_read_moore": 0.91, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.87},
++            209: {"pep_frac_read_moore": 0.89, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.85},
++            210: {"pep_frac_read_moore": 0.65, "pep_d_med": 2.5,
++                   "pos_frac_read_moore": 0.80},
++        })
++        r = judge(data_dir)
++        assert "H1" in r["final_verdict"]
++
++
++# ---------------------------------------------------------------------------
++# ⑤ 全流程 → H2（需 SNR≥2）
++# ---------------------------------------------------------------------------
++
++class TestJudgeH2:
++    def test_h2_with_snr_pass(self, tmp_path):
++        vals = [0.40, 0.42, 0.38, 0.41]
++        data_dir = _write_seeds(tmp_path, {
++            s: {"pep_frac_read_moore": v, "pep_d_med": 4.0,
++                 "pos_frac_read_moore": 0.86, "pep64_frac_read_moore": 0.40}
++            for s, v in zip([207, 208, 209, 210], vals)
++        })
++        r = judge(data_dir)
++        assert r["final_verdict"].startswith("H2")
++
++    def test_h2_snr_fail(self):
++        # 数学上 margin 通过 + SNR<2 在 baseline=0.862 时不可达（H2≤0.50 约束），
++        # 直接验证 SNR 计算逻辑：SNR = (baseline - pool) / SD
++        pool, sd, baseline = 0.40, 0.25, 0.862
++        snr = (baseline - pool) / sd
++        assert snr == pytest.approx(1.848, abs=0.01)
++        assert snr < THRESHOLDS["h2_snr_min"]
++
++
++# ---------------------------------------------------------------------------
++# ⑥ 一致性锁失败 → 不定
++# ---------------------------------------------------------------------------
++
++class TestJudgeIndecisive:
++    def test_consensus_fail(self, tmp_path):
++        data_dir = _write_seeds(tmp_path, {
++            207: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.86},
++            208: {"pep_frac_read_moore": 0.91, "pep_d_med": 1.0,
++                   "pos_frac_read_moore": 0.87},
++            209: {"pep_frac_read_moore": 0.40, "pep_d_med": 4.0,
++                   "pos_frac_read_moore": 0.80},
++            210: {"pep_frac_read_moore": 0.38, "pep_d_med": 4.0,
++                   "pos_frac_read_moore": 0.78},
++        })
++        r = judge(data_dir)
++        assert "不定" in r["final_verdict"]
++
++
++# ---------------------------------------------------------------------------
++# ⑦ K64 次判列
++# ---------------------------------------------------------------------------
++
++class TestK64:
++    def test_k64_recorded(self, tmp_path):
++        data_dir = _write_seeds(tmp_path, {
++            207: {"pep64_frac_read_moore": 0.82},
++            208: {"pep64_frac_read_moore": 0.83},
++            209: {"pep64_frac_read_moore": 0.81},
++            210: {"pep64_frac_read_moore": 0.82},
++        })
++        r = judge(data_dir)
++        assert r["k64"]["pool_mean"] == pytest.approx(0.82, abs=0.01)
++        assert all(b == "H1" for b in r["k64"]["bands"].values())
++
++    def test_k64_in_markdown(self, tmp_path):
++        data_dir = _write_seeds(tmp_path, {
++            s: {"pep64_frac_read_moore": 0.82} for s in [207, 208, 209, 210]
++        })
++        r = judge(data_dir)
++        md = format_markdown(r)
++        assert "K64" in md
++        assert "pep64_frac_read_moore" in md
++
++
++# ---------------------------------------------------------------------------
++# ⑧ delta_R 计算正确性
++# ---------------------------------------------------------------------------
++
++class TestDeltaR:
++    def test_delta_r_computed_correctly(self, tmp_path):
++        data_dir = _write_seeds(tmp_path, {
++            207: {"pep_frac_read_moore": 0.90, "pos_frac_read_moore": 0.86},
++            208: {"pep_frac_read_moore": 0.88, "pos_frac_read_moore": 0.84},
++            209: {"pep_frac_read_moore": 0.92, "pos_frac_read_moore": 0.88},
++            210: {"pep_frac_read_moore": 0.90, "pos_frac_read_moore": 0.86},
++        })
++        r = judge(data_dir)
++        assert r["seeds"][207]["delta_R"] == pytest.approx(-0.04, abs=1e-9)
++        assert r["seeds"][208]["delta_R"] == pytest.approx(-0.04, abs=1e-9)
+-- 
+2.46.1.windows.1
+
+
+From c32fdae86364f96857e9ccf1faf677eed00481a8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanhou@the-world.local>
+Date: Sun, 4 Oct 2026 12:46:09 +0800
+Subject: [PATCH 2/5] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C=E8=88=9F?=
+ =?UTF-8?q?]=20L1(R370=E6=94=B9=E9=81=93):=20=E4=BF=AE=E5=A4=8D=20tools/ti?=
+ =?UTF-8?q?er1=5Fjudge.py=20+=2034=20=E8=BE=B9=E7=95=8C=E6=B5=8B=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+删除上轮误建的 experiments/tier1_readout.py（砚已交付本脚本）。
+tools/tier1_judge.py 修复 5 处 bug（R370 改道，判据源：设计-R358-T1 §3.1-3.3）：
+  ① delta_R：CSV 无此列，改为现算 pos_frac_read_moore - pep_frac_read_moore
+  ② judge_single_metric：pep_d_med/delta_R 方向反（原 ≥H1⇒H1，现 ≤H1⇒H1）
+  ③ read_p1c_csv：缺列显式 fail-loud 并列出缺哪些列；NaN 行进 stdev 前过滤
+  ④ judge_tier1 seed 综合判：三指标多数决 → P1/P2 同向锁（§3.1 异向⇒判据内冲突）
+  ⑤ compute_snr：|ΔR_pool|/SD → (0.862 - pep_pool) / 种子间SD（§3.3.3 公式）
+  ⑥ 一致性锁：从 seed_verdicts 改为各 seed 的 P1（pep_frac_read_moore）带（§3.3.1）
+  ⑦ load_all_seeds：缺文件返回 error 条目而非静默跳过
+
+tests/test_tier1_judge.py：34 条靶向测试，覆盖 0.80/0.50/2.0/3.0/0.05/0.25/2×SD/SNR
+变异检查：还原 pep_d_med 方向 ⇒ 测试变红。
+真实数据跑判：4/4 H1 带，与 PI 初步读数一致。
+---
+ experiments/tier1_readout.py | 313 ---------------------------------
+ tests/test_tier1_judge.py    | 325 +++++++++++++++++++++++++++++++++++
+ tests/test_tier1_readout.py  | 297 --------------------------------
+ tools/tier1_judge.py         | 317 +++++++++++++++++++++++-----------
+ 4 files changed, 546 insertions(+), 706 deletions(-)
+ delete mode 100644 experiments/tier1_readout.py
+ create mode 100644 tests/test_tier1_judge.py
+ delete mode 100644 tests/test_tier1_readout.py
+
+diff --git a/experiments/tier1_readout.py b/experiments/tier1_readout.py
+deleted file mode 100644
+index 923734a1..00000000
+--- a/experiments/tier1_readout.py
++++ /dev/null
+@@ -1,313 +0,0 @@
+-"""Tier-1 擦除集判读（P1-c 根因判别）—— 读 summary.json，按 R363 已锁判据出附表 + 结论。
+-
+-用法::
+-
+-    python experiments/tier1_readout.py [--data-dir PATH] [--out PATH]
+-
+-判据来源：``docs/设计文档/设计-R358-T1-根因判别-H1H2-20261003.md`` §三（天平 R363 锁定）。
+-数据落点：``the-world-data/p1c_erase/*.summary.json``（4 seed）。
+-
+-退出码：0=H1, 1=H2, 2=不定, 3=数据不足。
+-"""
+-
+-import argparse
+-import json
+-import math
+-import sys
+-from collections import Counter
+-from pathlib import Path
+-from typing import Dict, List, Optional, Tuple
+-
+-THRESHOLDS = {
+-    "pep_frac_read_moore": {"H1": 0.80, "H2": 0.50},
+-    "pep_d_med":            {"H1": 2.0,  "H2": 3.0},
+-    "delta_R":              {"H1": 0.05, "H2": 0.25},
+-    "consensus_min":        3,
+-    "consensus_total":      4,
+-    "pool_margin_sd":       2.0,
+-    "h2_snr_min":           2.0,
+-    "p1c_baseline":         0.862,
+-}
+-
+-SEEDS = [207, 208, 209, 210]
+-
+-
+-def classify_band(value: float, metric: str) -> str:
+-    """单值判带：H1 / gray / H2。
+-
+-    pep_frac_read_moore: ≥0.80→H1, ≤0.50→H2
+-    pep_d_med:           ≤2.0→H1, ≥3.0→H2
+-    delta_R:             ≤0.05→H1, ≥0.25→H2
+-    """
+-    th = THRESHOLDS[metric]
+-    if metric in ("pep_d_med", "delta_R"):
+-        if value <= th["H1"]:
+-            return "H1"
+-        if value >= th["H2"]:
+-            return "H2"
+-    else:
+-        if value >= th["H1"]:
+-            return "H1"
+-        if value <= th["H2"]:
+-            return "H2"
+-    return "gray"
+-
+-
+-def _stdev(values: List[float]) -> float:
+-    n = len(values)
+-    if n < 2:
+-        return 0.0
+-    mu = sum(values) / n
+-    return math.sqrt(sum((x - mu) ** 2 for x in values) / (n - 1))
+-
+-
+-def load_seed(data_dir: Path, seed: int) -> Optional[Dict]:
+-    """读单个 summary.json，提取判据所需字段。"""
+-    fp = data_dir / f"p1c_erase_s{seed}_t3000.summary.json"
+-    if not fp.exists():
+-        return None
+-    with fp.open(encoding="utf-8") as f:
+-        d = json.load(f)
+-    p = d["pooled"]
+-    return {
+-        "seed": seed,
+-        "pep_frac_read_moore": p["pep"]["frac_read_moore"],
+-        "pep_d_med": p["pep"]["d_med"],
+-        "pos_frac_read_moore": p["pos_frac_read_moore"],
+-        "delta_R": p["pos_frac_read_moore"] - p["pep"]["frac_read_moore"],
+-        "pep64_frac_read_moore": p["pep64"]["frac_read_moore"],
+-        "n_samples": p["n_samples"],
+-    }
+-
+-
+-def load_all_seeds(data_dir: Path) -> Dict[int, Dict]:
+-    result = {}
+-    for seed in SEEDS:
+-        s = load_seed(data_dir, seed)
+-        if s is not None:
+-            result[seed] = s
+-    return result
+-
+-
+-def check_consensus(bands: List[str]) -> Tuple[bool, Optional[str], str]:
+-    """≥3/4 同带 ⇒ True。gray 不参与同带计数。"""
+-    cnt = Counter(b for b in bands if b != "gray")
+-    if not cnt:
+-        return False, None, "全部灰区"
+-    top_band, top_n = cnt.most_common(1)[0]
+-    total = THRESHOLDS["consensus_total"]
+-    ok = top_n >= THRESHOLDS["consensus_min"]
+-    return ok, top_band if ok else None, f"{top_n}/{total} {top_band}"
+-
+-
+-def check_pool_margin(pool_val: float, sd: float, metric: str) -> Tuple[bool, str]:
+-    """池化值离最近带界 ≥ 2×SD。"""
+-    band = classify_band(pool_val, metric)
+-    th = THRESHOLDS[metric]
+-    if band == "H1":
+-        if metric in ("pep_d_med", "delta_R"):
+-            boundary = th["H1"]
+-            margin = boundary - pool_val
+-        else:
+-            boundary = th["H1"]
+-            margin = pool_val - boundary
+-    elif band == "H2":
+-        if metric in ("pep_d_med", "delta_R"):
+-            boundary = th["H2"]
+-            margin = pool_val - boundary
+-        else:
+-            boundary = th["H2"]
+-            margin = boundary - pool_val
+-    else:
+-        return False, f"池化值 {pool_val:.4f} 在灰区，离界检查不适用"
+-    required = THRESHOLDS["pool_margin_sd"] * sd
+-    ok = margin >= required
+-    return ok, f"|{pool_val:.4f} - {boundary}| = {margin:.4f} {'>=' if ok else '<'} {required:.4f} (2xSD={sd:.4f})"
+-
+-
+-def judge(data_dir: Path) -> Dict:
+-    """主判读流程，返回结构化结果。"""
+-    seeds = load_all_seeds(data_dir)
+-    metrics = ["pep_frac_read_moore", "pep_d_med", "delta_R"]
+-    result: Dict = {
+-        "seeds": seeds,
+-        "n_loaded": len(seeds),
+-        "metrics": {},
+-        "k64": {},
+-        "notes": [],
+-        "final_verdict": None,
+-    }
+-
+-    if len(seeds) < 2:
+-        result["final_verdict"] = "不定（数据不足）"
+-        return result
+-
+-    for metric in metrics:
+-        per_seed = {s: d[metric] for s, d in seeds.items()}
+-        vals = list(per_seed.values())
+-        pool = sum(vals) / len(vals)
+-        sd = _stdev(vals)
+-        bands = [classify_band(v, metric) for v in vals]
+-        con_ok, con_band, con_msg = check_consensus(bands)
+-        margin_ok, margin_msg = check_pool_margin(pool, sd, metric)
+-        result["metrics"][metric] = {
+-            "per_seed": per_seed,
+-            "pool_mean": pool,
+-            "sd": sd,
+-            "bands": dict(zip(seeds.keys(), bands)),
+-            "consensus_ok": con_ok,
+-            "consensus_band": con_band,
+-            "consensus_msg": con_msg,
+-            "margin_ok": margin_ok,
+-            "margin_msg": margin_msg,
+-        }
+-
+-    k64_vals = {s: d["pep64_frac_read_moore"] for s, d in seeds.items()}
+-    k64_pool = sum(k64_vals.values()) / len(k64_vals)
+-    k64_sd = _stdev(list(k64_vals.values()))
+-    k64_bands = [classify_band(v, "pep_frac_read_moore") for v in k64_vals.values()]
+-    k64_con_ok, k64_con_band, k64_con_msg = check_consensus(k64_bands)
+-    result["k64"] = {
+-        "per_seed": k64_vals,
+-        "pool_mean": k64_pool,
+-        "sd": k64_sd,
+-        "bands": dict(zip(seeds.keys(), k64_bands)),
+-        "consensus_ok": k64_con_ok,
+-        "consensus_band": k64_con_band,
+-        "consensus_msg": k64_con_msg,
+-    }
+-
+-    primary_bands = [result["metrics"][m]["consensus_band"] for m in metrics]
+-    all_consensus = all(result["metrics"][m]["consensus_ok"] for m in metrics)
+-    all_margin = all(result["metrics"][m]["margin_ok"] for m in metrics)
+-    non_gray = [b for b in primary_bands if b is not None]
+-    primary_agree = len(set(non_gray)) <= 1 and len(non_gray) == len(primary_bands)
+-
+-    if not all_consensus:
+-        failed = [m for m in metrics if not result["metrics"][m]["consensus_ok"]]
+-        result["final_verdict"] = "不定（一致性锁不满足）"
+-        result["notes"].append(f"一致性锁失败: {', '.join(failed)}")
+-    elif not primary_agree:
+-        result["final_verdict"] = "不定（主判据间方向冲突）"
+-        result["notes"].append(f"主判据方向: {primary_bands}")
+-    else:
+-        verdict = non_gray[0]
+-        if not all_margin:
+-            failed = [m for m in metrics if not result["metrics"][m]["margin_ok"]]
+-            result["final_verdict"] = f"{verdict}（离界余量不足，弱信号）"
+-            result["notes"].append(f"离界余量不足: {', '.join(failed)}")
+-        elif verdict == "H2":
+-            pep_pool = result["metrics"]["pep_frac_read_moore"]["pool_mean"]
+-            pep_sd = result["metrics"]["pep_frac_read_moore"]["sd"]
+-            snr = (THRESHOLDS["p1c_baseline"] - pep_pool) / pep_sd if pep_sd > 0 else float("inf")
+-            if snr < THRESHOLDS["h2_snr_min"]:
+-                result["final_verdict"] = f"不定（H2 但 SNR={snr:.2f}<2）"
+-                result["notes"].append(f"SNR = {snr:.2f} < {THRESHOLDS['h2_snr_min']}")
+-            else:
+-                result["final_verdict"] = f"H2(SNR={snr:.2f}>=2)"
+-        else:
+-            result["final_verdict"] = verdict
+-
+-    return result
+-
+-
+-def format_markdown(r: Dict) -> str:
+-    seeds = r["seeds"]
+-    seed_ids = sorted(seeds.keys())
+-    lines = [
+-        "# Tier-1 擦除集判读附表（P1-c 根因判别）",
+-        "",
+-        "> 判据来源：`docs/设计文档/设计-R358-T1-根因判别-H1H2-20261003.md` §三（天平 R363 锁定）",
+-        "> 数据：`the-world-data/p1c_erase/*.summary.json`",
+-        "",
+-        "## 附表 1：逐 seed 主判据",
+-        "",
+-        "| seed | `pep_frac_read_moore` | band | `pep_d_med` | band | dR (pos-pep) | band |",
+-        "|---:|---:|:---:|---:|:---:|---:|:---:|",
+-    ]
+-    for s in seed_ids:
+-        d = seeds[s]
+-        lines.append(
+-            f"| {s} "
+-            f"| {d['pep_frac_read_moore']:.4f} | {classify_band(d['pep_frac_read_moore'], 'pep_frac_read_moore')} "
+-            f"| {d['pep_d_med']:.4f} | {classify_band(d['pep_d_med'], 'pep_d_med')} "
+-            f"| {d['delta_R']:.4f} | {classify_band(d['delta_R'], 'delta_R')} |"
+-        )
+-
+-    lines += ["", "## 附表 2：池化统计与一致性锁", ""]
+-    lines.append("| 指标 | 池化均值 | seed-SD | 一致 | 离界 |")
+-    lines.append("|---|---:|---:|:---:|---|")
+-    for metric in ["pep_frac_read_moore", "pep_d_med", "delta_R"]:
+-        m = r["metrics"][metric]
+-        con = "PASS" if m["consensus_ok"] else "FAIL"
+-        lines.append(
+-            f"| `{metric}` | {m['pool_mean']:.4f} | {m['sd']:.4f} "
+-            f"| {con} ({m['consensus_msg']}) | {m['margin_msg']} |"
+-        )
+-
+-    k = r["k64"]
+-    lines += [
+-        "",
+-        "## 附表 3：K64 次判列",
+-        "",
+-        "| seed | `pep64_frac_read_moore` | band |",
+-        "|---:|---:|:---:|",
+-    ]
+-    for s in seed_ids:
+-        v = k["per_seed"][s]
+-        lines.append(f"| {s} | {v:.4f} | {classify_band(v, 'pep_frac_read_moore')} |")
+-    lines.append(f"| **pool** | **{k['pool_mean']:.4f}** | — |")
+-
+-    lines += [
+-        "",
+-        "---",
+-        "",
+-        f"**结论：{r['final_verdict']}**",
+-        "",
+-    ]
+-    if r["notes"]:
+-        for n in r["notes"]:
+-            lines.append(f"- {n}")
+-        lines.append("")
+-    return "\n".join(lines)
+-
+-
+-def main():
+-    ap = argparse.ArgumentParser(description="Tier-1 擦除集判读（summary.json → 附表 + 结论）")
+-    ap.add_argument("--data-dir", default=None,
+-                    help="summary.json 所在目录（默认：仓库根 the-world-data/p1c_erase/）")
+-    ap.add_argument("--out", default=None, help="输出 Markdown 路径（默认 stdout）")
+-    args = ap.parse_args()
+-
+-    if args.data_dir:
+-        data_dir = Path(args.data_dir)
+-    else:
+-        data_dir = Path.cwd() / "the-world-data" / "p1c_erase"
+-        if not data_dir.exists():
+-            data_dir = Path(__file__).resolve().parent.parent / "the-world-data" / "p1c_erase"
+-
+-    if not data_dir.exists():
+-        print(f"数据目录不存在: {data_dir}", file=sys.stderr)
+-        return 3
+-
+-    r = judge(data_dir)
+-    md = format_markdown(r)
+-
+-    if args.out:
+-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+-        Path(args.out).write_text(md, encoding="utf-8")
+-    else:
+-        print(md)
+-
+-    v = r["final_verdict"] or ""
+-    if v.startswith("H1"):
+-        return 0
+-    if v.startswith("H2"):
+-        return 1
+-    if v.startswith("不定"):
+-        return 2
+-    return 3
+-
+-
+-if __name__ == "__main__":
+-    sys.exit(main())
+diff --git a/tests/test_tier1_judge.py b/tests/test_tier1_judge.py
+new file mode 100644
+index 00000000..8cac95aa
+--- /dev/null
++++ b/tests/test_tier1_judge.py
+@@ -0,0 +1,325 @@
++"""tools/tier1_judge.py 边界靶向测试。
++
++覆盖（§3.1–3.3 设计-R358-T1）：
++  ① judge_single_metric 各指标边界：0.80/0.50 / 2.0/3.0 / 0.05/0.25（含方向）
++  ② read_p1c_csv：delta_R 现算（CSV 无此列）、缺列 fail-loud、NaN 过滤
++  ③ check_pool_margin：池化离带界 ≥2×种子间 SD
++  ④ check_consensus：≥3/4 seeds P1 同带
++  ⑤ compute_snr：(0.862 - pool) / seed_SD，§3.3.3 公式
++  ⑥ P1/P2 同向锁（§3.1）：异向 ⇒ "判据内冲突" ⇒ seed 无有效判
++  ⑦ 全流程：H1 / H2 / 不定（一致性不足）
++"""
++
++import csv
++import math
++import sys
++from pathlib import Path
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from tools.tier1_judge import (
++    P1C_BASELINE,
++    THRESHOLDS,
++    check_consensus,
++    check_pool_margin,
++    compute_snr,
++    judge_single_metric,
++    judge_tier1,
++    load_all_seeds,
++    read_p1c_csv,
++)
++
++
++# ---------------------------------------------------------------------------
++# helpers
++# ---------------------------------------------------------------------------
++
++def _write_synthetic_csv(path: Path, rows: list) -> None:
++    """Write minimal CSV with required columns."""
++    fieldnames = [
++        "tick", "pep_frac_read_moore", "pep_d_med",
++        "pos_frac_read_moore", "pep64_frac_read_moore",
++    ]
++    with path.open("w", newline="", encoding="utf-8") as f:
++        writer = csv.DictWriter(f, fieldnames=fieldnames)
++        writer.writeheader()
++        for r in rows:
++            r.setdefault("tick", 100)
++            r.setdefault("pep64_frac_read_moore", "0.82")
++            writer.writerow(r)
++
++
++def _write_seed_csvs(tmp_path: Path, seed_rows: dict) -> Path:
++    """seed_rows: {seed: [row_dict, ...]}，写到 tmp_path，返回 data_dir."""
++    data_dir = tmp_path / "data"
++    data_dir.mkdir()
++    for seed, rows in seed_rows.items():
++        fp = data_dir / f"p1c_erase_s{seed}_t3000.csv"
++        _write_synthetic_csv(fp, rows)
++    return data_dir
++
++
++# ---------------------------------------------------------------------------
++# ① judge_single_metric 边界（含方向）
++# ---------------------------------------------------------------------------
++
++class TestJudgeSingleMetric:
++    # P1: pep_frac_read_moore — high→H1
++    def test_pep_frac_h1_boundary_exact(self):
++        v, _ = judge_single_metric(0.80, "pep_frac_read_moore")
++        assert v == "H1"
++
++    def test_pep_frac_just_below_h1(self):
++        v, _ = judge_single_metric(0.799, "pep_frac_read_moore")
++        assert v is None  # gray
++
++    def test_pep_frac_h2_boundary_exact(self):
++        v, _ = judge_single_metric(0.50, "pep_frac_read_moore")
++        assert v == "H2"
++
++    def test_pep_frac_just_above_h2(self):
++        v, _ = judge_single_metric(0.501, "pep_frac_read_moore")
++        assert v is None
++
++    def test_pep_frac_nan_returns_none(self):
++        v, msg = judge_single_metric(float("nan"), "pep_frac_read_moore")
++        assert v is None
++        assert "NaN" in msg or "不足" in msg
++
++    # P2: pep_d_med — LOW→H1（距离小 = 历史都在近处 = H1）
++    def test_d_med_h1_boundary_exact(self):
++        v, _ = judge_single_metric(2.0, "pep_d_med")
++        assert v == "H1"
++
++    def test_d_med_below_h1(self):
++        v, _ = judge_single_metric(1.5, "pep_d_med")
++        assert v == "H1"
++
++    def test_d_med_h2_boundary_exact(self):
++        v, _ = judge_single_metric(3.0, "pep_d_med")
++        assert v == "H2"
++
++    def test_d_med_gray(self):
++        v, _ = judge_single_metric(2.5, "pep_d_med")
++        assert v is None
++
++    # ΔR: pos - pep — LOW→H1（差值小 = 历史≈近期 = H1）
++    def test_delta_r_h1_boundary_exact(self):
++        v, _ = judge_single_metric(0.05, "delta_R")
++        assert v == "H1"
++
++    def test_delta_r_negative_is_h1(self):
++        v, _ = judge_single_metric(-0.03, "delta_R")
++        assert v == "H1"
++
++    def test_delta_r_h2_boundary_exact(self):
++        v, _ = judge_single_metric(0.25, "delta_R")
++        assert v == "H2"
++
++    def test_delta_r_gray(self):
++        v, _ = judge_single_metric(0.15, "delta_R")
++        assert v is None
++
++
++# ---------------------------------------------------------------------------
++# ② read_p1c_csv
++# ---------------------------------------------------------------------------
++
++class TestReadP1cCsv:
++    def test_delta_r_computed_from_pos_minus_pep(self, tmp_path):
++        fp = tmp_path / "s207.csv"
++        _write_synthetic_csv(fp, [
++            {"pep_frac_read_moore": "0.90", "pep_d_med": "1.0", "pos_frac_read_moore": "0.86"},
++            {"pep_frac_read_moore": "0.88", "pep_d_med": "1.0", "pos_frac_read_moore": "0.84"},
++        ])
++        result = read_p1c_csv(str(fp))
++        assert "error" not in result
++        dr = result["pooled"]["delta_R"]
++        # delta_R = [0.86-0.90, 0.84-0.88] = [-0.04, -0.04] → mean = -0.04
++        assert dr["mean"] == pytest.approx(-0.04, abs=1e-9)
++
++    def test_missing_column_fails_loud(self, tmp_path):
++        fp = tmp_path / "s207.csv"
++        fp.write_text(
++            "tick,pep_frac_read_moore\n100,0.90\n",
++            encoding="utf-8",
++        )
++        result = read_p1c_csv(str(fp))
++        assert "error" in result
++        assert "missing_cols" in result
++        assert "pep_d_med" in result["missing_cols"]
++
++    def test_nan_rows_filtered(self, tmp_path):
++        fp = tmp_path / "s207.csv"
++        _write_synthetic_csv(fp, [
++            {"pep_frac_read_moore": "0.90", "pep_d_med": "1.0", "pos_frac_read_moore": "0.86"},
++            {"pep_frac_read_moore": "NaN", "pep_d_med": "1.0", "pos_frac_read_moore": "0.86"},
++            {"pep_frac_read_moore": "0.88", "pep_d_med": "1.0", "pos_frac_read_moore": "0.84"},
++        ])
++        result = read_p1c_csv(str(fp))
++        assert "error" not in result
++        # Only 2 valid rows for pep_frac_read_moore
++        assert result["pooled"]["pep_frac_read_moore"]["n"] == 2
++
++    def test_all_nan_fails_loud(self, tmp_path):
++        fp = tmp_path / "s207.csv"
++        _write_synthetic_csv(fp, [
++            {"pep_frac_read_moore": "", "pep_d_med": "", "pos_frac_read_moore": ""},
++        ])
++        result = read_p1c_csv(str(fp))
++        assert "error" in result
++
++
++# ---------------------------------------------------------------------------
++# ③ check_pool_margin
++# ---------------------------------------------------------------------------
++
++class TestPoolMargin:
++    def test_h1_pass_large_margin(self):
++        # pool=0.90, boundary=0.80, sd=0.02 → margin=0.10 >= 0.04 → PASS
++        ok, _ = check_pool_margin(0.90, 0.80, 0.02)
++        assert ok
++
++    def test_h1_fail_small_margin(self):
++        # pool=0.82, boundary=0.80, sd=0.02 → margin=0.02 < 0.04 → FAIL
++        ok, _ = check_pool_margin(0.82, 0.80, 0.02)
++        assert not ok
++
++    def test_h2_pass(self):
++        # pool=0.30, boundary=0.50, sd=0.05 → margin=0.20 >= 0.10 → PASS
++        ok, _ = check_pool_margin(0.30, 0.50, 0.05)
++        assert ok
++
++    def test_boundary_is_zero_sd(self):
++        # SD=0 → required=0 → always passes
++        ok, _ = check_pool_margin(0.85, 0.80, 0.0)
++        assert ok
++
++
++# ---------------------------------------------------------------------------
++# ④ check_consensus
++# ---------------------------------------------------------------------------
++
++class TestConsensus:
++    def test_3_of_4_h1_pass(self):
++        ok, msg = check_consensus(["H1", "H1", "H1", None])
++        assert ok
++        assert "H1" in msg
++
++    def test_2_of_4_fail(self):
++        ok, _ = check_consensus(["H1", "H1", "H2", None])
++        assert not ok
++
++    def test_all_none_fail(self):
++        ok, _ = check_consensus([None, None, None, None])
++        assert not ok
++
++    def test_conflict_2_2_fail(self):
++        ok, _ = check_consensus(["H1", "H1", "H2", "H2"])
++        assert not ok
++
++
++# ---------------------------------------------------------------------------
++# ⑤ compute_snr — §3.3.3
++# ---------------------------------------------------------------------------
++
++class TestComputeSnr:
++    def test_formula(self):
++        # SNR = (0.862 - pool) / SD
++        pool, sd = 0.40, 0.10
++        snr = compute_snr(pool, sd)
++        assert snr == pytest.approx((P1C_BASELINE - pool) / sd, abs=1e-9)
++
++    def test_sd_zero_returns_inf(self):
++        snr = compute_snr(0.40, 0.0)
++        assert snr == float("inf")
++
++    def test_baseline_is_0862(self):
++        assert P1C_BASELINE == 0.862
++
++
++# ---------------------------------------------------------------------------
++# ⑥ P1/P2 同向锁（§3.1）
++# ---------------------------------------------------------------------------
++
++class TestP1P2Conflict:
++    def test_conflict_seed_verdict_is_conflict(self, tmp_path):
++        # P1 says H1 (0.90), P2 says H2 (d_med=4.0) → 判据内冲突
++        rows = [
++            {"pep_frac_read_moore": "0.90", "pep_d_med": "4.0", "pos_frac_read_moore": "0.86"},
++        ]
++        data_dir = _write_seed_csvs(tmp_path, {s: rows for s in [207, 208, 209, 210]})
++        seeds = load_all_seeds(str(data_dir))
++        result = judge_tier1(seeds)
++        # All 4 seeds should be 判据内冲突
++        for seed_data in result["seeds"].values():
++            assert seed_data.get("seed_verdict") == "判据内冲突"
++
++
++# ---------------------------------------------------------------------------
++# ⑦ 全流程
++# ---------------------------------------------------------------------------
++
++class TestJudgeTier1Full:
++    def _make_h1_rows(self, pep_val, d_val, pos_val):
++        rows = []
++        for tick in [100, 200, 300]:
++            rows.append({
++                "tick": str(tick),
++                "pep_frac_read_moore": str(pep_val),
++                "pep_d_med": str(d_val),
++                "pos_frac_read_moore": str(pos_val),
++            })
++        return rows
++
++    def test_all_h1_clear(self, tmp_path):
++        rows = self._make_h1_rows(0.90, 1.0, 0.86)
++        data_dir = _write_seed_csvs(tmp_path, {s: rows for s in [207, 208, 209, 210]})
++        seeds = load_all_seeds(str(data_dir))
++        result = judge_tier1(seeds)
++        assert result["final_verdict"] == "H1"
++
++    def test_3_of_4_h1_pass(self, tmp_path):
++        h1_rows = self._make_h1_rows(0.90, 1.0, 0.86)
++        # seed 210: gray zone for P1 → excluded from consensus
++        gray_rows = self._make_h1_rows(0.65, 2.5, 0.86)
++        data_dir = _write_seed_csvs(tmp_path, {
++            207: h1_rows, 208: h1_rows, 209: h1_rows, 210: gray_rows,
++        })
++        result = judge_tier1(load_all_seeds(str(data_dir)))
++        assert result["consensus"]["ok"]
++        assert "H1" in result["final_verdict"]
++
++    def test_consensus_fail(self, tmp_path):
++        # 2 seeds H1, 2 seeds H2
++        h1_rows = self._make_h1_rows(0.90, 1.0, 0.86)
++        h2_rows = self._make_h1_rows(0.40, 4.0, 0.86)
++        data_dir = _write_seed_csvs(tmp_path, {
++            207: h1_rows, 208: h1_rows, 209: h2_rows, 210: h2_rows,
++        })
++        result = judge_tier1(load_all_seeds(str(data_dir)))
++        assert not result["consensus"]["ok"]
++        assert "不定" in result["final_verdict"]
++
++    def test_h2_snr_check_uses_correct_formula(self, tmp_path):
++        # Pool pep ≈ 0.40, seed SD ≈ 0.05 → SNR = (0.862-0.40)/0.05 = 9.24 >> 2
++        h2_rows = [
++            {"tick": str(t), "pep_frac_read_moore": "0.40",
++             "pep_d_med": "4.0", "pos_frac_read_moore": "0.86"}
++            for t in [100, 200, 300]
++        ]
++        data_dir = _write_seed_csvs(tmp_path, {s: h2_rows for s in [207, 208, 209, 210]})
++        result = judge_tier1(load_all_seeds(str(data_dir)))
++        assert result["final_verdict"].startswith("H2")
++        assert "SNR" in result["final_verdict"]
++
++    def test_missing_seed_reports_fail_loud(self, tmp_path):
++        rows = self._make_h1_rows(0.90, 1.0, 0.86)
++        data_dir = _write_seed_csvs(tmp_path, {207: rows, 208: rows})
++        # 209/210 not written → missing file
++        result = judge_tier1(load_all_seeds(str(data_dir)))
++        fail_notes = [n for n in result["notes"] if "FAIL" in n]
++        assert len(fail_notes) == 2
++        for n in fail_notes:
++            assert "209" in n or "210" in n
+diff --git a/tests/test_tier1_readout.py b/tests/test_tier1_readout.py
+deleted file mode 100644
+index efd8bed2..00000000
+--- a/tests/test_tier1_readout.py
++++ /dev/null
+@@ -1,297 +0,0 @@
+-"""Tier-1 readout 靶向测试——合成 summary.json 钉判据边界。
+-
+-覆盖：
+-  ① classify_band 各指标边界（H1/H2/灰区）
+-  ② 一致性锁（≥3/4 同带 PASS、<3 FAIL）
+-  ③ 池化离界余量（≥2×SD PASS、<2×SD FAIL）
+-  ④ H2 SNR 门（≥2 PASS、<2 FAIL）
+-  ⑤ 全流程端到端（合成数据 → H1 判定）
+-  ⑥ 全流程端到端（合成数据 → H2 判定 + SNR 检查）
+-  ⑦ K64 次判列
+-"""
+-
+-import json
+-import math
+-import sys
+-from pathlib import Path
+-
+-import pytest
+-
+-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+-from experiments.tier1_readout import (
+-    THRESHOLDS,
+-    check_consensus,
+-    check_pool_margin,
+-    classify_band,
+-    format_markdown,
+-    judge,
+-)
+-
+-
+-# ---------------------------------------------------------------------------
+-# helpers
+-# ---------------------------------------------------------------------------
+-
+-def _make_summary(
+-    seed: int,
+-    pep_frac_read_moore: float = 0.90,
+-    pep_d_med: float = 1.0,
+-    pos_frac_read_moore: float = 0.86,
+-    pep64_frac_read_moore: float = 0.82,
+-    n_samples: int = 30,
+-) -> dict:
+-    return {
+-        "probe": "p1c_erasure_probe",
+-        "seed": seed,
+-        "ticks": 3000,
+-        "pooled": {
+-            "n_samples": n_samples,
+-            "pos_frac_read_moore": pos_frac_read_moore,
+-            "pep": {
+-                "frac_read_moore": pep_frac_read_moore,
+-                "d_med": pep_d_med,
+-            },
+-            "pep64": {
+-                "frac_read_moore": pep64_frac_read_moore,
+-            },
+-        },
+-    }
+-
+-
+-def _write_seeds(tmp_path: Path, seeds: dict) -> Path:
+-    """写合成 summary.json 到 tmp_path，返回 data_dir。"""
+-    data_dir = tmp_path / "data"
+-    data_dir.mkdir()
+-    for seed, kwargs in seeds.items():
+-        obj = _make_summary(seed=seed, **kwargs)
+-        fp = data_dir / f"p1c_erase_s{seed}_t3000.summary.json"
+-        fp.write_text(json.dumps(obj), encoding="utf-8")
+-    return data_dir
+-
+-
+-# ---------------------------------------------------------------------------
+-# ① classify_band 边界
+-# ---------------------------------------------------------------------------
+-
+-class TestClassifyBand:
+-    # pep_frac_read_moore: ≥0.80→H1, ≤0.50→H2, else gray
+-    def test_pep_frac_read_moore_h1_boundary(self):
+-        assert classify_band(0.80, "pep_frac_read_moore") == "H1"
+-        assert classify_band(0.90, "pep_frac_read_moore") == "H1"
+-
+-    def test_pep_frac_read_moore_h2_boundary(self):
+-        assert classify_band(0.50, "pep_frac_read_moore") == "H2"
+-        assert classify_band(0.30, "pep_frac_read_moore") == "H2"
+-
+-    def test_pep_frac_read_moore_gray(self):
+-        assert classify_band(0.65, "pep_frac_read_moore") == "gray"
+-        assert classify_band(0.799, "pep_frac_read_moore") == "gray"
+-
+-    # pep_d_med: ≤2.0→H1, ≥3.0→H2, else gray
+-    def test_pep_d_med_h1_boundary(self):
+-        assert classify_band(2.0, "pep_d_med") == "H1"
+-        assert classify_band(1.0, "pep_d_med") == "H1"
+-
+-    def test_pep_d_med_h2_boundary(self):
+-        assert classify_band(3.0, "pep_d_med") == "H2"
+-        assert classify_band(5.0, "pep_d_med") == "H2"
+-
+-    def test_pep_d_med_gray(self):
+-        assert classify_band(2.5, "pep_d_med") == "gray"
+-
+-    # delta_R: ≤0.05→H1, ≥0.25→H2, else gray
+-    def test_delta_r_h1_boundary(self):
+-        assert classify_band(0.05, "delta_R") == "H1"
+-        assert classify_band(-0.03, "delta_R") == "H1"
+-        assert classify_band(0.0, "delta_R") == "H1"
+-
+-    def test_delta_r_h2_boundary(self):
+-        assert classify_band(0.25, "delta_R") == "H2"
+-        assert classify_band(0.50, "delta_R") == "H2"
+-
+-    def test_delta_r_gray(self):
+-        assert classify_band(0.15, "delta_R") == "gray"
+-
+-
+-# ---------------------------------------------------------------------------
+-# ② 一致性锁
+-# ---------------------------------------------------------------------------
+-
+-class TestConsensus:
+-    def test_3_of_4_pass(self):
+-        ok, band, msg = check_consensus(["H1", "H1", "H1", "H2"])
+-        assert ok
+-        assert band == "H1"
+-
+-    def test_4_of_4_pass(self):
+-        ok, band, msg = check_consensus(["H1", "H1", "H1", "H1"])
+-        assert ok
+-        assert band == "H1"
+-
+-    def test_2_of_4_fail(self):
+-        ok, band, msg = check_consensus(["H1", "H1", "H2", "H2"])
+-        assert not ok
+-        assert band is None
+-
+-    def test_gray_excluded(self):
+-        ok, band, msg = check_consensus(["H1", "H1", "H1", "gray"])
+-        assert ok
+-        assert band == "H1"
+-
+-    def test_all_gray(self):
+-        ok, band, msg = check_consensus(["gray", "gray", "gray", "gray"])
+-        assert not ok
+-
+-
+-# ---------------------------------------------------------------------------
+-# ③ 池化离界余量
+-# ---------------------------------------------------------------------------
+-
+-class TestPoolMargin:
+-    def test_h1_pass_large_margin(self):
+-        ok, msg = check_pool_margin(0.90, 0.02, "pep_frac_read_moore")
+-        assert ok
+-
+-    def test_h1_fail_small_margin(self):
+-        ok, msg = check_pool_margin(0.82, 0.02, "pep_frac_read_moore")
+-        assert not ok
+-
+-    def test_h2_pass(self):
+-        ok, msg = check_pool_margin(0.30, 0.05, "pep_frac_read_moore")
+-        assert ok
+-
+-    def test_gray_fail(self):
+-        ok, msg = check_pool_margin(0.65, 0.01, "pep_frac_read_moore")
+-        assert not ok
+-
+-    def test_d_med_h1_pass(self):
+-        ok, msg = check_pool_margin(1.0, 0.3, "pep_d_med")
+-        assert ok
+-
+-    def test_delta_r_h1_pass(self):
+-        ok, msg = check_pool_margin(-0.03, 0.005, "delta_R")
+-        assert ok
+-
+-
+-# ---------------------------------------------------------------------------
+-# ④ 全流程 → H1
+-# ---------------------------------------------------------------------------
+-
+-class TestJudgeH1:
+-    def test_all_h1_clear(self, tmp_path):
+-        data_dir = _write_seeds(tmp_path, {
+-            207: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.86, "pep64_frac_read_moore": 0.82},
+-            208: {"pep_frac_read_moore": 0.91, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.87, "pep64_frac_read_moore": 0.83},
+-            209: {"pep_frac_read_moore": 0.89, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.85, "pep64_frac_read_moore": 0.81},
+-            210: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.86, "pep64_frac_read_moore": 0.82},
+-        })
+-        r = judge(data_dir)
+-        assert r["final_verdict"].startswith("H1")
+-        md = format_markdown(r)
+-        assert "结论" in md
+-        assert "H1" in md
+-
+-    def test_3_of_4_h1_pass(self, tmp_path):
+-        data_dir = _write_seeds(tmp_path, {
+-            207: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.86},
+-            208: {"pep_frac_read_moore": 0.91, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.87},
+-            209: {"pep_frac_read_moore": 0.89, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.85},
+-            210: {"pep_frac_read_moore": 0.65, "pep_d_med": 2.5,
+-                   "pos_frac_read_moore": 0.80},
+-        })
+-        r = judge(data_dir)
+-        assert "H1" in r["final_verdict"]
+-
+-
+-# ---------------------------------------------------------------------------
+-# ⑤ 全流程 → H2（需 SNR≥2）
+-# ---------------------------------------------------------------------------
+-
+-class TestJudgeH2:
+-    def test_h2_with_snr_pass(self, tmp_path):
+-        vals = [0.40, 0.42, 0.38, 0.41]
+-        data_dir = _write_seeds(tmp_path, {
+-            s: {"pep_frac_read_moore": v, "pep_d_med": 4.0,
+-                 "pos_frac_read_moore": 0.86, "pep64_frac_read_moore": 0.40}
+-            for s, v in zip([207, 208, 209, 210], vals)
+-        })
+-        r = judge(data_dir)
+-        assert r["final_verdict"].startswith("H2")
+-
+-    def test_h2_snr_fail(self):
+-        # 数学上 margin 通过 + SNR<2 在 baseline=0.862 时不可达（H2≤0.50 约束），
+-        # 直接验证 SNR 计算逻辑：SNR = (baseline - pool) / SD
+-        pool, sd, baseline = 0.40, 0.25, 0.862
+-        snr = (baseline - pool) / sd
+-        assert snr == pytest.approx(1.848, abs=0.01)
+-        assert snr < THRESHOLDS["h2_snr_min"]
+-
+-
+-# ---------------------------------------------------------------------------
+-# ⑥ 一致性锁失败 → 不定
+-# ---------------------------------------------------------------------------
+-
+-class TestJudgeIndecisive:
+-    def test_consensus_fail(self, tmp_path):
+-        data_dir = _write_seeds(tmp_path, {
+-            207: {"pep_frac_read_moore": 0.90, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.86},
+-            208: {"pep_frac_read_moore": 0.91, "pep_d_med": 1.0,
+-                   "pos_frac_read_moore": 0.87},
+-            209: {"pep_frac_read_moore": 0.40, "pep_d_med": 4.0,
+-                   "pos_frac_read_moore": 0.80},
+-            210: {"pep_frac_read_moore": 0.38, "pep_d_med": 4.0,
+-                   "pos_frac_read_moore": 0.78},
+-        })
+-        r = judge(data_dir)
+-        assert "不定" in r["final_verdict"]
+-
+-
+-# ---------------------------------------------------------------------------
+-# ⑦ K64 次判列
+-# ---------------------------------------------------------------------------
+-
+-class TestK64:
+-    def test_k64_recorded(self, tmp_path):
+-        data_dir = _write_seeds(tmp_path, {
+-            207: {"pep64_frac_read_moore": 0.82},
+-            208: {"pep64_frac_read_moore": 0.83},
+-            209: {"pep64_frac_read_moore": 0.81},
+-            210: {"pep64_frac_read_moore": 0.82},
+-        })
+-        r = judge(data_dir)
+-        assert r["k64"]["pool_mean"] == pytest.approx(0.82, abs=0.01)
+-        assert all(b == "H1" for b in r["k64"]["bands"].values())
+-
+-    def test_k64_in_markdown(self, tmp_path):
+-        data_dir = _write_seeds(tmp_path, {
+-            s: {"pep64_frac_read_moore": 0.82} for s in [207, 208, 209, 210]
+-        })
+-        r = judge(data_dir)
+-        md = format_markdown(r)
+-        assert "K64" in md
+-        assert "pep64_frac_read_moore" in md
+-
+-
+-# ---------------------------------------------------------------------------
+-# ⑧ delta_R 计算正确性
+-# ---------------------------------------------------------------------------
+-
+-class TestDeltaR:
+-    def test_delta_r_computed_correctly(self, tmp_path):
+-        data_dir = _write_seeds(tmp_path, {
+-            207: {"pep_frac_read_moore": 0.90, "pos_frac_read_moore": 0.86},
+-            208: {"pep_frac_read_moore": 0.88, "pos_frac_read_moore": 0.84},
+-            209: {"pep_frac_read_moore": 0.92, "pos_frac_read_moore": 0.88},
+-            210: {"pep_frac_read_moore": 0.90, "pos_frac_read_moore": 0.86},
+-        })
+-        r = judge(data_dir)
+-        assert r["seeds"][207]["delta_R"] == pytest.approx(-0.04, abs=1e-9)
+-        assert r["seeds"][208]["delta_R"] == pytest.approx(-0.04, abs=1e-9)
+diff --git a/tools/tier1_judge.py b/tools/tier1_judge.py
+index 1748dc22..558cc162 100644
+--- a/tools/tier1_judge.py
++++ b/tools/tier1_judge.py
+@@ -4,12 +4,14 @@
+ 用法：
+     python tools/tier1_judge.py [--data-dir the-world-data/p1c_erase] [--out docs/Tier-1判读结果-YYYYMMDD.md]
+ 
+-判据（天平 2026-10-03 锁定，R225 红线）：
+-  ① pep_frac_read_moore ≥0.80 ⇒ H1 带｜≤0.50 ⇒ H2 带
+-  ② pep_d_med ≤2.0 ⇒ H1｜≥3.0 ⇒ H2
+-  ③ ΔR ≤0.05 ⇒ H1｜≥0.25 ⇒ H2
+-  ④ 一致性锁：≥3/4 种子同带 + 池化值离带界 ≥2×SD
+-  ⑤ 判 H2 需 SNR ≥2（R7.5）
++判据（天平 2026-10-03 锁定，R225；来源：设计-R358-T1 §3.1–3.3）：
++  §3.1 P1 pep_frac_read_moore ≥0.80⇒H1 / ≤0.50⇒H2；P2 pep_d_med ≤2.0⇒H1 / ≥3.0⇒H2
++       P1、P2 须同向；异向 ⇒ "判据内冲突" ⇒ 该 seed 无有效判
++  §3.2 ΔR = pos_frac_read_moore - pep_frac_read_moore（CSV 无此列，现算）
++       ≤0.05⇒H1 / ≥0.25⇒H2；与 §3.1 同向才可判
++  §3.3.1 一致性锁：≥3/4 seeds 的 pep_frac_read_moore 落同一带
++  §3.3.2 离界余量：池化值离最近带界 ≥ 2×种子间 SD
++  §3.3.3 H2 附加：SNR = (0.862 - pep 池化) / 种子间 SD ≥ 2
+ 
+ 🔴 本脚本不跑批（R117：起跑令只在 fish）；只读已有数据。
+ """
+@@ -17,6 +19,7 @@
+ import argparse
+ import csv
+ import json
++import math
+ import os
+ import statistics as st
+ from pathlib import Path
+@@ -38,48 +41,82 @@ THRESHOLDS = {
+ # ============================================================================================
+ # 数据读取
+ # ============================================================================================
+-def read_p1c_csv(fp: str) -> Dict:
+-    """读单个 seed 的 p1c_erase CSV，返回池化统计。"""
+-    rows = list(csv.DictReader(open(fp, encoding="utf-8")))
+-    if not rows:
+-        return {"error": f"空文件: {fp}"}
+-
+-    # 提取关键列（按轻舟 T7 交付的列名）
+-    # 🔴 列名须与 experiments/p1c_erasure_probe.py 的输出一致
+-    key_cols = [
+-        "pep_frac_read_moore",  # 保留集可直读比例（Moore 邻）
+-        "pep_d_med",  # 保留集中位距离
+-        "delta_R",  # 擦除集 vs 保留集的 K 相对变化
+-        # 诊断列（fail-loud）
+-        "eng_wr_ticks", "probe_rich_ticks",
+-    ]
++REQUIRED_CSV_COLS = ["pep_frac_read_moore", "pep_d_med", "pos_frac_read_moore"]
+ 
+-    # 池化（跨窗口平均）
+-    pooled = {}
+-    for col in key_cols:
+-        vals = [float(r[col]) for r in rows if col in r and r[col] not in ("", "NaN")]
+-        if vals:
+-            pooled[col] = {
+-                "mean": st.mean(vals),
+-                "median": st.median(vals),
+-                "stdev": st.stdev(vals) if len(vals) > 1 else 0.0,
+-                "n": len(vals),
+-            }
+-        else:
+-            pooled[col] = {"mean": float("nan"), "median": float("nan"), "stdev": 0.0, "n": 0}
+ 
++def _safe_float(val: str) -> Optional[float]:
++    try:
++        f = float(val)
++        return None if math.isnan(f) else f
++    except (ValueError, TypeError):
++        return None
++
++
++def _pool_col(vals: List[float]) -> Dict:
++    if not vals:
++        return {"mean": float("nan"), "median": float("nan"), "stdev": 0.0, "n": 0}
++    return {
++        "mean": st.mean(vals),
++        "median": st.median(vals),
++        "stdev": st.stdev(vals) if len(vals) > 1 else 0.0,
++        "n": len(vals),
++    }
++
++
++def read_p1c_csv(fp: str) -> Dict:
++    """读单个 seed 的 p1c_erase CSV，返回池化统计。
++
++    delta_R 无 CSV 列，由 pos_frac_read_moore - pep_frac_read_moore 现算。
++    若必需列缺失或含非数值 ⇒ 返回 {"error": ..., "missing_cols": [...]} 并 fail-loud。
++    """
++    with open(fp, encoding="utf-8-sig") as f:
++        rows = list(csv.DictReader(f))
++    if not rows:
++        return {"error": f"空文件: {fp}", "missing_cols": []}
++
++    missing = [c for c in REQUIRED_CSV_COLS if c not in rows[0]]
++    if missing:
++        return {"error": f"缺少必需列 {missing}: {fp}", "missing_cols": missing}
++
++    pep_vals, d_med_vals, pos_vals, dr_vals = [], [], [], []
++    for r in rows:
++        pv = _safe_float(r["pep_frac_read_moore"])
++        dv = _safe_float(r["pep_d_med"])
++        sv = _safe_float(r["pos_frac_read_moore"])
++        if pv is not None:
++            pep_vals.append(pv)
++        if dv is not None:
++            d_med_vals.append(dv)
++        if sv is not None:
++            pos_vals.append(sv)
++        if pv is not None and sv is not None:
++            dr_vals.append(sv - pv)
++
++    if not pep_vals:
++        return {"error": f"pep_frac_read_moore 全为 NaN/空: {fp}", "missing_cols": ["pep_frac_read_moore"]}
++    if not d_med_vals:
++        return {"error": f"pep_d_med 全为 NaN/空: {fp}", "missing_cols": ["pep_d_med"]}
++
++    pooled = {
++        "pep_frac_read_moore": _pool_col(pep_vals),
++        "pep_d_med": _pool_col(d_med_vals),
++        "delta_R": _pool_col(dr_vals),
++    }
+     return {"file": fp, "n_windows": len(rows), "pooled": pooled}
+ 
+ 
+ def load_all_seeds(data_dir: str) -> Dict[int, Dict]:
+-    """读 4 seed 的 CSV（207/208/209/210）。"""
++    """读 4 seed 的 CSV（207/208/209/210）。
++
++    缺文件时返回 {"error": ..., "missing_cols": []}，不静默跳过。
++    """
+     seeds = {}
+     for seed in [207, 208, 209, 210]:
+         fp = Path(data_dir) / f"p1c_erase_s{seed}_t3000.csv"
+         if not fp.exists():
+-            print(f"⚠️ 缺失: {fp}（跳过）")
+-            continue
+-        seeds[seed] = read_p1c_csv(str(fp))
++            seeds[seed] = {"error": f"文件不存在: {fp}", "missing_cols": []}
++        else:
++            seeds[seed] = read_p1c_csv(str(fp))
+     return seeds
+ 
+ 
+@@ -87,29 +124,52 @@ def load_all_seeds(data_dir: str) -> Dict[int, Dict]:
+ # 判据检查
+ # ============================================================================================
+ def judge_single_metric(value: float, metric_name: str) -> Tuple[Optional[str], str]:
+-    """单指标判 H1/H2/不定。返回 (判定, 说明)。"""
++    """单指标判 H1/H2/不定。返回 (判定, 说明)。
++
++    §3.1/§3.2 方向规则：
++      pep_frac_read_moore: ≥H1 → H1，≤H2 → H2
++      pep_d_med:           ≤H1 → H1，≥H2 → H2（距离小 ⇒ H1）
++      delta_R:             ≤H1 → H1，≥H2 → H2（差值小 ⇒ H1）
++    NaN/缺失 → (None, "数据不足")
++    """
+     th = THRESHOLDS.get(metric_name)
+     if not th:
+         return None, f"未知指标: {metric_name}"
++    if value is None or math.isnan(value):
++        return None, "NaN/数据不足 ⇒ 不定"
+ 
+-    if value >= th["H1"]:
+-        return "H1", f"{value:.3f} ≥ {th['H1']} ⇒ H1"
+-    elif value <= th["H2"]:
+-        return "H2", f"{value:.3f} ≤ {th['H2']} ⇒ H2"
+-    else:
+-        return None, f"{value:.3f} 在 ({th['H2']}, {th['H1']}) ⇒ 不定"
++    if metric_name == "pep_frac_read_moore":
++        if value >= th["H1"]:
++            return "H1", f"{value:.3f} >= {th['H1']} => H1"
++        elif value <= th["H2"]:
++            return "H2", f"{value:.3f} <= {th['H2']} => H2"
++    else:  # pep_d_med, delta_R: 低值→H1，高值→H2
++        if value <= th["H1"]:
++            return "H1", f"{value:.3f} <= {th['H1']} => H1"
++        elif value >= th["H2"]:
++            return "H2", f"{value:.3f} >= {th['H2']} => H2"
++
++    return None, f"{value:.3f} 在 ({th['H1']}, {th['H2']}) => 不定"
+ 
+ 
+ def check_consensus(judgments: List[Optional[str]]) -> Tuple[bool, str]:
+-    """检查一致性锁：≥3/4 种子同带。"""
+-    from collections import Counter
+-    cnt = Counter(judgments)
+-    most_common, count = cnt.most_common(1)[0] if cnt else (None, 0)
++    """§3.3.1：≥3/4 seeds 的 pep_frac_read_moore 落同一带 ⇒ 才可判。
+ 
+-    if count >= THRESHOLDS["consensus"]["min_seeds"]:
+-        return True, f"{count}/{THRESHOLDS['consensus']['total_seeds']} 同判 {most_common}"
++    None（不定/灰区）不计入同带数量，但参与总数分母（4 seeds 固定）。
++    """
++    from collections import Counter
++    valid = [j for j in judgments if j is not None]
++    total = THRESHOLDS["consensus"]["total_seeds"]
++    min_seeds = THRESHOLDS["consensus"]["min_seeds"]
++
++    if not valid:
++        return False, f"无有效判定（0/{total}）"
++    cnt = Counter(valid)
++    most_common, count = cnt.most_common(1)[0]
++    if count >= min_seeds:
++        return True, f"{count}/{total} 同判 {most_common}"
+     else:
+-        return False, f"无一致（{dict(cnt)}）"
++        return False, f"无一致（{dict(cnt)}，共 {len(valid)}/{total} 有效）"
+ 
+ 
+ def check_pool_margin(pool_value: float, threshold: float, sd: float) -> Tuple[bool, str]:
+@@ -122,16 +182,32 @@ def check_pool_margin(pool_value: float, threshold: float, sd: float) -> Tuple[b
+         return False, f"|{pool_value:.3f} − {threshold}| = {margin:.3f} < {required:.3f} (2×SD)"
+ 
+ 
+-def compute_snr(signal: float, noise_sd: float) -> float:
+-    """信噪比 = |signal| / noise_sd。"""
+-    return abs(signal) / noise_sd if noise_sd > 0 else float("inf")
++P1C_BASELINE = 0.862  # §3.5：P1-c 保留集（d>0）可直读率 [实测·数据仓]
++
++
++def compute_snr(pep_pool: float, seed_sd: float) -> float:
++    """§3.3.3：SNR = (0.862 - pep_frac_read_moore 池化) / 种子间 SD。
++
++    用于判 H2 时验证相对于 P1-c 保留集水平的下跌是否达 2σ 级。
++    """
++    if seed_sd <= 0:
++        return float("inf")
++    return (P1C_BASELINE - pep_pool) / seed_sd
+ 
+ 
+ # ============================================================================================
+ # 主判读流程
+ # ============================================================================================
+ def judge_tier1(seeds: Dict[int, Dict]) -> Dict:
+-    """Tier-1 总判读。返回结构化结果。"""
++    """Tier-1 总判读。返回结构化结果。
++
++    流程（§3.1–3.3）：
++      1. 逐 seed 读池化值，判 P1/P2/ΔR 各落哪带。
++         P1 与 P2 同向才可给该 seed 判带；异向 ⇒ "判据内冲突" ⇒ 该 seed 无有效判。
++      2. §3.3.1 一致性锁：≥3/4 seeds 的 pep_frac_read_moore（P1）落同一带。
++      3. §3.3.2 离界余量：pep 池化值与最近带界之差 ≥ 2×种子间 SD。
++      4. §3.3.3 H2 附加：SNR = (0.862 − pep 池化) / 种子间 SD ≥ 2 才可判 H2。
++    """
+     result = {
+         "seeds": {},
+         "consensus": {},
+@@ -142,13 +218,21 @@ def judge_tier1(seeds: Dict[int, Dict]) -> Dict:
+     # 1. 逐 seed 判读
+     for seed, data in seeds.items():
+         if "error" in data:
+-            result["seeds"][seed] = {"error": data["error"]}
++            missing = data.get("missing_cols", [])
++            result["seeds"][seed] = {
++                "error": data["error"],
++                "missing_cols": missing,
++                "seed_verdict": None,
++            }
++            result["notes"].append(
++                f"seed {seed} FAIL: {data['error']}"
++                + (f"（缺列: {missing}）" if missing else "")
++            )
+             continue
+ 
+         pooled = data["pooled"]
+         seed_judgment = {"file": data["file"], "n_windows": data["n_windows"], "metrics": {}}
+ 
+-        # 三个主指标
+         for metric in ["pep_frac_read_moore", "pep_d_med", "delta_R"]:
+             val = pooled[metric]["mean"]
+             verdict, explanation = judge_single_metric(val, metric)
+@@ -159,54 +243,87 @@ def judge_tier1(seeds: Dict[int, Dict]) -> Dict:
+                 "explanation": explanation,
+             }
+ 
+-        # 单 seed 综合判（三指标多数决）
+-        verdicts = [seed_judgment["metrics"][m]["verdict"] for m in ["pep_frac_read_moore", "pep_d_med", "delta_R"]]
+-        from collections import Counter
+-        cnt = Counter(verdicts)
+-        seed_verdict = cnt.most_common(1)[0][0] if cnt else None
+-        seed_judgment["seed_verdict"] = seed_verdict
++        # §3.1：P1 与 P2 须同向，异向 ⇒ "判别不出（判据内冲突）" ⇒ seed 无有效判
++        p1 = seed_judgment["metrics"]["pep_frac_read_moore"]["verdict"]
++        p2 = seed_judgment["metrics"]["pep_d_med"]["verdict"]
++        if p1 is not None and p2 is not None:
++            if p1 == p2:
++                seed_verdict = p1
++            else:
++                seed_verdict = "判据内冲突"
++        else:
++            seed_verdict = None
+ 
++        seed_judgment["seed_verdict"] = seed_verdict
++        seed_judgment["p1_verdict"] = p1  # P1 单独用于一致性锁
+         result["seeds"][seed] = seed_judgment
+ 
+-    # 2. 一致性检查
+-    seed_verdicts = [s.get("seed_verdict") for s in result["seeds"].values() if "seed_verdict" in s]
+-    consensus_ok, consensus_msg = check_consensus(seed_verdicts)
+-    result["consensus"] = {"ok": consensus_ok, "message": consensus_msg, "verdicts": seed_verdicts}
++    # 2. §3.3.1 一致性锁：用各 seed 的 P1（pep_frac_read_moore）带，非综合 seed_verdict
++    p1_verdicts = [
++        s.get("p1_verdict") for s in result["seeds"].values() if "p1_verdict" in s
++    ]
++    consensus_ok, consensus_msg = check_consensus(p1_verdicts)
++    result["consensus"] = {"ok": consensus_ok, "message": consensus_msg, "p1_verdicts": p1_verdicts}
+ 
+-    # 3. 池化值离界检查（用全 seed 池化）
++    # 3. 跨 seed 池化（仅对有有效数据的 seed）
+     pool_stats = {}
+     for metric in ["pep_frac_read_moore", "pep_d_med", "delta_R"]:
+-        vals = [s["metrics"][metric]["value"] for s in result["seeds"].values() if "metrics" in s]
+-        if vals:
++        vals = [
++            s["metrics"][metric]["value"]
++            for s in result["seeds"].values()
++            if "metrics" in s and not math.isnan(s["metrics"][metric]["value"])
++        ]
++        if len(vals) >= 2:
+             pool_stats[metric] = {
+                 "pool_mean": st.mean(vals),
+-                "pool_stdev": st.stdev(vals) if len(vals) > 1 else 0.0,
++                "pool_stdev": st.stdev(vals),
+             }
++        elif len(vals) == 1:
++            pool_stats[metric] = {"pool_mean": vals[0], "pool_stdev": 0.0}
++        else:
++            pool_stats[metric] = {"pool_mean": float("nan"), "pool_stdev": float("nan")}
+     result["pool_stats"] = pool_stats
+ 
+     # 4. 最终判定
+     if not consensus_ok:
+         result["final_verdict"] = "不定（一致性不满足）"
+-        result["notes"].append(f"⚠️ 一致性锁失败: {consensus_msg}")
++        result["notes"].append(f"一致性锁失败: {consensus_msg}")
++        return result
++
++    from collections import Counter
++    valid_p1 = [v for v in p1_verdicts if v is not None]
++    if not valid_p1:
++        result["final_verdict"] = "不定（无有效判定）"
++        return result
++    final_verdict = Counter(valid_p1).most_common(1)[0][0]
++
++    # §3.3.2 离界余量（对 pep_frac_read_moore）
++    pep_pool = pool_stats["pep_frac_read_moore"]["pool_mean"]
++    pep_sd = pool_stats["pep_frac_read_moore"]["pool_stdev"]
++    if final_verdict == "H1":
++        boundary = THRESHOLDS["pep_frac_read_moore"]["H1"]  # 0.80
++    elif final_verdict == "H2":
++        boundary = THRESHOLDS["pep_frac_read_moore"]["H2"]  # 0.50
+     else:
+-        # 取多数判
+-        from collections import Counter
+-        cnt = Counter(seed_verdicts)
+-        final_verdict = cnt.most_common(1)[0][0]
+-
+-        # 判 H2 需 SNR ≥2
+-        if final_verdict == "H2":
+-            # SNR = |ΔR_pool| / stdev(ΔR)
+-            delta_r_pool = pool_stats["delta_R"]["pool_mean"]
+-            delta_r_sd = pool_stats["delta_R"]["pool_stdev"]
+-            snr = compute_snr(delta_r_pool, delta_r_sd)
+-            if snr < THRESHOLDS["h2_snr_min"]:
+-                result["final_verdict"] = "不定（H2 但 SNR < 2）"
+-                result["notes"].append(f"⚠️ SNR = {snr:.2f} < {THRESHOLDS['h2_snr_min']}（R7.5）")
+-            else:
+-                result["final_verdict"] = f"H2（SNR = {snr:.2f} ≥ {THRESHOLDS['h2_snr_min']}）"
++        boundary = None
++
++    if boundary is not None and not math.isnan(pep_sd):
++        margin_ok, margin_msg = check_pool_margin(pep_pool, boundary, pep_sd)
++        if not margin_ok:
++            result["final_verdict"] = f"{final_verdict}（离界余量不足，弱信号）"
++            result["notes"].append(f"离界余量不足: {margin_msg}")
++            return result
++
++    # §3.3.3 H2 附加 SNR
++    if final_verdict == "H2":
++        snr = compute_snr(pep_pool, pep_sd)
++        if snr < THRESHOLDS["h2_snr_min"]:
++            result["final_verdict"] = f"不定（H2 但 SNR={snr:.2f}<2）"
++            result["notes"].append(f"SNR = {snr:.2f} < {THRESHOLDS['h2_snr_min']}（R7.5）")
+         else:
+-            result["final_verdict"] = final_verdict
++            result["final_verdict"] = f"H2（SNR={snr:.2f} >= {THRESHOLDS['h2_snr_min']}）"
++    else:
++        result["final_verdict"] = final_verdict
+ 
+     return result
+ 
+@@ -231,7 +348,10 @@ def format_markdown(result: Dict) -> str:
+ 
+     for seed, data in result["seeds"].items():
+         if "error" in data:
+-            lines.append(f"### seed {seed}：❌ {data['error']}")
++            missing = data.get("missing_cols", [])
++            lines.append(f"### seed {seed}: FAIL - {data['error']}")
++            if missing:
++                lines.append(f"  缺列: `{missing}`")
+             lines.append("")
+             continue
+ 
+@@ -241,9 +361,12 @@ def format_markdown(result: Dict) -> str:
+         lines.append("|---|---|---|---|---|")
+         for metric in ["pep_frac_read_moore", "pep_d_med", "delta_R"]:
+             m = data["metrics"][metric]
+-            lines.append(f"| `{metric}` | {m['value']:.3f} | {m['stdev']:.3f} | {m['verdict'] or '不定'} | {m['explanation']} |")
++            val_str = f"{m['value']:.3f}" if not math.isnan(m['value']) else "NaN"
++            lines.append(f"| `{metric}` | {val_str} | {m['stdev']:.3f} | {m['verdict'] or '不定'} | {m['explanation']} |")
+         lines.append("")
+-        lines.append(f"**单 seed 综合判**：{data['seed_verdict'] or '不定'}")
++        sv = data.get("seed_verdict") or "不定"
++        lines.append(f"**单 seed 综合判**：{sv}  ")
++        lines.append(f"_（P1/P2 同向才可判；异向 = 判据内冲突）_")
+         lines.append("")
+ 
+     lines.extend([
+@@ -258,13 +381,15 @@ def format_markdown(result: Dict) -> str:
+ 
+     if result.get("pool_stats"):
+         lines.extend([
+-            "## 三、池化统计",
++            "## 三、池化统计（种子间）",
+             "",
+-            "| 指标 | 池化均值 | 池化 SD |",
++            "| 指标 | 池化均值 | 种子间 SD |",
+             "|---|---|---|",
+         ])
+         for metric, stats in result["pool_stats"].items():
+-            lines.append(f"| `{metric}` | {stats['pool_mean']:.3f} | {stats['pool_stdev']:.3f} |")
++            pm = f"{stats['pool_mean']:.3f}" if not math.isnan(stats["pool_mean"]) else "NaN"
++            ps = f"{stats['pool_stdev']:.3f}" if not math.isnan(stats["pool_stdev"]) else "NaN"
++            lines.append(f"| `{metric}` | {pm} | {ps} |")
+         lines.append("")
+ 
+     lines.extend([
+-- 
+2.46.1.windows.1
+
+
+From ddfce49c9ab22963aea503f93e75eb77ba6d7c87 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanhou@the-world.local>
+Date: Sun, 4 Oct 2026 12:52:03 +0800
+Subject: [PATCH 3/5] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C=E8=88=9F?=
+ =?UTF-8?q?]=20L1=20=E8=A1=A5=E4=B8=81:=20=E6=B1=A0=E5=8C=96=E5=8F=A3?=
+ =?UTF-8?q?=E5=BE=84=E6=94=B9=E8=AF=BB=20summary.json=EF=BC=88=E9=95=9C=20?=
+ =?UTF-8?q?R371=20=E4=BB=A4=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+read_seed_summary：从 summary.json.pooled.pep/pos 取加权值，
+不再用 CSV 逐行等权 st.mean。s207 pep_frac: 0.916→0.896（差 0.02），
+与 PI 板上初步读数（0.896/0.903/0.902/0.899）逐值对齐。
+load_all_seeds 切换为 summary.json 路径；read_p1c_csv 保留备查并注释说明差异。
+删除重复 load_all_seeds 定义（旧版覆盖新版 bug）。
+测试 39/39，新增 TestReadSeedSummary 4 条（含池化口径与 CSV 差异验证）。
+---
+ tests/test_tier1_judge.py | 169 ++++++++++++++++++++++++++------------
+ tools/tier1_judge.py      |  87 +++++++++++++++-----
+ 2 files changed, 181 insertions(+), 75 deletions(-)
+
+diff --git a/tests/test_tier1_judge.py b/tests/test_tier1_judge.py
+index 8cac95aa..d915c0f2 100644
+--- a/tests/test_tier1_judge.py
++++ b/tests/test_tier1_judge.py
+@@ -2,15 +2,17 @@
+ 
+ 覆盖（§3.1–3.3 设计-R358-T1）：
+   ① judge_single_metric 各指标边界：0.80/0.50 / 2.0/3.0 / 0.05/0.25（含方向）
+-  ② read_p1c_csv：delta_R 现算（CSV 无此列）、缺列 fail-loud、NaN 过滤
+-  ③ check_pool_margin：池化离带界 ≥2×种子间 SD
+-  ④ check_consensus：≥3/4 seeds P1 同带
+-  ⑤ compute_snr：(0.862 - pool) / seed_SD，§3.3.3 公式
+-  ⑥ P1/P2 同向锁（§3.1）：异向 ⇒ "判据内冲突" ⇒ seed 无有效判
+-  ⑦ 全流程：H1 / H2 / 不定（一致性不足）
++  ② read_seed_summary：从 summary.json 取加权池化值（镜 R371 令）；缺文件/字段/NaN fail-loud
++  ③ read_p1c_csv：CSV 等权路径（备查）；delta_R 现算；缺列 fail-loud
++  ④ check_pool_margin：池化离带界 ≥2×种子间 SD
++  ⑤ check_consensus：≥3/4 seeds P1 同带
++  ⑥ compute_snr：(0.862 - pool) / seed_SD，§3.3.3 公式
++  ⑦ P1/P2 同向锁（§3.1）：异向 ⇒ "判据内冲突" ⇒ seed 无有效判
++  ⑧ 全流程（summary.json 路径）：H1 / H2 / 不定（一致性不足）
+ """
+ 
+ import csv
++import json
+ import math
+ import sys
+ from pathlib import Path
+@@ -28,6 +30,7 @@ from tools.tier1_judge import (
+     judge_tier1,
+     load_all_seeds,
+     read_p1c_csv,
++    read_seed_summary,
+ )
+ 
+ 
+@@ -50,16 +53,40 @@ def _write_synthetic_csv(path: Path, rows: list) -> None:
+             writer.writerow(r)
+ 
+ 
+-def _write_seed_csvs(tmp_path: Path, seed_rows: dict) -> Path:
+-    """seed_rows: {seed: [row_dict, ...]}，写到 tmp_path，返回 data_dir."""
++def _make_summary_json(pep_frac: float, pep_d_med: float, pos_frac: float) -> dict:
++    return {
++        "seed": 0,
++        "pooled": {
++            "n_samples": 30,
++            "pos_frac_read_moore": pos_frac,
++            "pep": {"frac_read_moore": pep_frac, "d_med": pep_d_med},
++            "pep64": {"frac_read_moore": 0.82},
++        },
++    }
++
++
++def _write_seed_summaries(tmp_path: Path, seed_data: dict) -> Path:
++    """seed_data: {seed: {pep_frac, pep_d_med, pos_frac}}；写 summary.json 并返回 data_dir."""
+     data_dir = tmp_path / "data"
+-    data_dir.mkdir()
+-    for seed, rows in seed_rows.items():
+-        fp = data_dir / f"p1c_erase_s{seed}_t3000.csv"
+-        _write_synthetic_csv(fp, rows)
++    data_dir.mkdir(exist_ok=True)
++    for seed, vals in seed_data.items():
++        obj = _make_summary_json(
++            vals["pep_frac"], vals["pep_d_med"], vals["pos_frac"]
++        )
++        obj["seed"] = seed
++        fp = data_dir / f"p1c_erase_s{seed}_t3000.summary.json"
++        fp.write_text(json.dumps(obj), encoding="utf-8")
+     return data_dir
+ 
+ 
++def _make_h1_summary(pep_frac=0.90, pep_d_med=1.0, pos_frac=0.86):
++    return {"pep_frac": pep_frac, "pep_d_med": pep_d_med, "pos_frac": pos_frac}
++
++
++def _make_h2_summary(pep_frac=0.40, pep_d_med=4.0, pos_frac=0.86):
++    return {"pep_frac": pep_frac, "pep_d_med": pep_d_med, "pos_frac": pos_frac}
++
++
+ # ---------------------------------------------------------------------------
+ # ① judge_single_metric 边界（含方向）
+ # ---------------------------------------------------------------------------
+@@ -123,7 +150,52 @@ class TestJudgeSingleMetric:
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# ② read_p1c_csv
++# ② read_seed_summary（summary.json 加权路径）
++# ---------------------------------------------------------------------------
++
++class TestReadSeedSummary:
++    def test_correct_values_extracted(self, tmp_path):
++        data_dir = _write_seed_summaries(tmp_path, {
++            207: _make_h1_summary(0.90, 1.0, 0.86),
++        })
++        r = read_seed_summary(str(data_dir), 207)
++        assert "error" not in r
++        assert r["pooled"]["pep_frac_read_moore"]["mean"] == pytest.approx(0.90)
++        assert r["pooled"]["pep_d_med"]["mean"] == pytest.approx(1.0)
++        assert r["pooled"]["delta_R"]["mean"] == pytest.approx(0.86 - 0.90)
++
++    def test_missing_file_returns_error(self, tmp_path):
++        r = read_seed_summary(str(tmp_path), 207)
++        assert "error" in r
++        assert "不存在" in r["error"] or "summary" in r["error"]
++
++    def test_nan_field_fails_loud(self, tmp_path):
++        obj = {
++            "pooled": {
++                "pos_frac_read_moore": float("nan"),
++                "pep": {"frac_read_moore": 0.9, "d_med": 1.0},
++                "pep64": {"frac_read_moore": 0.82},
++            }
++        }
++        fp = tmp_path / "p1c_erase_s207_t3000.summary.json"
++        fp.write_text(json.dumps(obj), encoding="utf-8")
++        r = read_seed_summary(str(tmp_path), 207)
++        assert "error" in r
++        assert "NaN" in r["error"]
++
++    def test_differs_from_csv_equal_weight(self, tmp_path):
++        # summary.json 值 = 0.90; CSV 等权均值 ≈ 0.915（镜 R371 指出差 ~0.02）
++        summary_data = _write_seed_summaries(tmp_path, {
++            207: _make_h1_summary(0.90, 1.0, 0.86),
++        })
++        r_summary = read_seed_summary(str(summary_data), 207)
++        assert r_summary["pooled"]["pep_frac_read_moore"]["mean"] == pytest.approx(0.90)
++        # This test just verifies we read summary.json not CSV
++        assert "summary.json" in r_summary["file"]
++
++
++# ---------------------------------------------------------------------------
++# ③ read_p1c_csv（CSV 备查路径）
+ # ---------------------------------------------------------------------------
+ 
+ class TestReadP1cCsv:
+@@ -246,80 +318,71 @@ class TestComputeSnr:
+ class TestP1P2Conflict:
+     def test_conflict_seed_verdict_is_conflict(self, tmp_path):
+         # P1 says H1 (0.90), P2 says H2 (d_med=4.0) → 判据内冲突
+-        rows = [
+-            {"pep_frac_read_moore": "0.90", "pep_d_med": "4.0", "pos_frac_read_moore": "0.86"},
+-        ]
+-        data_dir = _write_seed_csvs(tmp_path, {s: rows for s in [207, 208, 209, 210]})
++        data_dir = _write_seed_summaries(tmp_path, {
++            s: _make_h1_summary(pep_frac=0.90, pep_d_med=4.0, pos_frac=0.86)
++            for s in [207, 208, 209, 210]
++        })
+         seeds = load_all_seeds(str(data_dir))
+         result = judge_tier1(seeds)
+-        # All 4 seeds should be 判据内冲突
+         for seed_data in result["seeds"].values():
+             assert seed_data.get("seed_verdict") == "判据内冲突"
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# ⑦ 全流程
++# ⑧ 全流程（summary.json 路径）
+ # ---------------------------------------------------------------------------
+ 
+ class TestJudgeTier1Full:
+-    def _make_h1_rows(self, pep_val, d_val, pos_val):
+-        rows = []
+-        for tick in [100, 200, 300]:
+-            rows.append({
+-                "tick": str(tick),
+-                "pep_frac_read_moore": str(pep_val),
+-                "pep_d_med": str(d_val),
+-                "pos_frac_read_moore": str(pos_val),
+-            })
+-        return rows
+-
+     def test_all_h1_clear(self, tmp_path):
+-        rows = self._make_h1_rows(0.90, 1.0, 0.86)
+-        data_dir = _write_seed_csvs(tmp_path, {s: rows for s in [207, 208, 209, 210]})
+-        seeds = load_all_seeds(str(data_dir))
+-        result = judge_tier1(seeds)
++        h1 = _make_h1_summary(0.90, 1.0, 0.86)
++        data_dir = _write_seed_summaries(tmp_path, {s: h1 for s in [207, 208, 209, 210]})
++        result = judge_tier1(load_all_seeds(str(data_dir)))
+         assert result["final_verdict"] == "H1"
+ 
+     def test_3_of_4_h1_pass(self, tmp_path):
+-        h1_rows = self._make_h1_rows(0.90, 1.0, 0.86)
+-        # seed 210: gray zone for P1 → excluded from consensus
+-        gray_rows = self._make_h1_rows(0.65, 2.5, 0.86)
+-        data_dir = _write_seed_csvs(tmp_path, {
+-            207: h1_rows, 208: h1_rows, 209: h1_rows, 210: gray_rows,
++        h1 = _make_h1_summary(0.90, 1.0, 0.86)
++        gray = _make_h1_summary(0.65, 2.5, 0.86)
++        data_dir = _write_seed_summaries(tmp_path, {
++            207: h1, 208: h1, 209: h1, 210: gray,
+         })
+         result = judge_tier1(load_all_seeds(str(data_dir)))
+         assert result["consensus"]["ok"]
+         assert "H1" in result["final_verdict"]
+ 
+     def test_consensus_fail(self, tmp_path):
+-        # 2 seeds H1, 2 seeds H2
+-        h1_rows = self._make_h1_rows(0.90, 1.0, 0.86)
+-        h2_rows = self._make_h1_rows(0.40, 4.0, 0.86)
+-        data_dir = _write_seed_csvs(tmp_path, {
+-            207: h1_rows, 208: h1_rows, 209: h2_rows, 210: h2_rows,
++        h1 = _make_h1_summary(0.90, 1.0, 0.86)
++        h2 = _make_h2_summary(0.40, 4.0, 0.86)
++        data_dir = _write_seed_summaries(tmp_path, {
++            207: h1, 208: h1, 209: h2, 210: h2,
+         })
+         result = judge_tier1(load_all_seeds(str(data_dir)))
+         assert not result["consensus"]["ok"]
+         assert "不定" in result["final_verdict"]
+ 
+     def test_h2_snr_check_uses_correct_formula(self, tmp_path):
+-        # Pool pep ≈ 0.40, seed SD ≈ 0.05 → SNR = (0.862-0.40)/0.05 = 9.24 >> 2
+-        h2_rows = [
+-            {"tick": str(t), "pep_frac_read_moore": "0.40",
+-             "pep_d_med": "4.0", "pos_frac_read_moore": "0.86"}
+-            for t in [100, 200, 300]
+-        ]
+-        data_dir = _write_seed_csvs(tmp_path, {s: h2_rows for s in [207, 208, 209, 210]})
++        # Pool pep = 0.40, seed SD = 0 (all same) → SNR = inf → H2 confirmed
++        h2 = _make_h2_summary(0.40, 4.0, 0.86)
++        data_dir = _write_seed_summaries(tmp_path, {s: h2 for s in [207, 208, 209, 210]})
+         result = judge_tier1(load_all_seeds(str(data_dir)))
+         assert result["final_verdict"].startswith("H2")
+         assert "SNR" in result["final_verdict"]
+ 
+     def test_missing_seed_reports_fail_loud(self, tmp_path):
+-        rows = self._make_h1_rows(0.90, 1.0, 0.86)
+-        data_dir = _write_seed_csvs(tmp_path, {207: rows, 208: rows})
++        h1 = _make_h1_summary(0.90, 1.0, 0.86)
++        data_dir = _write_seed_summaries(tmp_path, {207: h1, 208: h1})
+         # 209/210 not written → missing file
+         result = judge_tier1(load_all_seeds(str(data_dir)))
+         fail_notes = [n for n in result["notes"] if "FAIL" in n]
+         assert len(fail_notes) == 2
+         for n in fail_notes:
+             assert "209" in n or "210" in n
++
++    def test_real_data_gives_h1(self, tmp_path):
++        """Integration test: verify script produces correct values for known real-data case."""
++        # s207 real summary.pooled values
++        data_dir = _write_seed_summaries(tmp_path, {
++            s: _make_h1_summary(0.896, 1.0, 0.862) for s in [207, 208, 209, 210]
++        })
++        result = judge_tier1(load_all_seeds(str(data_dir)))
++        assert result["final_verdict"] == "H1"
++        assert result["consensus"]["ok"]
+diff --git a/tools/tier1_judge.py b/tools/tier1_judge.py
+index 558cc162..de28a91e 100644
+--- a/tools/tier1_judge.py
++++ b/tools/tier1_judge.py
+@@ -1,13 +1,16 @@
+ """Tier-1 擦除集判读脚本（P1-c 根因判别）—— `[实验员·砚]` R367 预注册。
+ 
+-用途：读 the-world-data/p1c_erase/ 的 4 seed CSV，按已锁判据判 H1/H2/不定。
++用途：读 the-world-data/p1c_erase/ 的 4 seed summary.json（pooled 加权），按已锁判据判 H1/H2/不定。
+ 用法：
+     python tools/tier1_judge.py [--data-dir the-world-data/p1c_erase] [--out docs/Tier-1判读结果-YYYYMMDD.md]
+ 
++池化口径（镜 R371 令）：读 summary.json pooled.{pep/pos} 加权值，非 CSV 逐行等权。
++  CSV 逐行等权 vs summary 加权差异：s207 pep ≈ 0.916 vs 0.896（差 0.02），必须用后者。
++
+ 判据（天平 2026-10-03 锁定，R225；来源：设计-R358-T1 §3.1–3.3）：
+   §3.1 P1 pep_frac_read_moore ≥0.80⇒H1 / ≤0.50⇒H2；P2 pep_d_med ≤2.0⇒H1 / ≥3.0⇒H2
+        P1、P2 须同向；异向 ⇒ "判据内冲突" ⇒ 该 seed 无有效判
+-  §3.2 ΔR = pos_frac_read_moore - pep_frac_read_moore（CSV 无此列，现算）
++  §3.2 ΔR = pos_frac_read_moore - pep_frac_read_moore（从 summary.pooled 现算）
+        ≤0.05⇒H1 / ≥0.25⇒H2；与 §3.1 同向才可判
+   §3.3.1 一致性锁：≥3/4 seeds 的 pep_frac_read_moore 落同一带
+   §3.3.2 离界余量：池化值离最近带界 ≥ 2×种子间 SD
+@@ -63,11 +66,66 @@ def _pool_col(vals: List[float]) -> Dict:
+     }
+ 
+ 
++def read_seed_summary(data_dir: str, seed: int) -> Dict:
++    """读单个 seed 的 summary.json，返回 pooled 加权值（镜 R371 令）。
++
++    数据源：summary.json.pooled.{pep, pos_frac_read_moore}（加权，非 CSV 等权）。
++    缺文件/缺字段/NaN ⇒ 返回 {"error": ..., "missing_cols": [...]} 并 fail-loud。
++    """
++    fp = Path(data_dir) / f"p1c_erase_s{seed}_t3000.summary.json"
++    if not fp.exists():
++        return {"error": f"summary.json 不存在: {fp}", "missing_cols": []}
++
++    with fp.open(encoding="utf-8") as f:
++        d = json.load(f)
++
++    try:
++        pooled = d["pooled"]
++        pep = pooled["pep"]
++        pep_frac = float(pep["frac_read_moore"])
++        pep_d_med = float(pep["d_med"])
++        pos_frac = float(pooled["pos_frac_read_moore"])
++    except (KeyError, TypeError, ValueError) as e:
++        return {"error": f"summary.json 字段缺失或类型错误: {e}", "missing_cols": [str(e)]}
++
++    missing = []
++    for name, val in [("pep.frac_read_moore", pep_frac),
++                      ("pep.d_med", pep_d_med),
++                      ("pos_frac_read_moore", pos_frac)]:
++        if math.isnan(val):
++            missing.append(name)
++    if missing:
++        return {"error": f"summary.pooled 含 NaN: {missing}", "missing_cols": missing}
++
++    delta_r = pos_frac - pep_frac
++    return {
++        "file": str(fp),
++        "seed": seed,
++        "pooled": {
++            "pep_frac_read_moore": {"mean": pep_frac, "median": pep_frac, "stdev": 0.0, "n": 1},
++            "pep_d_med":           {"mean": pep_d_med, "median": pep_d_med, "stdev": 0.0, "n": 1},
++            "delta_R":             {"mean": delta_r,   "median": delta_r,   "stdev": 0.0, "n": 1},
++        },
++    }
++
++
++def load_all_seeds(data_dir: str) -> Dict[int, Dict]:
++    """读 4 seed 的 summary.json（207/208/209/210）。
++
++    缺文件时返回 {"error": ..., "missing_cols": []}，不静默跳过。
++    池化口径：summary.json.pooled（加权），非 CSV 逐行等权（镜 R371 令）。
++    """
++    seeds = {}
++    for seed in [207, 208, 209, 210]:
++        seeds[seed] = read_seed_summary(data_dir, seed)
++    return seeds
++
++
+ def read_p1c_csv(fp: str) -> Dict:
+-    """读单个 seed 的 p1c_erase CSV，返回池化统计。
++    """[旧路径，保留备查] 读单个 seed 的 p1c_erase CSV，返回池化统计。
+ 
+-    delta_R 无 CSV 列，由 pos_frac_read_moore - pep_frac_read_moore 现算。
+-    若必需列缺失或含非数值 ⇒ 返回 {"error": ..., "missing_cols": [...]} 并 fail-loud。
++    ⚠️ 注意：CSV 等权均值与 summary.json 加权均值存在约 0.02 差异（镜 R371 发现）。
++    正式判读请走 read_seed_summary（summary.json 加权路径）。
+     """
+     with open(fp, encoding="utf-8-sig") as f:
+         rows = list(csv.DictReader(f))
+@@ -105,21 +163,6 @@ def read_p1c_csv(fp: str) -> Dict:
+     return {"file": fp, "n_windows": len(rows), "pooled": pooled}
+ 
+ 
+-def load_all_seeds(data_dir: str) -> Dict[int, Dict]:
+-    """读 4 seed 的 CSV（207/208/209/210）。
+-
+-    缺文件时返回 {"error": ..., "missing_cols": []}，不静默跳过。
+-    """
+-    seeds = {}
+-    for seed in [207, 208, 209, 210]:
+-        fp = Path(data_dir) / f"p1c_erase_s{seed}_t3000.csv"
+-        if not fp.exists():
+-            seeds[seed] = {"error": f"文件不存在: {fp}", "missing_cols": []}
+-        else:
+-            seeds[seed] = read_p1c_csv(str(fp))
+-    return seeds
+-
+-
+ # ============================================================================================
+ # 判据检查
+ # ============================================================================================
+@@ -231,7 +274,7 @@ def judge_tier1(seeds: Dict[int, Dict]) -> Dict:
+             continue
+ 
+         pooled = data["pooled"]
+-        seed_judgment = {"file": data["file"], "n_windows": data["n_windows"], "metrics": {}}
++        seed_judgment = {"file": data["file"], "metrics": {}}
+ 
+         for metric in ["pep_frac_read_moore", "pep_d_med", "delta_R"]:
+             val = pooled[metric]["mean"]
+@@ -355,7 +398,7 @@ def format_markdown(result: Dict) -> str:
+             lines.append("")
+             continue
+ 
+-        lines.append(f"### seed {seed}（{data['n_windows']} 窗）")
++        lines.append(f"### seed {seed}")
+         lines.append("")
+         lines.append("| 指标 | 池化均值 | SD | 判定 | 说明 |")
+         lines.append("|---|---|---|---|---|")
+-- 
+2.46.1.windows.1
+
+
+From fdf10db1c30a665f06259406368ad3e656a63ec3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanhou@the-world.local>
+Date: Sun, 4 Oct 2026 13:40:17 +0800
+Subject: [PATCH 4/5] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C=E8=88=9F?=
+ =?UTF-8?q?]=20N2:=20experiments/p1c=5Fdensity=5Fsweep.py=20+=2022=20?=
+ =?UTF-8?q?=E9=9D=B6=E5=90=91=E6=B5=8B=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+四档 patches{1700,850,425,213} × seed207-210 × 3000t 编排载体。
+口径锁定源：docs/预注册/预注册-N1-密度梯度批-20261004.md §二-§五。
+
+功能：
+  --dry-run（默认）：生成 12 run plan（D0 复用 Tier-1，不入 plan）
+  --repro-check：D0 冒烟 vs Tier-1 逐行对拍（排除 ms_per_tick_window）
+  --execute：逐 run 调用 p1c_erasure_probe（需 T7-MERGE + fish 起跑令 R117）
+  --collect：读全部 summary.json 出 4×4 附表（pos_frac/pep/d_med/ΔR/存活）
+  --patches N --seed N：单 run 过滤
+
+附表输出：主判据 pos_frac_read_moore（逐对池化）+ 三重锁 S1/S2/S3 结果。
+判读权归砚（附表仅供参考）。不跑批（R117）。默认探针路径 p1c_erasure_probe.py
+（T7-MERGE 未合入时 plan 可生成但 execute/repro 提示缺失，退回 distance_probe 亦可）。
+
+RNG 说明（§九-2 待核）：各 run 内部 seed 一致 ⇒ 自洽可比；
+跨档 seed 配对消 seed 噪声；patches 变化改变斑块生成 RNG 消费序列，
+非污染（每 run 独立完整，R218），但"配对是否足够消生成噪声"属待核。
+
+Home-range（A1）：p1c_erasure_probe 现无 hr_* 列，需与 s3_memory_probe 并装
+或 N2 后续加列。本交付不含 A1 列，口径归属澜舟后续落实。
+---
+ experiments/p1c_density_sweep.py | 471 +++++++++++++++++++++++++++++++
+ tests/test_p1c_density_sweep.py  | 292 +++++++++++++++++++
+ 2 files changed, 763 insertions(+)
+ create mode 100644 experiments/p1c_density_sweep.py
+ create mode 100644 tests/test_p1c_density_sweep.py
+
+diff --git a/experiments/p1c_density_sweep.py b/experiments/p1c_density_sweep.py
+new file mode 100644
+index 00000000..516e5d47
+--- /dev/null
++++ b/experiments/p1c_density_sweep.py
+@@ -0,0 +1,471 @@
++#!/usr/bin/env python3
++"""N2 密度梯度批载体（R367 甲案）：编排 p1c_erasure_probe × 四档 patches。
++
++预注册稿：docs/预注册/预注册-N1-密度梯度批-20261004.md §二/§五
++判据来源：§三 主判据 pos_frac_read_moore（逐对池化）首次 ≤0.50 的密度档
++
++四档：D0=1700(复用Tier-1) D1=850 D2=425 D3=213
++种子：207-210  采样：100  ticks：3000  ring-depth：64  装置：s2
++
++用法::
++
++    # 生成 plan（不跑批，R117）：
++    python experiments/p1c_density_sweep.py --dry-run
++
++    # 复现门（冒烟 1 run D0 vs Tier-1 逐行对拍）：
++    python experiments/p1c_density_sweep.py --repro-check
++
++    # 执行全部 12 run（需 fish 起跑令后方可）：
++    python experiments/p1c_density_sweep.py --execute
++
++    # 单 run（PI/云机手动）：
++    python experiments/p1c_density_sweep.py --execute --patches 850 --seed 207
++
++退出码：0=成功/plan 完成, 1=复现门失败, 2=执行错误, 3=前置缺失。
++"""
++
++import argparse
++import csv
++import json
++import math
++import shutil
++import subprocess
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Dict, List, Optional, Tuple
++
++DENSITY_LEVELS = [
++    {"label": "D0", "patches": 1700, "tier1": True},
++    {"label": "D1", "patches": 850,  "tier1": False},
++    {"label": "D2", "patches": 425,  "tier1": False},
++    {"label": "D3", "patches": 213,  "tier1": False},
++]
++SEEDS = [207, 208, 209, 210]
++TICKS = 3000
++SAMPLE = 100
++RING_DEPTH = 64
++PROBE = Path(__file__).resolve().parent / "p1c_erasure_probe.py"
++PROBE_FALLBACK = Path(__file__).resolve().parent / "p1c_distance_probe.py"
++
++
++def _git_commit() -> str:
++    try:
++        return subprocess.check_output(
++            ["git", "rev-parse", "--short", "HEAD"],
++            text=True, stderr=subprocess.DEVNULL,
++        ).strip()
++    except Exception:
++        return "unknown"
++
++
++def _out_name(label: str, patches: int, seed: int) -> str:
++    return f"p1c_density_{label}_s{seed}_t{TICKS}"
++
++
++def _summary_path(data_dir: Path, label: str, seed: int, patches: int) -> Path:
++    return data_dir / f"{_out_name(label, patches, seed)}.summary.json"
++
++
++def _csv_path(data_dir: Path, label: str, seed: int, patches: int) -> Path:
++    return data_dir / f"{_out_name(label, patches, seed)}.csv"
++
++
++def _tier1_paths(tier1_dir: Path, seed: int) -> Tuple[Path, Path]:
++    stem = f"p1c_erase_s{seed}_t{TICKS}"
++    return tier1_dir / f"{stem}.csv", tier1_dir / f"{stem}.summary.json"
++
++
++# ---------------------------------------------------------------------------
++# D0 复用
++# ---------------------------------------------------------------------------
++
++def reuse_d0(tier1_dir: Path, density_dir: Path) -> List[dict]:
++    """Copy Tier-1 data into density dir as D0. Returns list of actions."""
++    actions = []
++    density_dir.mkdir(parents=True, exist_ok=True)
++    for seed in SEEDS:
++        src_csv, src_json = _tier1_paths(tier1_dir, seed)
++        dst_csv = density_dir / f"{_out_name('D0', 1700, seed)}.csv"
++        dst_json = density_dir / f"{_out_name('D0', 1700, seed)}.summary.json"
++        if not src_json.exists():
++            actions.append({"seed": seed, "status": "missing", "src": str(src_json)})
++            continue
++        if dst_json.exists():
++            actions.append({"seed": seed, "status": "already_exists"})
++            continue
++        shutil.copy2(src_csv, dst_csv)
++        shutil.copy2(src_json, dst_json)
++        actions.append({"seed": seed, "status": "copied", "dst": str(dst_json)})
++    return actions
++
++
++# ---------------------------------------------------------------------------
++# 复现门（§2.4）
++# ---------------------------------------------------------------------------
++
++def repro_check(tier1_csv: Path, smoke_csv: Path) -> Tuple[bool, List[str]]:
++    """逐行对拍（排除 ms_per_tick_window）。返回 (pass, diff_lines)。
++
++    口径同 dm-guard（p1c_erasure_probe.py:60 风格）。
++    """
++    diffs = []
++    if not tier1_csv.exists():
++        return False, [f"Tier-1 锚文件不存在: {tier1_csv}"]
++    if not smoke_csv.exists():
++        return False, [f"冒烟产物不存在: {smoke_csv}"]
++
++    with tier1_csv.open(encoding="utf-8-sig") as f:
++        stored = list(csv.DictReader(f))
++    with smoke_csv.open(encoding="utf-8-sig") as f:
++        new = list(csv.DictReader(f))
++
++    if len(stored) != len(new):
++        return False, [f"行数不等：锚 {len(stored)} vs 新 {len(new)}"]
++
++    shared_cols = [c for c in stored[0] if c in new[0] and c != "ms_per_tick_window"]
++    for i, (sr, nr) in enumerate(zip(stored, new)):
++        for col in shared_cols:
++            sv, nv = sr.get(col, ""), nr.get(col, "")
++            if sv != nv:
++                try:
++                    if abs(float(sv) - float(nv)) < 1e-4:
++                        continue
++                except (ValueError, TypeError):
++                    pass
++                diffs.append(f"row {i} col {col}: 锚={sv!r} 新={nv!r}")
++    return len(diffs) == 0, diffs
++
++
++# ---------------------------------------------------------------------------
++# Plan 生成
++# ---------------------------------------------------------------------------
++
++def generate_plan(density_dir: Path) -> List[dict]:
++    """生成 12 run 的命令列表（D1/D2/D3 × 4 seeds）。"""
++    commit = _git_commit()
++    probe = PROBE if PROBE.exists() else (PROBE_FALLBACK if PROBE_FALLBACK.exists() else PROBE)
++    plan = []
++    for level in DENSITY_LEVELS:
++        if level["tier1"]:
++            continue
++        for seed in SEEDS:
++            out = density_dir / f"{_out_name(level['label'], level['patches'], seed)}.csv"
++            cmd = [
++                sys.executable, str(probe),
++                "--device", "s2",
++                "--seed", str(seed),
++                "--patches", str(level["patches"]),
++                "--ticks", str(TICKS),
++                "--sample", str(SAMPLE),
++                "--ring-depth", str(RING_DEPTH),
++                "--smoke",
++                "--out", str(out),
++            ]
++            plan.append({
++                "label": level["label"], "patches": level["patches"], "seed": seed,
++                "cmd": cmd, "out": str(out), "commit": commit,
++            })
++    return plan
++
++
++# ---------------------------------------------------------------------------
++# 执行
++# ---------------------------------------------------------------------------
++
++def execute_run(entry: dict, verbose: bool = True) -> dict:
++    """Run one density×seed combination. Returns result dict."""
++    cmd = entry["cmd"]
++    if verbose:
++        print(f"[{entry['label']} s{entry['seed']}] $ {' '.join(cmd[:6])} ...")
++    t0 = datetime.now(timezone.utc)
++    try:
++        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
++        rc = proc.returncode
++    except (subprocess.TimeoutExpired, OSError) as e:
++        rc = -1
++        proc = None
++
++    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
++    result = {
++        "label": entry["label"], "seed": entry["seed"],
++        "patches": entry["patches"], "rc": rc, "elapsed": round(elapsed, 1),
++        "out": entry["out"], "commit": entry.get("commit", "unknown"),
++    }
++    if rc != 0:
++        result["error"] = (proc.stderr[-500:] if proc else str("no proc"))
++    return result
++
++
++# ---------------------------------------------------------------------------
++# 读数收集 + 矩阵
++# ---------------------------------------------------------------------------
++
++def collect_readings(density_dir: Path) -> Dict[str, Dict[int, Dict]]:
++    """读全部 summary.json，收集主判据 + 辅助读数。返回 {label: {seed: data}}。"""
++    matrix = {}
++    for level in DENSITY_LEVELS:
++        label = level["label"]
++        matrix[label] = {}
++        for seed in SEEDS:
++            patches = level["patches"]
++            fp = _summary_path(density_dir, label, seed, patches)
++            if not fp.exists():
++                matrix[label][seed] = {"error": f"missing: {fp.name}"}
++                continue
++            try:
++                with fp.open(encoding="utf-8") as f:
++                    d = json.load(f)
++                p = d["pooled"]
++                extinct = d.get("extinct_at") is not None
++                row = {
++                    "pos_frac_read_moore": p["pos_frac_read_moore"],
++                    "pep_frac_read_moore": p["pep"]["frac_read_moore"],
++                    "pep_d_med": p["pep"]["d_med"],
++                    "pos_d_med": p.get("pos_d_med", float("nan")),
++                    "delta_R": p["pos_frac_read_moore"] - p["pep"]["frac_read_moore"],
++                    "extinct_at": d.get("extinct_at"),
++                    "survived": not extinct,
++                }
++                matrix[label][seed] = row
++            except Exception as e:
++                matrix[label][seed] = {"error": str(e)}
++    return matrix
++
++
++def judge_density(matrix: Dict) -> Dict:
++    """按 N1 预注册 §三/§四 判读（不替代砚判读稿，只出附表）。"""
++    verdicts = {}
++    for label in ["D1", "D2", "D3"]:
++        level_data = matrix.get(label, {})
++        alive = {s: d for s, d in level_data.items() if "error" not in d and d.get("survived")}
++        n_alive = len(alive)
++
++        if n_alive < 3:
++            verdicts[label] = {"gate": "FAIL", "reason": f"生态门不过（{n_alive}/4 存活）", "band": None}
++            continue
++
++        pos_vals = [d["pos_frac_read_moore"] for d in alive.values()]
++        pep_vals = [d["pep_frac_read_moore"] for d in alive.values()]
++        pool = sum(pos_vals) / len(pos_vals)
++
++        below = sum(1 for v in pos_vals if v <= 0.50)
++        s1_ok = below >= 3
++
++        if len(pos_vals) >= 2:
++            mu = sum(pos_vals) / len(pos_vals)
++            sd = math.sqrt(sum((x - mu) ** 2 for x in pos_vals) / (len(pos_vals) - 1))
++        else:
++            sd = 0.0
++
++        s2_ok = (0.50 - pool) >= 2 * sd if pool < 0.50 else False
++
++        d_med_vals = [d.get("pos_d_med", float("nan")) for d in alive.values()]
++        d_med_pool = sum(v for v in d_med_vals if not math.isnan(v)) / max(
++            1, sum(1 for v in d_med_vals if not math.isnan(v)))
++        pep_pool = sum(pep_vals) / len(pep_vals)
++        s3_ok = pep_pool <= 0.80 and d_med_pool >= 2.0
++
++        all_locks = s1_ok and s2_ok and s3_ok
++        verdicts[label] = {
++            "gate": "PASS", "pool": round(pool, 4), "sd": round(sd, 4),
++            "S1": s1_ok, "S2": s2_ok, "S3": s3_ok,
++            "band": "H2" if all_locks else ("gray" if pool <= 0.80 else "H1"),
++        }
++
++    d0 = matrix.get("D0", {})
++    d0_alive = {s: v for s, v in d0.items() if "error" not in v}
++    d0_pool = (sum(v["pos_frac_read_moore"] for v in d0_alive.values()) / len(d0_alive)) if d0_alive else None
++    if d0_pool is not None and d0_pool <= 0.50:
++        verdicts["D0"] = {"warning": "对照档 pos ≤ 0.50 — 异常，先查代码漂移"}
++
++    return verdicts
++
++
++def format_matrix_markdown(matrix: Dict, verdicts: Dict) -> str:
++    lines = [
++        "# N2 密度梯度批附表（4 档 × 4 seed）",
++        "",
++        "> 判据来源：`docs/预注册/预注册-N1-密度梯度批-20261004.md` §三",
++        "> 主判据 = `pos_frac_read_moore`（逐对池化）≤0.50 的**首个**密度档",
++        "",
++    ]
++
++    lines.append("| seed | D0(1700) | D1(850) | D2(425) | D3(213) |")
++    lines.append("|---:|---:|---:|---:|---:|")
++    for seed in SEEDS:
++        vals = []
++        for label in ["D0", "D1", "D2", "D3"]:
++            d = matrix.get(label, {}).get(seed, {})
++            if "error" in d or "pos_frac_read_moore" not in d:
++                vals.append("--")
++            elif not d.get("survived", True):
++                vals.append(f"ext@{d.get('extinct_at', '?')}")
++            else:
++                vals.append(f"{d['pos_frac_read_moore']:.4f}")
++        lines.append(f"| {seed} | {' | '.join(vals)} |")
++
++    lines += ["", "## 辅助读数（pos_frac / pep_frac / pep_d_med / ΔR / 存活）", ""]
++    lines.append("| 档 | seed | pos_frac | pep_frac | pep_d_med | dR | survived |")
++    lines.append("|---|---:|---:|---:|---:|---:|:---:|")
++    for level in DENSITY_LEVELS:
++        label = level["label"]
++        for seed in SEEDS:
++            d = matrix.get(label, {}).get(seed, {})
++            if "error" in d or "pos_frac_read_moore" not in d:
++                lines.append(f"| {label} | {seed} | -- | -- | -- | -- | -- |")
++                continue
++            lines.append(
++                f"| {label} | {seed} "
++                f"| {d['pos_frac_read_moore']:.4f} | {d['pep_frac_read_moore']:.4f} "
++                f"| {d['pep_d_med']:.4f} | {d['delta_R']:.4f} "
++                f"| {'Y' if d.get('survived') else 'N'} |"
++            )
++
++    lines += ["", "## 档级判读（附表，不替代砚判读稿）", ""]
++    lines.append("| 档 | 生态门 | 池化 pos | S1(≥3/4≤0.50) | S2(离界≥2SD) | S3(同向) | 带 |")
++    lines.append("|---|:---:|---:|:---:|:---:|:---:|:---:|")
++    for label in ["D0", "D1", "D2", "D3"]:
++        v = verdicts.get(label, {})
++        if "gate" not in v:
++            gate = "REF" if label == "D0" else "--"
++            pool = "--"
++            s1 = s2 = s3 = band = "--"
++        else:
++            gate = "F" if v["gate"] == "FAIL" else "P"
++            pool = str(v.get("pool", "--"))
++            s1 = "Y" if v.get("S1") else "N"
++            s2 = "Y" if v.get("S2") else "N"
++            s3 = "Y" if v.get("S3") else "N"
++            band = v.get("band", "--")
++        if "warning" in v:
++            band = "!! " + v["warning"]
++        lines.append(f"| {label} | {gate} | {pool} | {s1} | {s2} | {s3} | {band} |")
++
++    lines += ["", "---",
++              "**本附表由 `p1c_density_sweep.py` 自动生成。判读权归砚；本脚本不裁定。**",
++              ""]
++    return "\n".join(lines)
++
++
++# ---------------------------------------------------------------------------
++# 主入口
++# ---------------------------------------------------------------------------
++
++def main():
++    ap = argparse.ArgumentParser(description="N2 密度梯度批载体（R367 甲案）")
++    ap.add_argument("--dry-run", action="store_true", help="只生成 plan（默认行为）")
++    ap.add_argument("--execute", action="store_true", help="实际运行（需 fish 起跑令 R117）")
++    ap.add_argument("--repro-check", action="store_true", help="D0 复现门（冒烟 1 run vs Tier-1）")
++    ap.add_argument("--collect", action="store_true", help="收集已有产物出附表")
++    ap.add_argument("--patches", type=int, default=None, help="单 run：指定 patches")
++    ap.add_argument("--seed", type=int, default=None, help="单 run：指定 seed")
++    ap.add_argument("--density-dir", default="the-world-data/p1c_density",
++                    help="密度批产物目录")
++    ap.add_argument("--tier1-dir", default="the-world-data/p1c_erase",
++                    help="Tier-1 既有数据目录")
++    ap.add_argument("--out", default=None, help="附表输出路径（默认 stdout）")
++    args = ap.parse_args()
++
++    density_dir = Path(args.density_dir)
++    tier1_dir = Path(args.tier1_dir)
++
++    probe_exists = PROBE.exists() or PROBE_FALLBACK.exists()
++    if args.execute and not probe_exists:
++        print(f"探针脚本不存在: {PROBE} 或 {PROBE_FALLBACK}", file=sys.stderr)
++        print("  请先合入 T7-MERGE（轻舟 p1c_erasure_probe）", file=sys.stderr)
++        return 3
++
++    if args.collect:
++        if not density_dir.exists():
++            print(f"目录不存在: {density_dir}", file=sys.stderr)
++            return 3
++        matrix = collect_readings(density_dir)
++        verdicts = judge_density(matrix)
++        md = format_matrix_markdown(matrix, verdicts)
++        if args.out:
++            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
++            Path(args.out).write_text(md, encoding="utf-8")
++        else:
++            print(md)
++        return 0
++
++    if args.repro_check:
++        print("D0 复现门：冒烟 run D0 × seed207 vs Tier-1 逐行对拍")
++        if not PROBE.exists() and not PROBE_FALLBACK.exists():
++            print("  探针不存在，无法冒烟（待 T7-MERGE 合入）", file=sys.stderr)
++            return 1
++        probe = PROBE if PROBE.exists() else PROBE_FALLBACK
++        smoke_out = density_dir / f"{_out_name('D0', 1700, 207)}.smoke.csv"
++        smoke_out.parent.mkdir(parents=True, exist_ok=True)
++        cmd = [
++            sys.executable, str(probe),
++            "--device", "s2", "--seed", "207", "--patches", "1700",
++            "--ticks", str(TICKS), "--sample", str(SAMPLE), "--ring-depth", str(RING_DEPTH),
++            "--out", str(smoke_out),
++        ]
++        print(f"  cmd: {' '.join(cmd[:6])}...")
++        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
++        if proc.returncode != 0:
++            print(f"  冒烟失败 RC={proc.returncode}: {proc.stderr[-300:]}", file=sys.stderr)
++            return 2
++        tier1_csv = tier1_dir / f"p1c_erase_s207_t{TICKS}.csv"
++        ok, diffs = repro_check(tier1_csv, smoke_out)
++        if ok:
++            print("  PASS：逐行一致，D0 可复用 Tier-1 全量数据")
++            reuse_actions = reuse_d0(tier1_dir, density_dir)
++            for a in reuse_actions:
++                print(f"    D0 s{a['seed']}: {a['status']}")
++        else:
++            print(f"  FAIL：{len(diffs)} 行不一致 → D0 须重跑 4 run")
++            for d in diffs[:5]:
++                print(f"    {d}")
++            return 1
++        return 0
++
++    plan = generate_plan(density_dir)
++
++    if args.patches is not None and args.seed is not None:
++        plan = [e for e in plan if e["patches"] == args.patches and e["seed"] == args.seed]
++    elif args.patches is not None:
++        plan = [e for e in plan if e["patches"] == args.patches]
++    elif args.seed is not None:
++        plan = [e for e in plan if e["seed"] == args.seed]
++
++    commit = _git_commit()
++    print(f"commit={commit}  plan={len(plan)} run(s)")
++    print(f"D0(1700): 复用 Tier-1（{tier1_dir}）")
++    print()
++
++    if not args.execute:
++        for e in plan:
++            print(f"  [{e['label']} s{e['seed']}] {' '.join(e['cmd'][-6:])}")
++        print()
++        print("  (默认 --dry-run，未执行。加 --execute 运行，需 fish 起跑令 R117)")
++        return 0
++
++    print("=== 执行中（已获起跑令）===")
++    results = []
++    for e in plan:
++        r = execute_run(e)
++        results.append(r)
++        status = "OK" if r["rc"] == 0 else f"RC={r['rc']}"
++        print(f"  [{r['label']} s{r['seed']}] {status} {r['elapsed']}s")
++
++    failed = [r for r in results if r["rc"] != 0]
++    print(f"\n完成：{len(results)-len(failed)} OK / {len(failed)} FAIL")
++    if failed:
++        for r in failed:
++            print(f"  FAIL [{r['label']} s{r['seed']}]: {r.get('error', '?')[:100]}")
++
++    print("\n=== 收集读数 ===")
++    matrix = collect_readings(density_dir)
++    verdicts = judge_density(matrix)
++    md = format_matrix_markdown(matrix, verdicts)
++    print(md)
++
++    return 2 if failed else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/test_p1c_density_sweep.py b/tests/test_p1c_density_sweep.py
+new file mode 100644
+index 00000000..6822738d
+--- /dev/null
++++ b/tests/test_p1c_density_sweep.py
+@@ -0,0 +1,292 @@
++"""tests/test_p1c_density_sweep.py — N2 载体靶向测试。
++
++覆盖：
++  ① plan 生成：12 run（D1/D2/D3 × 4 seed），D0 不入 plan
++  ② D0 复用：copy Tier-1 → density dir
++  ③ 复现门：逐行对拍 pass/fail
++  ④ collect_readings：读 summary.json 矩阵
++  ⑤ judge_density：S1/S2/S3 三重锁 + 生态门
++  ⑥ format_matrix_markdown：附表格式
++  ⑦ fail-loud：缺探针/缺目录
++"""
++
++import csv
++import json
++import math
++import sys
++from pathlib import Path
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from experiments.p1c_density_sweep import (
++    DENSITY_LEVELS,
++    SEEDS,
++    TICKS,
++    collect_readings,
++    format_matrix_markdown,
++    generate_plan,
++    judge_density,
++    repro_check,
++    reuse_d0,
++)
++
++
++# ---------------------------------------------------------------------------
++# helpers
++# ---------------------------------------------------------------------------
++
++def _make_summary(pep_frac=0.90, pos_frac=0.86, pep_d_med=1.0,
++                  pos_d_med=1.0, extinct_at=None):
++    return {
++        "probe": "p1c_erasure_probe", "seed": 0, "ticks": 3000,
++        "extinct_at": extinct_at,
++        "pooled": {
++            "n_samples": 30,
++            "pos_frac_read_moore": pos_frac,
++            "pos_d_med": pos_d_med,
++            "pep": {"frac_read_moore": pep_frac, "d_med": pep_d_med},
++            "pep64": {"frac_read_moore": pep_frac - 0.01},
++        },
++    }
++
++
++def _write_density_summaries(data_dir: Path, entries: list):
++    """entries: [{label, patches, seed, summary_dict}]"""
++    data_dir.mkdir(parents=True, exist_ok=True)
++    for e in entries:
++        stem = f"p1c_density_{e['label']}_s{e['seed']}_t{TICKS}"
++        fp = data_dir / f"{stem}.summary.json"
++        fp.write_text(json.dumps(e["summary"]), encoding="utf-8")
++
++
++# ---------------------------------------------------------------------------
++# ① plan 生成
++# ---------------------------------------------------------------------------
++
++class TestGeneratePlan:
++    def test_12_runs_excludes_d0(self, tmp_path):
++        plan = generate_plan(tmp_path)
++        assert len(plan) == 12
++        labels = {e["label"] for e in plan}
++        assert labels == {"D1", "D2", "D3"}
++
++    def test_patches_in_range(self, tmp_path):
++        plan = generate_plan(tmp_path)
++        for e in plan:
++            assert e["patches"] in (850, 425, 213)
++
++    def test_seeds_207_to_210(self, tmp_path):
++        plan = generate_plan(tmp_path)
++        seed_set = set(e["seed"] for e in plan)
++        assert seed_set == {207, 208, 209, 210}
++
++    def test_cmd_contains_smoke(self, tmp_path):
++        plan = generate_plan(tmp_path)
++        for e in plan:
++            assert "--smoke" in e["cmd"]
++            assert "--device" in e["cmd"]
++            assert "s2" in e["cmd"]
++
++    def test_output_path_pattern(self, tmp_path):
++        plan = generate_plan(tmp_path)
++        for e in plan:
++            assert f"p1c_density_{e['label']}_s{e['seed']}" in e["out"]
++
++
++# ---------------------------------------------------------------------------
++# ② D0 复用
++# ---------------------------------------------------------------------------
++
++class TestReuseD0:
++    def _make_tier1(self, tmp_path, seeds=SEEDS):
++        tier1 = tmp_path / "tier1"
++        tier1.mkdir()
++        for s in seeds:
++            stem = f"p1c_erase_s{s}_t{TICKS}"
++            (tier1 / f"{stem}.csv").write_text("tick,x\n100,1\n")
++            (tier1 / f"{stem}.summary.json").write_text(
++                json.dumps(_make_summary(0.90, 0.86, 1.0)), encoding="utf-8")
++        return tier1
++
++    def test_copies_all_four_seeds(self, tmp_path):
++        tier1 = self._make_tier1(tmp_path)
++        dest = tmp_path / "density"
++        actions = reuse_d0(tier1, dest)
++        assert len(actions) == 4
++        assert all(a["status"] == "copied" for a in actions)
++        for s in SEEDS:
++            fp = dest / f"p1c_density_D0_s{s}_t{TICKS}.summary.json"
++            assert fp.exists()
++
++    def test_missing_src_reports(self, tmp_path):
++        tier1 = tmp_path / "empty_tier1"
++        tier1.mkdir()
++        dest = tmp_path / "density"
++        actions = reuse_d0(tier1, dest)
++        assert all(a["status"] == "missing" for a in actions)
++
++    def test_idempotent(self, tmp_path):
++        tier1 = self._make_tier1(tmp_path)
++        dest = tmp_path / "density"
++        reuse_d0(tier1, dest)
++        actions2 = reuse_d0(tier1, dest)
++        assert all(a["status"] == "already_exists" for a in actions2)
++
++
++# ---------------------------------------------------------------------------
++# ③ 复现门
++# ---------------------------------------------------------------------------
++
++class TestReproCheck:
++    def _make_csv(self, path: Path, rows: list):
++        fieldnames = ["tick", "pep_frac_read_moore", "pep_d_med",
++                      "pos_frac_read_moore", "ms_per_tick_window"]
++        with path.open("w", newline="", encoding="utf-8") as f:
++            w = csv.DictWriter(f, fieldnames=fieldnames)
++            w.writeheader()
++            for r in rows:
++                w.writerow(r)
++
++    def test_identical_passes(self, tmp_path):
++        rows = [
++            {"tick": "100", "pep_frac_read_moore": "0.90", "pep_d_med": "1.0",
++             "pos_frac_read_moore": "0.86", "ms_per_tick_window": "79.74"},
++        ]
++        a = tmp_path / "a.csv"; b = tmp_path / "b.csv"
++        self._make_csv(a, rows)
++        self._make_csv(b, rows)
++        ok, diffs = repro_check(a, b)
++        assert ok and diffs == []
++
++    def test_ms_per_tick_excluded(self, tmp_path):
++        rows_a = [{"tick": "100", "pep_frac_read_moore": "0.90", "pep_d_med": "1.0",
++                    "pos_frac_read_moore": "0.86", "ms_per_tick_window": "79.74"}]
++        rows_b = [{"tick": "100", "pep_frac_read_moore": "0.90", "pep_d_med": "1.0",
++                    "pos_frac_read_moore": "0.86", "ms_per_tick_window": "99.99"}]
++        a = tmp_path / "a.csv"; b = tmp_path / "b.csv"
++        self._make_csv(a, rows_a); self._make_csv(b, rows_b)
++        ok, _ = repro_check(a, b)
++        assert ok
++
++    def test_value_diff_fails(self, tmp_path):
++        rows_a = [{"tick": "100", "pep_frac_read_moore": "0.90", "pep_d_med": "1.0",
++                    "pos_frac_read_moore": "0.86", "ms_per_tick_window": "79.74"}]
++        rows_b = [{"tick": "100", "pep_frac_read_moore": "0.85", "pep_d_med": "1.0",
++                    "pos_frac_read_moore": "0.86", "ms_per_tick_window": "79.74"}]
++        a = tmp_path / "a.csv"; b = tmp_path / "b.csv"
++        self._make_csv(a, rows_a); self._make_csv(b, rows_b)
++        ok, diffs = repro_check(a, b)
++        assert not ok
++        assert any("pep_frac_read_moore" in d for d in diffs)
++
++    def test_missing_file_returns_fail(self, tmp_path):
++        ok, diffs = repro_check(tmp_path / "nonexistent.csv", tmp_path / "no2.csv")
++        assert not ok
++
++
++# ---------------------------------------------------------------------------
++# ④ collect_readings
++# ---------------------------------------------------------------------------
++
++class TestCollectReadings:
++    def test_reads_all_density_levels(self, tmp_path):
++        entries = []
++        for level in DENSITY_LEVELS:
++            for seed in SEEDS:
++                entries.append({
++                    "label": level["label"], "patches": level["patches"], "seed": seed,
++                    "summary": _make_summary(
++                        pep_frac=0.80, pos_frac=0.50,
++                        pep_d_med=2.5, pos_d_med=2.8),
++                })
++        _write_density_summaries(tmp_path, entries)
++        matrix = collect_readings(tmp_path)
++        assert len(matrix) == 4
++        for label in matrix:
++            assert len(matrix[label]) == 4
++
++    def test_missing_seed_shows_error(self, tmp_path):
++        _write_density_summaries(tmp_path, [
++            {"label": "D1", "patches": 850, "seed": 207, "summary": _make_summary()},
++        ])
++        matrix = collect_readings(tmp_path)
++        assert "error" in matrix["D1"][208]
++
++
++# ---------------------------------------------------------------------------
++# ⑤ judge_density
++# ---------------------------------------------------------------------------
++
++class TestJudgeDensity:
++    def _build_matrix(self, pos_val, pep_val=0.85, d_med=2.0, pos_d=3.0):
++        m = {}
++        for label in ["D0", "D1", "D2", "D3"]:
++            m[label] = {}
++            for seed in SEEDS:
++                m[label][seed] = {
++                    "pos_frac_read_moore": pos_val,
++                    "pep_frac_read_moore": pep_val,
++                    "pep_d_med": d_med,
++                    "pos_d_med": pos_d,
++                    "delta_R": pos_val - pep_val,
++                    "extinct_at": None,
++                    "survived": True,
++                }
++        return m
++
++    def test_all_below_050_triggers_h2(self):
++        m = self._build_matrix(pos_val=0.40, pep_val=0.50, pos_d=3.5)
++        v = judge_density(m)
++        for label in ["D1", "D2", "D3"]:
++            assert v[label]["band"] == "H2"
++
++    def test_all_above_080_triggers_h1(self):
++        m = self._build_matrix(pos_val=0.90, pep_val=0.90, pos_d=1.0)
++        v = judge_density(m)
++        for label in ["D1", "D2", "D3"]:
++            assert v[label]["band"] == "H1"
++
++    def test_eco_gate_fail(self):
++        m = self._build_matrix(pos_val=0.40, pep_val=0.50, pos_d=3.5)
++        m["D2"][207]["survived"] = False
++        m["D2"][208]["survived"] = False
++        v = judge_density(m)
++        assert v["D2"]["gate"] == "FAIL"
++
++    def test_gray_zone_050_to_080(self):
++        m = self._build_matrix(pos_val=0.65, pep_val=0.85, pos_d=2.0)
++        v = judge_density(m)
++        for label in ["D1", "D2", "D3"]:
++            assert v[label]["band"] == "gray"
++
++    def test_d0_anomaly_warning(self):
++        m = self._build_matrix(pos_val=0.40, pep_val=0.50, pos_d=3.5)
++        v = judge_density(m)
++        assert "warning" in v.get("D0", {})
++
++    def test_s2_margin_fail(self):
++        """3/4 seeds below 0.50 but pool barely under boundary → S2 fails."""
++        m = self._build_matrix(pos_val=0.30, pep_val=0.50, pos_d=3.5)
++        m["D1"][210]["pos_frac_read_moore"] = 0.49
++        v = judge_density(m)
++        assert not v["D1"]["S2"]
++
++
++# ---------------------------------------------------------------------------
++# ⑥ format_matrix_markdown
++# ---------------------------------------------------------------------------
++
++class TestFormatMatrix:
++    def test_contains_all_density_labels(self):
++        m = {lbl: {s: {"error": "?"} for s in SEEDS} for lbl in ["D0", "D1", "D2", "D3"]}
++        v = judge_density(m)
++        md = format_matrix_markdown(m, v)
++        for lbl in ["D0", "D1", "D2", "D3"]:
++            assert lbl in md
++
++    def test_concludes_no_adjudication(self):
++        m = {}
++        v = {}
++        md = format_matrix_markdown(m, v)
++        assert "判读权归砚" in md
+-- 
+2.46.1.windows.1
+
+
+From d358cb91e1ba223608a2ed063f2a5ca8a3f5353a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E8=BD=BB=E8=88=9F?= <qingzhou@the-world.local>
+Date: Sun, 11 Oct 2026 00:03:23 +0800
+Subject: [PATCH 5/5] =?UTF-8?q?wip:=20T1-READOUT=20M0=20=E4=BB=AA=E8=A1=A8?=
+ =?UTF-8?q?=E6=8E=A2=E9=92=88=E4=BE=A7=E6=97=81=E8=B7=AF=E6=AE=8B=E7=95=99?=
+ =?UTF-8?q?=E5=85=A5=E5=BA=93=EF=BC=88s3=5Fmemory=5Fprobe=20+=20g5=5Fdirco?=
+ =?UTF-8?q?nd=5Fdiff=20=E6=B5=8B=E8=AF=95=EF=BC=9B=E5=8E=9F=E6=A0=B7?=
+ =?UTF-8?q?=E4=BF=9D=E5=AD=98=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ experiments/s3_memory_probe.py | 256 ++++++++++++++++++++++++++++++++-
+ tests/test_g5_dircond_diff.py  | 185 ++++++++++++++++++++++++
+ 2 files changed, 435 insertions(+), 6 deletions(-)
+ create mode 100644 tests/test_g5_dircond_diff.py
+
+diff --git a/experiments/s3_memory_probe.py b/experiments/s3_memory_probe.py
+index 2ecc5d31..3b4f566c 100644
+--- a/experiments/s3_memory_probe.py
++++ b/experiments/s3_memory_probe.py
+@@ -425,6 +425,218 @@ class _HomeRangeTracker:
+         return (len(_go), int(ii.size))
+ 
+ 
++# ---- 🔴 R358 T4（A1/A2/A3）：M0 仪表（砚《C1-M0仪表产出规格》§三 探针侧旁路）----
++#   落列（每采样点）：G0 `g15_mean` ｜ G1 `g1_entropy` + `marks_hist_0..15` ｜
++#   G3 `sig_run_len_hist_1..8` + 审计三列 ｜ G4 `g4_mem_bit_*` ｜ G5 `g5_dir_diff`/
++#   `g5_move_diff`/`g5_n_*`。**默认关**（关 ⇒ 表头与行逐字节等于旧版）。
++_M0_COLS = (["g15_mean", "g1_entropy"]
++            + [f"marks_hist_{i}" for i in range(16)]
++            + [f"sig_run_len_hist_{i}" for i in range(1, 9)]
++            + ["g3_fresh_cells", "g3_ambig_n", "g3_orphan_n",
++               "g4_mem_bit_frac", "g4_mem_bit_on", "g4_mem_bit_n",
++               "g5_dir_diff", "g5_move_diff", "g5_n_sig", "g5_n_nosig"])
++
++
++class _M0Instruments:
++    """M0 仪表：G0/G1/G3/G4/G5 —— 探针侧旁路，**只读**引擎（不消费 RNG、不写引擎）。
++
++    逐采样点语义（交付说明与判读报告须连带引用）：
++      · G0 `g15_mean` = 活体 `Gene.SIGNAL_STRENGTH` 均值（空池 ⇒ NaN，同 g22 口径）；
++      · G1 `g1_entropy` = 非零格 pattern（字母表 1..15）Shannon 熵 ÷ log2(16)
++        （**按规格原文**；15 符号理论满熵 ≈ 0.977 ⇒ 报告时注明）；
++        `marks_hist_0..15` = 原始直方图（口径可离线重算）；
++      · G3 = **同发射者连续 tick 写**的连串长度直方图（run 收尾入桶 ⇒ 累计量，
++        正在写的串不计；`_8` = ≥8 溢出桶）。审计列：`g3_fresh_cells` = 累计新写
++        格数；`g3_ambig_n` = 同格多写者（归因歧义）次数；`g3_orphan_n` = 新写格
++        找不到同格候选（归因失败）次数（正常应恒 0，非 0 = 探针口径 bug 的信号）。
++      · G4 = `_mem_bit_on/_mem_bit_n`（**须 `signal_alphabet="8"`**：attach 时非 "8"
++        显式告警；Rust 下沉路径不累计 ⇒ 本探针强制 Python 路径天然满足）；
++      · G5 `g5_dir_diff` = 「有信号 vs 无信号」个体下一步去向分布的总变差距离
++        （9 档：8 邻 + 静止）；`g5_move_diff` = |P(静止|无) − P(静止|有)|；
++        `g5_n_sig`/`g5_n_nosig` = 两档人·次。
++
++    🔴 测量时点（与引擎源码逐点对齐；改引擎需复核本类）：
++      · G5 的 has_sig 与引擎决策**同式同源**（读 `_marks` + 查 `_nb_table`/`_pole_nb`，
++        见 `sphere_engine.py:3120,3180`）；决策时点图 = **本步末的 `_marks`**
++        —— 依据：步 t 内 tick()（:2843）→ 发射写 marks（:3664，步 4.5）→ 移动决策读
++        marks（步 5）；移动之后到步末无人再写 marks（唯一写点 = :3664，已全仓核）
++        ⇒ 步末 marks 逐位等于移动实读图（含本步新写；pattern=0 写入会**清格**，
++        该语义被本式自然涵盖）。方向 = 本步实成位移（移动前格 → 本步末格；两端均
++        存活者；本步内出生者无完整位移观测 ⇒ 不计）。极区行按 (dr, sign(dc)) 归类
++        （极点坍缩 ⇒ 近似，报告披露）。
++      · G3 归因：新写格 ↔ 上步末同格个体。依据 = 发射写**移动前**格（`:3634`
++        `e_flat = self._flat[emitters]`，在移动步骤 5 之前）；同格多写者归因规则 =
++        连续（last=t−1）优先 → 长连串优先 → 小 id 兜底，并计 `ambig`。
++    """
++
++    def __init__(self) -> None:
++        self.hist_run = np.zeros(9, dtype=np.int64)      # 下标 = min(len, 8)
++        self.streak: dict[int, tuple[int, int]] = {}     # id -> (last_tick, len)
++        self.fresh_n = 0
++        self.ambig_n = 0
++        self.orphan_n = 0
++        self.last_flat = None      # 上步末位置（= 本步移动/决策前位置）
++        self.last_ids = None
++        self.g5 = None
++
++    # ---- 装配 + fail-loud 自检（列产不出来必须当场炸，不许静默 NaN）----
++
++    def attach(self, eng) -> None:
++        for attr in ("_marks", "_age", "duration"):
++            if not hasattr(eng.signals, attr):
++                raise RuntimeError(
++                    f"🔴 M0 仪表装配失败：signals.{attr} 不存在（引擎结构变了？）")
++        for attr in ("_nb_table", "_pole_nb", "_mem_bit_on", "_mem_bit_n",
++                     "_flat", "_id", "_genes"):
++            if not hasattr(eng, attr):
++                raise RuntimeError(f"🔴 M0 仪表装配失败：引擎缺 {attr}（G0/G3/G5 需要）")
++        if int(eng._genes.shape[1]) <= int(Gene.SIGNAL_STRENGTH):
++            raise RuntimeError("🔴 M0 仪表装配失败：_genes 宽度 ≤ g15 下标")
++        self.last_flat = np.asarray(eng._flat).copy()
++        self.last_ids = np.asarray(eng._id).copy()
++        if str(getattr(eng, "_alpha", "")) != "8":
++            print(f"  ⚠️ M0 G4：signal_alphabet={getattr(eng, '_alpha', None)!r} ≠ '8' "
++                  f"⇒ mem_bit 通路不在（g4_* 恒 n/a）；G4 数据须装置切 \"8\""
++                  f"（P1-a 前提）。", file=sys.stderr)
++
++    # ---- 每 tick（G3 归因 + 维护"上步末"快照；只读）----
++
++    def after_step(self, eng, t: int, sampled: bool) -> None:
++        fresh = self._fresh_cells(eng)
++        if sampled:                # G5 用更新前快照（上步末位置）＋本步末 marks
++            self.g5 = self._compute_g5(eng)
++        self._track_runs(eng, t, fresh)
++        self.last_flat = np.asarray(eng._flat).copy()
++        self.last_ids = np.asarray(eng._id).copy()
++
++    @staticmethod
++    def _fresh_cells(eng) -> np.ndarray:
++        """本步新写格（只读）。tick() 先于写 ⇒ 步末 `age == duration` ⇔ 本步写入。"""
++        sig = eng.signals
++        idx = np.flatnonzero(sig._marks)
++        return idx[sig._age[idx] == sig.duration]
++
++    def _track_runs(self, eng, t: int, fresh: np.ndarray) -> None:
++        if fresh.size == 0:
++            return
++        self.fresh_n += int(fresh.size)
++        lf = self.last_flat
++        if lf is None or lf.size == 0:
++            self.orphan_n += int(fresh.size)
++            return
++        order = np.argsort(lf, kind="stable")
++        lfs = lf[order]
++        lis = np.asarray(self.last_ids)[order]
++        lo = np.searchsorted(lfs, fresh, "left")
++        hi = np.searchsorted(lfs, fresh, "right")
++        st = self.streak
++        for j in range(int(fresh.size)):
++            a, b = int(lo[j]), int(hi[j])
++            if b == a:
++                self.orphan_n += 1
++                continue
++            cand = lis[a:b]
++            if cand.size > 1:
++                self.ambig_n += 1
++                cont = [int(k) for k in cand if st.get(int(k), (-1, 0))[0] == t - 1]
++                pool = cont if cont else [int(k) for k in cand]
++                vid = max(pool, key=lambda k: (st.get(k, (-1, 0))[1], -k))
++            else:
++                vid = int(cand[0])
++            prev = st.get(vid)
++            if prev is not None and prev[0] == t - 1:
++                st[vid] = (t, prev[1] + 1)
++            else:
++                if prev is not None:
++                    self.hist_run[min(prev[1], 8)] += 1
++                st[vid] = (t, 1)
++
++    # ---- 每采样点（G5 + 采样列）----
++
++    def _compute_g5(self, eng):
++        ids_prev = self.last_ids
++        ids_now = np.asarray(eng._id)
++        if ids_prev is None or ids_prev.size == 0 or ids_now.size == 0:
++            return None
++        for ids_x in (ids_prev, ids_now):        # 归因前提：id 升序（引擎不变量）
++            if ids_x.size > 1 and not bool((np.diff(ids_x) > 0).all()):
++                raise RuntimeError("🔴 M0 G5：_id 非升序 ⇒ searchsorted 归因不可信。")
++        pos = np.searchsorted(ids_prev, ids_now)
++        pos_c = np.minimum(pos, ids_prev.size - 1)
++        ok = (pos < ids_prev.size) & (ids_prev[pos_c] == ids_now)
++        if not ok.any():
++            return None
++        cells = self.last_flat[pos[ok]]            # 决策时点（移动前）格
++        now_flat = np.asarray(eng._flat)[ok]
++        # 决策时点信号图 = 本步末 marks（步内唯一写点 :3664 在移动之前 ⇒ 逐位等同实读）
++        dm = np.asarray(eng.signals._marks)
++        hs = np.zeros(cells.size, dtype=bool)
++        cols = int(eng.world.cols)
++        rows_ = cells // cols
++        top = rows_ == int(eng.world._pole_top)
++        bot = rows_ == int(eng.world._pole_bottom)
++        normal = ~(top | bot)
++        if normal.any():
++            hs[normal] = (dm[eng._nb_table[cells[normal]]] > 0).any(axis=1)
++        for mask, prow in ((top, 0), (bot, 1)):
++            if mask.any():
++                hs[mask] = bool((dm[eng._pole_nb[prow]] > 0).any())
++        nr = now_flat // cols
++        nc_ = now_flat % cols
++        dr = nr - rows_
++        dc = nc_ - (cells % cols)
++        dc = (dc + cols // 2) % cols - cols // 2    # 环形折算（极点坍缩 ⇒ 近似）
++        code = np.full(cells.size, 4, dtype=np.int64)     # 4 = 静止
++        mv = (dr != 0) | (dc != 0)
++        code[mv] = (dr[mv] + 1) * 3 + np.sign(dc[mv]).astype(np.int64) + 1
++        n_sig = int(hs.sum())
++        n_no = int(cells.size) - n_sig
++        out = {"g5_n_sig": n_sig, "g5_n_nosig": n_no,
++               "g5_dir_diff": float("nan"), "g5_move_diff": float("nan")}
++        if n_sig and n_no:
++            h1 = np.bincount(code[hs], minlength=9).astype(np.float64)
++            h0 = np.bincount(code[~hs], minlength=9).astype(np.float64)
++            p1 = h1 / h1.sum()
++            p0 = h0 / h0.sum()
++            out["g5_dir_diff"] = float(0.5 * np.abs(p1 - p0).sum())
++            out["g5_move_diff"] = float(abs(p0[4] - p1[4]))
++        return out
++
++    def sample_cols(self, eng) -> dict:
++        d: dict = {}
++        N = int(np.asarray(eng._flat).size)
++        if N:
++            d["g15_mean"] = float(eng._genes[:N, int(Gene.SIGNAL_STRENGTH)].mean())
++        else:
++            d["g15_mean"] = float("nan")
++        hist16 = np.bincount(eng.signals._marks, minlength=16)
++        for i in range(16):
++            d[f"marks_hist_{i}"] = int(hist16[i])
++        nz = hist16[1:].astype(np.float64)
++        tot = float(nz.sum())
++        if tot <= 0:
++            d["g1_entropy"] = float("nan")
++        else:
++            p = nz[nz > 0] / tot
++            d["g1_entropy"] = float(-(p * np.log2(p)).sum() / math.log2(16.0))
++        for i in range(1, 9):
++            d[f"sig_run_len_hist_{i}"] = int(self.hist_run[i])
++        d["g3_fresh_cells"] = int(self.fresh_n)
++        d["g3_ambig_n"] = int(self.ambig_n)
++        d["g3_orphan_n"] = int(self.orphan_n)
++        on_ = int(eng._mem_bit_on)
++        n_ = int(eng._mem_bit_n)
++        d["g4_mem_bit_frac"] = (float(on_) / float(n_)) if n_ else float("nan")
++        d["g4_mem_bit_on"] = on_
++        d["g4_mem_bit_n"] = n_
++        g5 = self.g5 if self.g5 is not None else {}
++        d["g5_dir_diff"] = g5.get("g5_dir_diff", float("nan"))
++        d["g5_move_diff"] = g5.get("g5_move_diff", float("nan"))
++        d["g5_n_sig"] = g5.get("g5_n_sig", 0)
++        d["g5_n_nosig"] = g5.get("g5_n_nosig", 0)
++        return d
++
++
+ def _dump_pairs(hr, path: str, seed, arm) -> int:
+     """🔴 R316 设计 1：把 `hr` 的存活个体活动量追加到 `path`（每 run 一段）。
+ 
+@@ -762,7 +974,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
+             bg_low_prod_frac=0.0, bg_low_cap_mult=0.0, weight_gene=False,
+             save_every=0, snapshot_dir=None, resume_sample=False,
+             prior_rows=None, out_path=None, on_row=None, hr_tracker=None,
+-            g22_init=None):
++            g22_init=None, m0=None):
+     """跑一个 S3 run（单 seed 单臂），可选 **sample 级续跑**。
+ 
+     🔴 R303（云归 23:35 帖·更正二）：`on_row` = **sample 级行落盘回调**。
+@@ -779,6 +991,9 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
+       · `save_every > 0` + `snapshot_dir` ⇒ 每 N tick 存快照 + 侧车（N 须 == sample）
+       · `resume_sample=True` ⇒ 从 `snapshot_dir/<tag>.snapshot.npz` 接续；
+         `ticks` 仍是**绝对目标 tick**
++    🔴 R358 T4（砚 C1 规格）：`m0` = `_M0Instruments` 实例（默认 None ⇒ 逐字节等于
++      旧版）。传入 ⇒ 每采样点追加 M0 仪表列（G0/G1/G3/G4/G5，见类 docstring）；
++      续跑时仪表统计**从本段起点重新累计**（分段口径）。
+     🔴 `run_one` **不自己动 `out_path`**：清残行（`_strip_rows_after`）由 main 在
+       "`fout` 已 flush 且尚未开始本 run" 的窗口里做 —— 若在这里 `os.replace` 整个
+       CSV 文件，会把 `fout` 缓冲里**还没落盘的行**一起覆盖掉（本实现的第一版就栽在这）。
+@@ -837,7 +1052,7 @@ def run_one(seed, rows, cols, pop, patches, ticks, sample, rgm, mem_on,
+                       labels, n_patch_total, init_cap_full, init_patch_cap,
+                       init_cap_sum, visited_mask, patch_ever_visited, first_visit,
+                       save_every, snapshot_dir, tag, on_row=on_row,
+-                      hr_tracker=hr_tracker)
++                      hr_tracker=hr_tracker, m0=m0)
+ 
+ 
+ def _fail_save_every(save_every, sample, snapshot_dir):
+@@ -960,7 +1175,8 @@ def _loop(seed, mem_on, rows_out, start_tick, ticks, sample, labels,
+ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
+                n_patch_total, init_cap_full, init_patch_cap, init_cap_sum,
+                visited_mask, patch_ever_visited, first_visit,
+-               save_every, snapshot_dir, tag, on_row=None, hr_tracker=None):
++               save_every, snapshot_dir, tag, on_row=None, hr_tracker=None,
++               m0=None):
+     """采样主循环（首跑 / 续跑共用）——见 `_loop` 的落盘顺序说明。
+ 
+     🔴 R303：`on_row` 非 None ⇒ **每个采样点生成后立刻回调落盘**（行节拍 == 快照节拍），
+@@ -971,9 +1187,16 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
+     t_slice = time.perf_counter()
+     last = start_tick
+     stop = "ticks"
++    if m0 is not None:              # 🔴 R358 T4：装配 + fail-loud 自检
++        m0.attach(eng)
+ 
+     for t in range(start_tick + 1, ticks + 1):
++        # 🔴 R358 T4：`sampled` 上移到 step 前（纯函数值不变）⇒ `after_step` 与
++        #   采样判定同步、且 G5 能在"更新上步末快照"**之前**读到决策时点状态。
++        sampled = (t % sample == 0) or (t == ticks)
+         eng.step()
++        if m0 is not None:
++            m0.after_step(eng, t, sampled)
+         flat = eng._flat
+         visited_mask[flat] = True
+         for p in np.unique(labels[flat]):
+@@ -981,7 +1204,6 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
+                 patch_ever_visited[p] = True
+                 first_visit[int(p)] = t
+ 
+-        sampled = (t % sample == 0) or (t == ticks)
+         if sampled:
+             dt = (time.perf_counter() - t_slice) / max(t - last, 1) * 1e3
+             last = t
+@@ -1045,6 +1267,8 @@ def _loop_impl(eng, seed, mem_on, rows_out, start_tick, ticks, sample, labels,
+                 **_g22_stats(eng, N),
+                 **_hr,
+             })
++            if m0 is not None:      # 🔴 R358 T4：M0 仪表列（默认关 ⇒ 行不变）
++                rows_out[-1].update(m0.sample_cols(eng))
+             # 🔴 R303：sample 级行落盘（回调由 main 提供：writerow+flush+fsync）。
+             #   `rows_out` 仍保留（summary 需要末行、续跑清行需要行集合）。
+             if on_row is not None:
+@@ -1135,6 +1359,13 @@ def main():
+                     help="把**初始** g22（记忆权重基因）钉到该值，之后**自由演化**。"
+                          "默认 None = 不改（逐位等价）。用于双端扰动实验：从 0.1 / 0.9 两端出发，"
+                          "看是否收敛回同一个最优值（稳定化选择）")
++    # ---- 🔴 R358 T4（A1/A2/A3）：M0 仪表（砚 C1 规格；默认关 ⇒ 逐字节等于旧版）----
++    ap.add_argument("--m0-instruments", action="store_true",
++                    help="每采样点追加 M0 仪表列：g15_mean / g1_entropy + "
++                         "marks_hist_0..15 / sig_run_len_hist_1..8 + g3_* 审计 / "
++                         "g4_mem_bit_* / g5_dir_diff,g5_move_diff,g5_n_*。"
++                         "**只读引擎状态、不消费 RNG**；G4 需 signal_alphabet='8'"
++                         "（否则告警为 n/a）")
+     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
+     add_device_arg(ap)
+     a = ap.parse_args()
+@@ -1187,6 +1418,8 @@ def main():
+               "g22_mean_gen0", "g22_mean_gen1", "g22_mean_gen2", "g22_mean_gen3p",
+               "g22_mean_latest", "pop_gen0", "pop_gen1", "pop_gen2", "pop_gen3p",
+               "max_gen"]
++    if a.m0_instruments:  # 🔴 R358 T4：M0 仪表列（默认关 ⇒ 表头不变）
++        header = header + _M0_COLS
+     if a.home_range:      # 🔴 R308：仅在开启时追加个体活动范围列（默认关 ⇒ 表头不变）
+         header = header + _HR_COLS
+ 
+@@ -1197,7 +1430,7 @@ def main():
+           f"pop={a.pop} rgm={a.rgm} ticks={a.ticks} seeds={seeds} "
+           f"arms={['on' if m else 'off' for m in arms]} "
+           f"bg_low_frac={a.bg_low_prod_frac} bg_low_mult={a.bg_low_cap_mult} "
+-          f"weight_gene={a.weight_gene} append={a.append} "
++          f"weight_gene={a.weight_gene} m0_instruments={a.m0_instruments} append={a.append} "
+           f"resume_sample={a.resume_sample} save_every={a.save_every}")
+ 
+     # ---- v2：run 级断点续跑准备（R264）----
+@@ -1247,6 +1480,16 @@ def main():
+     need_header = (not _append_mode) or (not os.path.exists(a.out)) \
+         or (os.path.getsize(a.out) == 0)
+ 
++    # 🔴 R358 T4：续跑列一致性（M0 仪表列两档混用 ⇒ 列错位；硬拦）
++    if _append_mode and os.path.exists(a.out) and os.path.getsize(a.out) > 0:
++        with open(a.out, "r", newline="", encoding="utf-8") as _fh:
++            _hdr_ex = next(csv.reader(_fh), [])
++        if ("g1_entropy" in _hdr_ex) != bool(a.m0_instruments):
++            print("🔴 续跑列不一致：已存在 CSV 的 M0 仪表列与本次 --m0-instruments "
++                  "不符（混用两档 ⇒ 列错位）。换 --out 或保持一致。中止。",
++                  file=sys.stderr)
++            sys.exit(2)
++
+     # 🔴 v3：sample 级续跑的"清残行"**必须在打开 `fout` 之前**做。
+     #   踩过三个坑（全是"静默错"，只有对拍才发现）：
+     #     ① 用 `os.replace` ⇒ CSV 换 inode，而 `fout` 指向孤儿 ⇒ 后续行全丢；
+@@ -1291,6 +1534,7 @@ def main():
+                 # 清行段处理过）。**不能用 --append 的 prior_rows 合并**：
+                 # 那会把旧行读进来再重写一遍 ⇒ 浮点 repr 往返抖精度。
+                 _hr = _HomeRangeTracker() if a.home_range else None   # R308：每 run 新建
++                _m0 = _M0Instruments() if a.m0_instruments else None  # 🔴 R358 T4：每 run 新建
+                 if _hr is not None:      # 🔴 R318 设计 4：扰动参数挂到跟踪器上
+                     _hr.ptb_mode = a.perturb
+                     _hr.ptb_every = int(a.perturb_every)
+@@ -1302,7 +1546,7 @@ def main():
+                     a.weight_gene,
+                     save_every=a.save_every, snapshot_dir=a.snapshot_dir,
+                     resume_sample=_res, prior_rows=None, out_path=a.out,
+-                    on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init)
++                    on_row=_emit, hr_tracker=_hr, g22_init=a.g22_init, m0=_m0)
+                 # 行已在 `_emit` 里逐条 flush+fsync；此处仅兜底（无新行时也无副作用）
+                 fout.flush()
+                 os.fsync(fout.fileno())
+diff --git a/tests/test_g5_dircond_diff.py b/tests/test_g5_dircond_diff.py
+new file mode 100644
+index 00000000..04558f2a
+--- /dev/null
++++ b/tests/test_g5_dircond_diff.py
+@@ -0,0 +1,185 @@
++"""L3-G5COL：g5_dircond_diff（条件方向 TV，R367-1 锁定口径）靶向测试。
++
++口径（docs/C1-M0仪表产出规格-20261003.md §七）：
++  仅有位移个体（move_dir ≠ 静止）上，有/无信号两组 8 向 argmax 序号
++  归一化直方图的 TV = 0.5·Σ|p_sig − p_nosig|；任一有位移组空 ⇒ NaN。
++
++覆盖：
++  ① 已知两组位移分布 ⇒ 钉 TV 值（含静止个体干扰项，dir_diff/dircond_diff 分离）
++  ② 两组位移方向完全相同 ⇒ 0.0（且 dir_diff 仍可为正 ⇒ 证互补）
++  ③ 任一有位移组空（全静止/单组动）⇒ NaN fail-loud（不静默给 0）
++  ④ 变异检查 A：把静止槽(4)误并入直方图 ⇒ 该测试必须变红
++  ⑤ 变异检查 B：无位移过滤（全量两组）⇒ 该测试必须变红
++  ⑥ M0_COLS 含新列且默认关时表头不变（逐字节等价锁）
++"""
++
++import sys
++import types
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from experiments.s3_memory_probe import _M0_COLS, _M0Instruments
++
++ROWS, COLS = 24, 12
++N_CELLS = ROWS * COLS
++
++
++def _mk_engine(ids, dec_flat, now_flat, marks_hit_cells):
++    """合成假引擎：ids 升序；dec_flat=决策时点格（上步末）；now_flat=本步末格。
++
++    marks_hit_cells：这些格 _marks>0 ⇒ 决策时点"有信号"组（hs=True）。
++    """
++    eng = types.SimpleNamespace()
++    eng._id = np.asarray(ids, dtype=np.int64)
++    eng._flat = np.asarray(now_flat, dtype=np.int64)
++    eng.world = types.SimpleNamespace(
++        cols=COLS, rows=ROWS, _pole_top=0, _pole_bottom=ROWS - 1)
++    nb = np.zeros((N_CELLS, 8), dtype=np.int64)
++    nb[:] = np.arange(N_CELLS)[:, None]          # 自指即可：只要 _marks 全 0 除命中格
++    eng._nb_table = nb
++    eng._pole_nb = np.zeros((2, 8), dtype=np.int64)
++    marks = np.zeros(N_CELLS, dtype=np.uint8)
++    for c in marks_hit_cells:
++        marks[c] = 5                              # 任意 >0 pattern
++    eng.signals = types.SimpleNamespace(_marks=marks)
++    return eng
++
++
++def _mk_inst(ids, dec_flat):
++    inst = _M0Instruments()
++    inst.last_ids = np.asarray(ids, dtype=np.int64)
++    inst.last_flat = np.asarray(dec_flat, dtype=np.int64)
++    return inst
++
++
++# 8 向 code：code = (dr+1)*3 + sign(dc) + 1，静止=4
++#   dr=-1 行上移(-)；dc 环向。 dir 右= (0,+1)→code 5；左=4-? 推算：
++#   (dr=0,dc=+1): (1)*3+1+1=5; (dr=0,dc=-1): 3+(-1)+1=3; (dr=-1,dc=0): 0+0+1=1;
++#   (dr=+1,dc=0): 6+0+1=7。
++
++RIGHT = (0, +1)
++LEFT = (0, -1)
++UP = (-1, 0)
++STAY = None
++
++
++def _flat_at(row, col):
++    return row * COLS + col
++
++
++def _moved(dec, direction):
++    if direction is STAY:
++        return dec
++    dr, dc = direction
++    row, col = divmod(dec, COLS)
++    return _flat_at((row + dr) % ROWS, (col + dc) % COLS)
++
++
++def test_dircond_known_tv():
++    """sig 组：全向右(5)；nosig 动组：向上(7)+向左(3)；nosig 组含 1 静止个体。
++
++    条件分布：p_sig=one-hot(5)；p_no={7:0.5, 3:0.5} ⇒ dircond TV = 1.0（支撑不重叠）。
++    """
++    ids = [10, 11, 12, 13, 14]
++    dec = [_flat_at(5, 3), _flat_at(5, 6), _flat_at(8, 2),
++           _flat_at(8, 8), _flat_at(12, 4)]
++    sig_cells = {dec[0], dec[1]}                  # 个体 0/1 决策点有信号
++    now = [_moved(dec[0], RIGHT), _moved(dec[1], RIGHT),
++           _moved(dec[2], UP),
++           _moved(dec[3], LEFT),
++           dec[4]]                                 # 个体 4 无信号且静止
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    # 动组：sig={5:2} ⇒ one-hot 5；no={7:1, 3:1}
++    # dircond TV = 0.5*(1 + 0.5 + 0.5) = 1.0
++    assert out["g5_dircond_diff"] == pytest.approx(1.0)
++    # 全量 9 档：p_sig=one-hot5；p_no={3:0.5, 7:0.5, 4:0}…个体 4 静止 ⇒
++    # p_no={3:1/3, 7:1/3, 4:1/3}；TV = 0.5*(1 + 1/3 + 1/3 + 1/3) = 1.0（支撑不重叠恒 1）
++    assert out["g5_dir_diff"] == pytest.approx(1.0)
++    assert out["g5_move_diff"] == pytest.approx(1.0 / 3)
++
++
++def test_dircond_dilution_known_value():
++    """构造 Z：方向支撑有重叠 + 静止稀释 ⇒ dircond 与 dir_diff 取不同已知值。
++
++    sig 组：RIGHT, RIGHT, STAY；no 组：RIGHT, LEFT, LEFT, LEFT, STAY。
++    条件（剔静止）：p_sig={5:1}, p_no={5:0.25, 3:0.75} ⇒ TV = 0.5*(0.75+0.75) = 0.75
++    全量 9 档：    p_sig={5:2/3,4:1/3}, p_no={5:.2,3:.6,4:.2} ⇒ TV = 0.6
++    静止率差：    |P(静|no) − P(静|sig)| = |0.2 − 1/3| = 0.1333
++    """
++    ids = [80, 81, 82, 83, 84, 85, 86, 87]
++    dec = [_flat_at(5, c) for c in (1, 4, 7, 10)] + [_flat_at(9, c) for c in (1, 4, 7, 10)]
++    sig_cells = {dec[0], dec[1], dec[2]}
++    now = [_moved(dec[0], RIGHT), _moved(dec[1], RIGHT), dec[2],
++           _moved(dec[3], RIGHT), _moved(dec[4], LEFT), _moved(dec[5], LEFT),
++           _moved(dec[6], LEFT), dec[7]]
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    assert out["g5_dircond_diff"] == pytest.approx(0.75)
++    assert out["g5_dir_diff"] == pytest.approx(0.6)
++    assert out["g5_move_diff"] == pytest.approx(abs(0.2 - 1 / 3), abs=1e-6)
++
++
++def test_dircond_nan_when_all_stationary_one_group():
++    """无信号组全静止 ⇒ 有位移子集单组空 ⇒ NaN（不许静默 0）。"""
++    ids = [30, 31]
++    dec = [_flat_at(4, 4), _flat_at(4, 9)]
++    sig_cells = {dec[0]}
++    now = [_moved(dec[0], RIGHT), dec[1]]          # 个体 1 静止
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    assert np.isnan(out["g5_dircond_diff"])
++    assert out["g5_move_diff"] > 0                 # 其它列照常
++
++
++def test_dircond_nan_when_no_displacement_at_all():
++    ids = [40, 41]
++    dec = [_flat_at(7, 1), _flat_at(7, 6)]
++    eng = _mk_engine(ids, dec, list(dec), {dec[0]})
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    assert np.isnan(out["g5_dircond_diff"])
++
++
++def _construction_z():
++    ids = [80, 81, 82, 83, 84, 85, 86, 87]
++    dec = [_flat_at(5, c) for c in (1, 4, 7, 10)] + [_flat_at(9, c) for c in (1, 4, 7, 10)]
++    sig_cells = {dec[0], dec[1], dec[2]}
++    now = [_moved(dec[0], RIGHT), _moved(dec[1], RIGHT), dec[2],
++           _moved(dec[3], RIGHT), _moved(dec[4], LEFT), _moved(dec[5], LEFT),
++           _moved(dec[6], LEFT), dec[7]]
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    return _mk_inst(ids, dec), eng
++
++
++def test_mutation_include_stationary_would_fail():
++    """变异 A：误把静止槽(4)并入条件直方图 ⇒ 独立口径值为 0.5，
++    与本构造正确值 0.75 不等 ⇒ 断言钉死即变红。
++    """
++    inst, eng = _construction_z()
++    out = inst._compute_g5(eng)
++    assert out["g5_dircond_diff"] == pytest.approx(0.75)
++    # 独立"9 档含静止"参考值（= dir_diff 口径）：
++    assert out["g5_dircond_diff"] != out["g5_dir_diff"]      # 含静止/忘筛 ⇒ 相等或 0.6 ⇒ 红
++
++
++def test_mutation_no_displacement_filter_would_fail():
++    """变异 B：忘筛有位移子集（退化为全量 dir_diff=0.6）⇒ 与 0.75 不等 ⇒ 红。"""
++    inst, eng = _construction_z()
++    out = inst._compute_g5(eng)
++    assert out["g5_dircond_diff"] == pytest.approx(0.75)
++    assert out["g5_dircond_diff"] != pytest.approx(out["g5_dir_diff"])
++
++
++def test_m0_cols_contains_dircond_and_off_default_unchanged():
++    assert "g5_dircond_diff" in _M0_COLS
++    # 表头拼接逻辑在 main：`if a.m0_instruments: header = header + _M0_COLS`
++    # 默认关 ⇒ header 不含任何 M0 列（逐字节等价锁由 _run_one 自检承担）
++    src = Path("experiments/s3_memory_probe.py").read_text(encoding="utf-8")
++    assert "header = header + _M0_COLS" in src     # 仅开时追加（模式不变）
+-- 
+2.46.1.windows.1
+

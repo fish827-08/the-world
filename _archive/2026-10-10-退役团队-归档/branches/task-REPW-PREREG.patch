@@ -1,0 +1,501 @@
+From 7605da141a1e5982ce34a7a7af3d0e421339d820 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E7=A0=9A?= <yan@the-world.local>
+Date: Tue, 6 Oct 2026 21:21:04 +0800
+Subject: [PATCH 1/3] =?UTF-8?q?prereg:=20[=E7=A0=9A]=20E-057=20rep=5Fw?=
+ =?UTF-8?q?=E6=A1=A3=E6=89=AB=E9=A2=84=E6=B3=A8=E5=86=8C=E7=A8=BF=EF=BC=88?=
+ =?UTF-8?q?REPW-PREREG=20=E9=94=81=E5=AE=9A=E5=80=99=E9=80=89=EF=BC=8C?=
+ =?UTF-8?q?=E5=80=99=E9=95=9C=E5=BF=AB=E5=AE=A1+PI=E4=BC=9A=E7=AD=BE?=
+ =?UTF-8?q?=EF=BC=89=E2=80=94=E2=80=94K2=E9=85=8D=E5=AF=B9=E5=B7=AE?=
+ =?UTF-8?q?=E5=8D=87=E4=B8=BB=E5=88=A4=E6=8D=AE=EF=BC=88=E5=9F=BA=E7=BA=BF?=
+ =?UTF-8?q?=E5=9B=9E=E6=B5=8BK1=E5=BC=8F7/8=E5=91=BD=E4=B8=AD=E6=97=A0?=
+ =?UTF-8?q?=E9=89=B4=E5=88=AB=E5=8A=9B[=E5=AE=9E=E6=B5=8B]=EF=BC=89?=
+ =?UTF-8?q?=EF=BC=8CK1=E9=99=8D=E5=BD=A2=E6=80=81=E8=BE=85=E5=88=A4?=
+ =?UTF-8?q?=EF=BC=8C=E5=8F=91=E5=B0=84=E7=8E=87=E5=B9=B6=E5=85=A5=E6=97=81?=
+ =?UTF-8?q?=E8=AF=81=EF=BC=88=E5=9D=91=E2=91=A0=EF=BC=89=EF=BC=8C=E5=B3=B0?=
+ =?UTF-8?q?=E5=80=BC+=E4=B8=AD=E6=AE=B5=E7=A8=B3=E5=81=A5=E7=BB=9F?=
+ =?UTF-8?q?=E8=AE=A1=EF=BC=88=E5=9D=91=E2=91=A1=EF=BC=89=EF=BC=8Cg4/g5?=
+ =?UTF-8?q?=E8=A7=82=E5=AF=9F=E5=88=97=EF=BC=88=E5=9D=91=E2=91=A2=EF=BC=89?=
+ =?UTF-8?q?=EF=BC=9BP3@2k6945=E6=B2=BF=E7=94=A8=EF=BC=9BJ4=E4=B8=8D?=
+ =?UTF-8?q?=E5=8F=AF=E6=B5=8B=E6=8A=AB=E9=9C=B2=EF=BC=9B=C2=A7=E4=B8=89?=
+ =?UTF-8?q?=E9=99=84=E5=9F=BA=E7=BA=BF=E9=94=81=E5=AE=9A=E8=A1=A8+?=
+ =?UTF-8?q?=E8=AE=A1=E7=AE=97=E5=99=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ ...1\243\346\211\253\346\211\271-20261006.md" | 93 +++++++++++++++++++
+ tools/e057_baseline_calc.py                   | 34 +++++++
+ 2 files changed, 127 insertions(+)
+ create mode 100644 "docs/\351\242\204\346\263\250\345\206\214/\351\242\204\346\263\250\345\206\214-E057-rep_w\346\241\243\346\211\253\346\211\271-20261006.md"
+ create mode 100644 tools/e057_baseline_calc.py
+
+diff --git "a/docs/\351\242\204\346\263\250\345\206\214/\351\242\204\346\263\250\345\206\214-E057-rep_w\346\241\243\346\211\253\346\211\271-20261006.md" "b/docs/\351\242\204\346\263\250\345\206\214/\351\242\204\346\263\250\345\206\214-E057-rep_w\346\241\243\346\211\253\346\211\271-20261006.md"
+new file mode 100644
+index 00000000..f2e90199
+--- /dev/null
++++ "b/docs/\351\242\204\346\263\250\345\206\214/\351\242\204\346\263\250\345\206\214-E057-rep_w\346\241\243\346\211\253\346\211\271-20261006.md"
+@@ -0,0 +1,93 @@
++# 预注册 — E-057 rep_w 档扫批（信号侧接线首批 · C3 发送者获益通道）
++
++> 卡=REPW-PREREG（砚 锁 → 镜 快审 → PI 会签，R225/R394② 双签硬门：**判据未双签不起跑**）。
++> 起草=砚 2026-10-06 21:2x（Asia/Shanghai）。起跑令=鱼 10-06 21:0x 消息（前置齐后由 BATCH-SCRIPT 链执行）。
++> 本稿判据为 **E-057 新批新判据**（不触碰 M1/E-056 锁定文本 @761803c——出口条款已用尽，PI 裁注 @台账 8cc3251；无任何改判据后门）。
++
++## 〇、定位与决策树
++
++1. **本批检验条件 = C3（发送者获益通道）**：`reputation_weight`（rep_w）使移动得分信号项 `sig_weight = 0.5 + rep_w × trust` 随自身声誉放大 `[代码: simulation/config.py:598-604]`。rep_w=0 时恒 0.5——E-056（rep_w 未开）判负按出口走后的接线首批即在此引入非零 rep_w。
++2. **青梧三坑规避（板 9f85513，R396③ 选用不照单，PI 裁注已注入设计）**：
++   - 坑① J1/J2 机械共动（g15→发射概率，`[代码: simulation/sphere_engine.py:3596 信号发射以基因概率 g15]`，r=0.9989）⇒ **发射率并入单一「适合度后果」判据的旁证列，不再作独立主判据**（§四 K1）；
++   - 坑② 首末窗比值对「先升后降」失效（8/8 中 6 峰值在中段）⇒ 主判据改**峰值增益 + 中段窗**稳健统计（§四 K1，窗仍走 index 式家规）;
++   - 坑③ g4_mem_bit_frac 强选择迹象（0.16→0.76）与 g5 会读 ⇒ **列入观察列，只出数不判定**（§五；G4 口径适用性冲突候 ZEROPAT-AUDIT 清算，本批不预设）。
++
++## 一、装置（照 E-056 骨架 §一 锁定档，变量只加 `--rep-w`）
++
++| 字段 | 值 | 锚 |
++|---|---|---|
++| 网格 | 480×960，`--device s2` 显式（R5.6） | 骨架 §一 锁定文本 @761803c |
++| patches / pop / rgm / bg_low | 1700 / 10000 / 1.195 / 0.0+0.0 | 同上 |
++| rd / alphabet / arms | **off / '8' / off** | 同上（鱼令：不得以 SMOKE 模板代锁定档） |
++| 仪表 | `--m0-instruments` 必开；`--m0-emit-window-frac 0.25`（砚锁沿用） | 骨架 §三-2 / §八-4a |
++| tick / sample | **2000t / 100**（⇒ 每 run n=20 采样窗；档位=鱼直令锁定**不得改**） | PI 派工 21:16 |
++| **唯一变量** | `--rep-w ∈ {0.05, 0.2, 0.5}` × seed **207–214** = **24 run** | 鱼令③（卡 BATCH-SCRIPT/RPW-KNOB） |
++| rep_w 基线对 | E-056 八 seed（同装置同 seed，rep_w=0 隐含档）⇒ **逐 seed 配对可比**（同纪元 rd-off/alpha-8） | 台账 E-056 行 @0381d0a |
++| 载体旋钮 | `--rep-w` 透传 `reputation_weight`：澜舟 RPW-KNOB（未落 main `[代码: 主树 grep 零命中 @6a364bd]`）；默认关逐位等价+靶向测试必红（新工具四律）；**summary/meta 须回显 `reputation_weight_effective` 键**（S1 读回守同款，跑前逐 run 核对项） | 卡 RPW-KNOB |
++| 执行 | 云机（R398+鱼令「本机不起批」），BATCH-SCRIPT 链式：断点续跑+逐 run manifest（R277 四要素）+fail-loud+跑完自动 ping 砚 | 卡 BATCH-SCRIPT |
++
++## 二、窗与切点（家规沿用）
++
++n=每 run 采样行数（2000t/sample100 ⇒ **n=20**）；**index 式**（PI 裁②）：
++- 首段 F = 窗 1–5（k=int(0.25×20)=5）均值；
++- **中段 M = 窗 8–13 均值**（中央 6 窗，index 式定位：floor(0.35n)..ceil(0.65n)−1 → 7..12 零基 ⇒ 第 8–13 窗一基；n 变则随比例缩放）；
++- 末段 L = 窗 16–20 均值；
++- **峰值 P = max(窗 1..20 的 g15_mean)**，峰值增益 **peak_gain = P − F**。
++逐 run 先算、再逐 seed、再档内聚合（池化=逐 run 加权，N1 §3.1 家规）。
++
++## 三、判据（锁定候选——砚签＋PI 会签后冻结；只判方向，不设效果量门槛、不设改判据后门）
++
++> 🔴 **设计自证（砚 21:2x [实测]）**：以 K1 式（peak_gain≥0.01 且 M≥F）回测 E-056 rep_w=0 基线 ⇒ **7/8 命中**（唯 208 未中）——「先升后降」是本装置 2k 窗的**默认形态**而非信号效应。**结论：单档上升形态门无鉴别力，主判据必须是配对差（K2）**；此条同时是对青梧坑②的最诚实规避。
++
++| # | 判据 | 规则 | 阈值来源 |
++|---|---|---|---|
++| **K2（主判据·rep_w 配对效应）** | 逐 seed 配对 **Δ = (M−F)_E057档 − (M−F)_E056同seed**（基线 F/M 值已锁 [实测]：本稿附表 §三附）；**Δ>0 计数**，某档 **≥4/5 seed 同向** ⇒ 该档「rep_w 抬升中段-首段差」成立；旁证列 Δpeak_gain 同向计数（只报不判） | 无新增阈值（方向判） | [推断] 同 seed 同装置唯一变量 rep_w；E-056 数据 @a8d8f82 复用不重跑（鱼令①）；🔴 **跨树配对为统计级非逐位级**（E-056 树 @1c72939 vs 本批 RPW-KNOB 合入后新树）——同树 rep_w=0 锚臂（+8 run）是否加，候 PI 会签时裁（默认不加） |
++| **K1（形态辅判·档内轨迹）** | 每 run：peak_gain≥**0.010** 且 M≥F ⇒ 「上升形态」计数；**档判仅作形态描述与 K2 阳性档的合理性核对，不单独判正**（基线 7/8 命中证据在上）；**发射率(G6)不作独立主判据**，仅旁证列（坑①合并：r=0.9989 共线，`[代码: sphere_engine.py:3596 g15→发射概率]`） | δ_pk=0.010 | [实测] E-056 |Δ末-首|≤0.01 近中性带 + 基线 peak_gain 0.0087–0.0434 分布 |
++| **K3（生态门·前置）** | 每档独立过门：**多数 seed（≥5/8）存活至 2000t** + **P3 同窗比门 @2k 窗末 pop ≥ 6945**（锚带 9922±430×70%，沿用）；不过门档 ⇒ 该档 K1/K2 **不可执行**（R3/R6，不得照抄绝对门值） | 6945 | [文档] 裁① 锁定 @761803c+dcb6753 |
++| **NaN/fail-loud** | 主判据列（g15_mean）NaN ⇒ 该 seed fail-loud 判不定；观察列 NaN 如实披露 | — | 骨架 §四 沿用 |
++| **判负出口** | 全三档 K2 均不成立 ⇒ 上板候 PI 裁（**本批不设自动停线条款**——出口条款已在 E-056 用尽，卡 REPW-PREREG「不设后门」条） | — | [文档] 台账 8cc3251 |
++
++### 三附、E-056 基线 (F, M, peak_gain) 锁定值（K2 配对用，[实测] 本次算账 21:2x，读数器随批附）
++
++| seed | F(窗1-5) | M(窗8-13) | M−F | peak_gain | K1形态 |
++|---|---|---|---|---|---|
++| 207 | 0.5295 | 0.5510 | +0.0215 | 0.0332 | 命中 |
++| 208 | 0.4837 | 0.4647 | −0.0189 | 0.0087 | 未中 |
++| 209 | 0.5010 | 0.5204 | +0.0194 | 0.0434 | 命中 |
++| 210 | 0.5024 | 0.5293 | +0.0269 | 0.0378 | 命中 |
++| 211 | 0.4825 | 0.4966 | +0.0141 | 0.0179 | 命中 |
++| 212 | 0.4968 | 0.5019 | +0.0050 | 0.0189 | 命中 |
++| 213 | 0.4947 | 0.5047 | +0.0100 | 0.0162 | 命中 |
++| 214 | 0.4965 | 0.4995 | +0.0049 | 0.0239 | 命中 |
++
++复现：`py tools/e057_baseline_calc.py --data the-world-data/e056_m1`（本表即其输出；镜复算请用同款脚本或报口径差）。M−F 基线散布 **−0.019~+0.027** ⇒ §五 功效条款「不可与 seed 间散布区分」参照带。
++
++**明言不可判项**：J4/L1（携带信息 MI）——L1-JOINTCOL 未合 main `[实测: merge-base 验否 @6a364bd]` ⇒ 本批无列不可测，照实披露；若会签前合入且列落地，改动只允许「增列观察」不动 K1/K2 文本（随 ZEROPAT-AUDIT/交付重登记走 R225）。
++
++## 四、观察列（只出数不判定）
++
++1. 发射率 G6 全列（emit_rate_first/last/ratio、zero_pat）——兼候 ZEROPAT-AUDIT a/b/c 清算数据面；
++2. g4_mem_bit_frac 全程轨迹（分窗均值+末值，青梧 0.16→0.76 信号复验）+ g5_dir_diff/g5_move_diff（J3 会读复验）；
++3. pop 轨迹、hr/bg 常规列；
++4. 全 20 窗 g15 逐窗值入读数附表（供镜复算峰位/中段敏感性：窗 8–13 口径若镜提议改段，复算可双口径并报，**主判据仍按本稿锁定段**）。
++
++## 五、判读计划与功效披露
++
++- 读数器：`tools/e057_readout.py`（随批交付，index 式 K1/K2/K3 全表+档聚合）；判读稿=砚出稿→**镜独立复算**（同切点全表+§四-4 敏感性）→PI/fish 裁（家规）。
++- **功效如实报**：2000t ≈ 代际尺度短（E-039 教训条：弱选择 2k 不可测）；本批判「方向」不判「幅度」，若 K2 三档全「不成立」，记录为**窗口功效受限候裁**，不得写成「C3 证伪」[推断]——青梧「延窗 5k–10k」建议被鱼直令 2000t 锁定覆盖，随档披露候 PI 后续定夺；单档配对差 Δ 量级若落基线 M−F 自身跨 seed 散布带（−0.019~+0.027 [实测] §三附）内，判「不可与 seed 间散布区分」候裁。
++- 跨纪元禁比守：只与 E-056（同纪元）配对；SMOKE/E-052 数值不引。
++
++## 六、起跑前置核对单（任一未齐不起跑）
++
++1. RPW-KNOB 落 main（镜快审+PI 合）＋`reputation_weight_effective` 回显键在 summary/meta；
++2. BATCH-SCRIPT 云机链就绪（dry-run 演示上板）；
++3. **本稿判据双签**：砚签（本提交）＋ **PI 会签**（R394②，板帖落号即锁）；
++4. ZEROPAT-AUDIT 结论若先于会签落板 ⇒ 按卡注并入（只可收紧不可放宽 K1）；
++5. Pre-Flight C1–C8（含 20t 仪表冒烟先行后删）＋ `--plan` 逐 run 核对（R278 全 argv 透传）＋ E-057 计划行先登台账；
++6. 生态门不豁免；🔴 R117/R378：跑批一律云机（鱼令），执行编排=BATCH-SCRIPT（澜舟），砚读数不发射（起跑令在鱼 21:0x 消息链，R381 限界）。
++
++## 七、规模与墙钟预估
++
++24 run × 单 run wall ≈2 分钟（E-056 [实测] 4 lane×2 串行 16 min）⇒ 云机 4 lane ≈ **50–60 min**；23:00 墙前可完（今晚 21:1x 起备），跨墙照 R398 云机承跑。
++
++— 砚（起草/锁定候选签）2026-10-06 21:2x · 候：镜快审意见 → PI 会签（@板）→ 本文本转「锁定」态
+diff --git a/tools/e057_baseline_calc.py b/tools/e057_baseline_calc.py
+new file mode 100644
+index 00000000..62e0b4cb
+--- /dev/null
++++ b/tools/e057_baseline_calc.py
+@@ -0,0 +1,34 @@
++# -*- coding: utf-8 -*-
++"""E-057 K2 基线计算器（砚）：E-056 逐 seed (F, M, M-F, peak_gain)——预注册 §三附复现用。
++
++口径：index 式（n=20）：F=窗1-5，M=窗8-13（floor(0.35n)..ceil(0.65n) 一基），peak_gain=max(F..L窗)-F。
++用法：py tools/e057_baseline_calc.py --data the-world-data/e056_m1
++"""
++from __future__ import annotations
++import argparse, csv, glob, math, os, re, statistics
++
++def segs(vals):
++    n = len(vals)
++    k = int(0.25 * n)
++    a, b = math.floor(0.35 * n) + 1, math.ceil(0.65 * n)  # 1-based inclusive-ish
++    F = statistics.mean(vals[:k])
++    M = statistics.mean(vals[a - 1:b])  # zero-based slice [a-1, b)
++    P = max(vals)
++    return F, M, P - F
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--data", default="the-world-data/e056_m1")
++    a = ap.parse_args()
++    print("seed | F | M | M-F | peak_gain | K1hit(>=0.010 & M>=F)")
++    for fp in sorted(glob.glob(os.path.join(a.data, "e056_m1_d1700_s*_t2000.csv"))):
++        seed = re.search(r"_s(\d+)_t", os.path.basename(fp)).group(1)
++        rows = list(csv.DictReader(open(fp, encoding="utf-8")))
++        vals = [float(r["g15_mean"]) for r in rows]
++        assert not any(v != v for v in vals), f"NaN g15_mean in {fp} (fail-loud)"
++        F, M, pg = segs(vals)
++        print(f"{seed} | {F:.4f} | {M:.4f} | {M - F:+.4f} | {pg:.4f} | {'Y' if (pg >= 0.010 and M >= F) else 'N'}")
++    return 0
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.46.1.windows.1
+
+
+From 6256b519ceaf66bd182efb06b6314f233be7c3be Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E7=A0=9A?= <yan@the-world.local>
+Date: Tue, 6 Oct 2026 22:12:33 +0800
+Subject: [PATCH 2/3] =?UTF-8?q?tools:=20[=E7=A0=9A]=20E-057=E8=AF=BB?=
+ =?UTF-8?q?=E6=95=B0=E5=99=A8=EF=BC=88=E9=94=81=E5=AE=9A=C2=A7=E4=BA=8C/?=
+ =?UTF-8?q?=C2=A7=E4=B8=89=E5=8F=A3=E5=BE=84=EF=BC=9AK2=E5=90=8C=E6=A0=91?=
+ =?UTF-8?q?=E9=94=9A=E8=87=82=E4=B8=BB=E9=85=8D=E5=AF=B9+K1=E5=BD=A2?=
+ =?UTF-8?q?=E6=80=81=E8=BE=85=E5=88=A4+K3=E6=A1=A3=E9=97=A8+E-056=E8=B7=A8?=
+ =?UTF-8?q?=E6=A0=91=E6=A0=B8=E9=AA=8C=E5=88=97+=E8=A3=85=E7=BD=AE?=
+ =?UTF-8?q?=E5=9B=9E=E6=98=BE=E9=80=90run=E6=A0=B8=E5=AF=B9+NaN=20fail-lou?=
+ =?UTF-8?q?d=EF=BC=89=EF=BC=9B=E6=BC=94=E7=BB=83=3DE-056=E6=A1=A3M-F?=
+ =?UTF-8?q?=E4=B8=8E=C2=A7=E4=B8=89=E9=99=84=E9=94=81=E5=AE=9A=E5=80=BC?=
+ =?UTF-8?q?=E9=80=90=E4=BD=8D=E4=B8=80=E8=87=B4[=E5=AE=9E=E6=B5=8B]?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ tools/e057_readout.py | 146 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 146 insertions(+)
+ create mode 100644 tools/e057_readout.py
+
+diff --git a/tools/e057_readout.py b/tools/e057_readout.py
+new file mode 100644
+index 00000000..03f33eed
+--- /dev/null
++++ b/tools/e057_readout.py
+@@ -0,0 +1,146 @@
++# -*- coding: utf-8 -*-
++"""E-057 rep_w 档扫读数器（砚，2026-10-06）——按双签锁定文本 §二/§三 出数。
++
++口径（锁定 @main 2306949 会签态；不得擅动）：
++- 窗：n=每 run 采样行数；F=前 k=int(0.25n) 窗；M=中段窗 floor(0.35n)..ceil(0.65n)（n=20 => 1基第8-13窗）；
++  L=后 k 窗；peak_gain=max(g15)-F；K1 形态 = peak_gain>=0.010 且 M>=F（只描述不判正）。
++- K2 主判据：档 vs **同树锚臂**（rep_w=0 且 solo）逐 seed 配对 D=(M-F)_档-(M-F)_锚；
++  D>0 计数；档判 >=4/5 seed 同向（计数/8>=0.8）。旁证 Dpeak_gain 同向计数（只报）。
++- E-056 跨树核验列：档与锚各自对 E-056 同 seed (M-F)（值内嵌=锁定 §三附）报偏离；偏离过大如实披露候裁。
++- K3 生态门：档内 存活>=5/8 且 P3（窗末 pop>=6945）逐 run；不过门档 K1/K2 标 NOT-EXECUTABLE。
++- 装置回显逐 run 核对：rd off / alphabet 8 / arms off / instruments on / emit-window-frac 0.25 /
++  reputation_weight_effective==档值 / info_structure_enabled_effective==True（solo 形制）。
++- NaN：g15_mean 出现 NaN => fail-loud 该 seed 判不定（K2 计缺）；观察列 NaN 披露。
++
++用法：py tools/e057_readout.py --data the-world-data/e057_batch [--pattern "e057*_s*_t2000.csv"]
++"""
++from __future__ import annotations
++import argparse, csv, glob, json, math, os, re, statistics
++
++E056_MF = {  # 锁定 §三附（跨树核验参照，e057_baseline_calc.py 可复现）
++    "207": 0.0215, "208": -0.0189, "209": 0.0194, "210": 0.0269,
++    "211": 0.0141, "212": 0.0050, "213": 0.0100, "214": 0.0030,
++}
++ARMS = [0.0, 0.05, 0.2, 0.5]
++P3_GATE = 6945.0
++DELTA_PK = 0.010
++
++
++def segs(vals):
++    n = len(vals)
++    k = int(0.25 * n)
++    a, b = math.floor(0.35 * n) + 1, math.ceil(0.65 * n)
++    F = statistics.mean(vals[:k])
++    M = statistics.mean(vals[a - 1:b])
++    L = statistics.mean(vals[-k:])
++    return F, M, L, max(vals)
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--data", default="the-world-data/e057_batch")
++    ap.add_argument("--pattern", default="*s*_t2000.csv")
++    a = ap.parse_args()
++    runs = {}
++    for fp in sorted(glob.glob(os.path.join(a.data, a.pattern))):
++        if fp.endswith(".summary.json"):
++            continue
++        m = re.search(r"_s(\d+)_t", os.path.basename(fp))
++        if not m:
++            continue
++        seed = m.group(1)
++        rows = list(csv.DictReader(open(fp, encoding="utf-8")))
++        summ_p = fp.replace(".csv", ".summary.json")
++        meta, run0 = {}, {}
++        if os.path.exists(summ_p):
++            j = json.load(open(summ_p, encoding="utf-8"))
++            meta, runs_list = j.get("meta", {}), j.get("runs", [])
++            run0 = runs_list[-1] if runs_list else {}
++        rw = run0.get("reputation_weight_effective", meta.get("reputation_weight"))
++        rw = 0.0 if rw is None else float(rw)
++        arm = min(ARMS, key=lambda x: abs(x - rw))
++        flag = []
++        vals = []
++        for r in rows:
++            v = r.get("g15_mean", "")
++            if v in ("", "nan", None):
++                flag.append(f"NaN@t{r.get('tick')}")
++                continue
++            vals.append(float(v))
++        echo = {
++            "rd": meta.get("rd_mode"), "alpha": str(meta.get("alphabet")),
++            "arms": meta.get("arms"), "inst": meta.get("m0_instruments"),
++            "wfrac": run0.get("emit_rate_window_frac", meta.get("m0_emit_window_frac")),
++            "rw_eff": run0.get("reputation_weight_effective"),
++            "is_en": run0.get("info_structure_enabled_effective"),
++        }
++        dev = []
++        if echo["rd"] not in (None, "off"): dev.append(f"rd={echo['rd']}")
++        if echo["alpha"] not in ("8", "None"): dev.append(f"alpha={echo['alpha']}")
++        if echo["arms"] not in (None, "off"): dev.append(f"arms={echo['arms']}")
++        if echo["inst"] is False: dev.append("inst=False")
++        if echo["wfrac"] not in (None, 0.25): dev.append(f"wfrac={echo['wfrac']}")
++        if echo["rw_eff"] is not None and abs(float(echo["rw_eff"]) - rw) > 1e-9:
++            dev.append(f"rw_eff={echo['rw_eff']}!=meta{rw}")
++        if echo["is_en"] is not None and echo["is_en"] is not True:
++            dev.append(f"is_en={echo['is_en']}")
++        pops = [float(r["pop"]) for r in rows]
++        stop = run0.get("stop", "?")
++        alive = stop != "灭绝" and (run0.get("extinct_at") is None) and pops[-1] > 0
++        F, M, L, P = segs(vals)
++        g5 = statistics.mean([float(r["g5_dir_diff"]) for r in rows if r.get("g5_dir_diff") not in ("", "nan", None)] or [float("nan")])
++        emit_ratio = run0.get("emit_rate_ratio", float("nan"))
++        zero = run0.get("emit_zero_pattern_n", "?")
++        runs.setdefault(arm, {})[seed] = dict(
++            n=len(rows), F=F, M=M, L=L, P=P, MF=M - F, pg=P - F,
++            k1=(P - F >= DELTA_PK and M >= F), alive=alive, pop_end=pops[-1],
++            p3=pops[-1] >= P3_GATE, pop_min=min(pops), g5=g5,
++            emit_ratio=emit_ratio, zero=zero, dev=dev, nan=flag,
++        )
++    print("== per-run (arm | seed | F M L | M-F | peak_gain | K1 | alive | pop_end | P3>=6945 | g5_dir | emit_ratio | zero_pat | device-echo | NaN) ==")
++    for arm in ARMS:
++        for seed in sorted(runs.get(arm, {})):
++            d = runs[arm][seed]
++            print(f"{arm} | {seed} | {d['F']:.4f} {d['M']:.4f} {d['L']:.4f} | {d['MF']:+.4f} | {d['pg']:.4f} | "
++                  f"{'K1Y' if d['k1'] else 'K1N'} | {'ALIVE' if d['alive'] else 'EXT'}({d['pop_end']:.0f}) | "
++                  f"{'P3Y' if d['p3'] else 'P3N'} | {d['g5']:.4f} | {d['emit_ratio']:.4f} | {d['zero']} | "
++                  f"{'OK' if not d['dev'] else '!!' + ';'.join(d['dev'])} | {d['nan'] or '-'}")
++    print("== K2 (main: arm vs same-tree anchor rep_w=0) + E-056 cross-tree check ==")
++    anchor = runs.get(0.0, {})
++    for arm in ARMS[1:]:
++        cells, dpg, xdev, xdev_a = [], [], [], []
++        pos = tot = miss = 0
++        for seed in sorted(E056_MF):
++            d = runs.get(arm, {}).get(seed)
++            da = anchor.get(seed)
++            if d is None or da is None or d["nan"] or da["nan"]:
++                miss += 1
++                continue
++            dd = d["MF"] - da["MF"]
++            tot += 1
++            pos += 1 if dd > 0 else 0
++            cells.append(f"s{seed}:{dd:+.4f}")
++            dpg.append(f"{d['pg'] - da['pg']:+.4f}")
++            xdev.append(f"{d['MF'] - E056_MF[seed]:+.4f}")
++            xdev_a.append(f"{da['MF'] - E056_MF[seed]:+.4f}")
++        ok = tot > 0 and pos / tot >= 0.8
++        alive_n = sum(1 for s in runs.get(arm, {}) if runs[arm][s]["alive"])
++        p3_n = sum(1 for s in runs.get(arm, {}) if runs[arm][s]["p3"])
++        gate = f"K3: alive {alive_n}/8 P3 {p3_n}/8"
++        verdict = "K2-ESTABLISHED" if ok else "K2-not-established"
++        if alive_n < 5 or p3_n < 5:
++            gate += " => NOT-EXECUTABLE (R3/R6)"
++            verdict = "K2-NOT-EXECUTABLE"
++        print(f"arm {arm}: pos {pos}/{tot} (missing {miss}) {verdict} [{gate}]")
++        print("   d(M-F) vs anchor : " + " ".join(cells))
++        print("   d(peak_gain) corroboration (report-only): " + " ".join(dpg))
++        print("   x-tree check vs E-056 arm: " + " ".join(xdev))
++        print("   x-tree check vs E-056 anchor: " + " ".join(xdev_a))
++    print(f"anchor solo x-tree spread |d(M-F)| max = "
++          f"{max((abs(anchor[s]['MF'] - E056_MF[s]) for s in anchor if s in E056_MF), default=float('nan')):.4f} "
++          f"(disclose if large; PI ruling pending)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.46.1.windows.1
+
+
+From 47c2e1cf42aae69a30361050166a44dc03f6cce0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E7=A0=9A?= <yan@the-world.local>
+Date: Wed, 7 Oct 2026 00:16:10 +0800
+Subject: [PATCH 3/3] =?UTF-8?q?docs:=20[=E7=A0=9A]=20E-057=20=E5=88=A4?=
+ =?UTF-8?q?=E8=AF=BB=E7=A8=BF=E2=80=94=E2=80=94K2=20=E4=B8=89=E6=A1=A3?=
+ =?UTF-8?q?=E5=85=A8=E4=B8=8D=E6=88=90=E7=AB=8B=EF=BC=883/8,4/8,5/8<7/8?=
+ =?UTF-8?q?=EF=BC=89=EF=BC=9B=E5=8A=9F=E6=95=88=E6=9D=A1=E6=AC=BE=E7=82=B9?=
+ =?UTF-8?q?=E4=BA=AE=2022/24=20=E5=B8=A6=E5=86=85=E4=B8=8D=E5=8F=AF?=
+ =?UTF-8?q?=E4=B8=8Eseed=E6=95=A3=E5=B8=83=E5=8C=BA=E5=88=86=E5=80=99?=
+ =?UTF-8?q?=E8=A3=81=EF=BC=9B=E9=94=9A=E8=87=82=E8=B7=A8=E6=A0=91=E9=80=90?=
+ =?UTF-8?q?=E4=BD=8D=E5=A4=8D=E7=8E=B0E-056=EF=BC=88|d|<=3D0.00005=208/8?=
+ =?UTF-8?q?=EF=BC=89=EF=BC=9BK3=2032/32=20=E8=BF=87=E9=97=A8=20NaN=3D0?=
+ =?UTF-8?q?=EF=BC=9Bg4=20=E5=9D=91=E2=91=A2=E8=A7=82=E5=AF=9F=E5=88=97?=
+ =?UTF-8?q?=E5=9B=9B=E8=87=82=E6=97=A0=E5=88=86=E7=A6=BB=E5=A4=8D=E7=8E=B0?=
+ =?UTF-8?q?=E5=BC=BA=E7=88=AC=E5=8D=87=EF=BC=9B=E5=88=A4=E8=B4=9F=E5=87=BA?=
+ =?UTF-8?q?=E5=8F=A3=3D=E4=B8=8A=E6=9D=BF=E5=80=99=E8=A3=81=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=99C3=E8=AF=81=E4=BC=AA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ ...1\243\346\211\253\346\211\271-20261007.md" | 113 ++++++++++++++++++
+ 1 file changed, 113 insertions(+)
+ create mode 100644 "docs/\345\210\244\350\257\273\347\250\277-E057-rep_w\346\241\243\346\211\253\346\211\271-20261007.md"
+
+diff --git "a/docs/\345\210\244\350\257\273\347\250\277-E057-rep_w\346\241\243\346\211\253\346\211\271-20261007.md" "b/docs/\345\210\244\350\257\273\347\250\277-E057-rep_w\346\241\243\346\211\253\346\211\271-20261007.md"
+new file mode 100644
+index 00000000..765afee8
+--- /dev/null
++++ "b/docs/\345\210\244\350\257\273\347\250\277-E057-rep_w\346\241\243\346\211\253\346\211\271-20261007.md"
+@@ -0,0 +1,113 @@
++# 判读稿 · E-057 rep_w 档扫批（32 run，四臂含同树锚臂）
++
++> **判据**：🔒 锁定双签文本 `docs/预注册/预注册-E057-rep_w档扫批-20261006.md`（草稿 @`7605da1` + PI 会签修订 @`2306949`，R225/R394② 门过）；装置锁定 §一 @`761803c`+`dcb6753`。本稿只按锁定口径出数判读，**不重设判据**（R225）。
++> **载体**：批脚本 `task/BATCH-SCRIPT`@`5d2cb8f`（澜舟，四律+12 变异红 @`17aae6c` 板帖），base=main@`7faca82`（批窗冻结令 `978dde0` 窗内代码面零触碰 `[实测: status.txt HEAD 回显]`）。
++> **跑批面** `[实测]`：云机（R400 门，本机零批）lanes=2｜START 23:03:06 → ALLDONE 00:06:47（≈3h04m）｜**32/32 RC=0，无 ABORT**｜收口入库=数据仓 @`9dbb39c`（32csv+32summary+e057_manifest+32log+status，已 push）；`e057_logs/PING_YAN.txt` 已收（澜舟回显核：逐 run `reputation_weight_effective`/`info_structure_enabled_effective` 已置）。
++> **读数器**：`tools/e057_readout.py`@`6256b51`（演练=E-056 档 M−F 与 §三附锁定值逐位一致）。
++
++---
++
++## 〇、一页结论
++
++| 项 | 读数 | 判定 |
++|---|---|---|
++| **K3 生态门** | 四臂 alive 8/8 + P3@2k≥6945 8/8（32/32） | ✅ **全档可执行**（R3/R6 门过）|
++| **K2 主判据**（Δ=(M−F)_档−(M−F)_同树锚臂，同向 ratio≥0.8） | 0.05 档 **3/8**｜0.2 档 **4/8**｜0.5 档 **5/8** | 🔴 **三档全不成立** |
++| **功效条款**（§五锁定） | Δ 24 值中 22 个落锚臂散布带 [−0.019, +0.027]；越带 2 值**均为负向**（0.05@s210 −0.0349、0.2@s210 −0.0230） | 🟡 **「不可与 seed 间散布区分」候裁**；唯二越带信号方向为负，**不构成 C3 抬升证据** |
++| **K1 形态辅判** | 锚 7/8｜0.05 6/8｜0.2 5/8｜0.5 7/8（基线设计自证 7/8） | ⚪ 档间无鉴别力，只描述不判正（锁定文本）|
++| **NaN / fail-loud** | 主判据列 NaN=**0**（missing 0）| ✅ 未触发 |
++| **J4/L1 携带信息** | L1-JOINTCOL 未合 main ⇒ 本批无列 | 🟡 **不可测，照 §三 原文披露** |
++| **出口** | 判负出口条款点亮 | 🔴 **上板候 PI 裁**；**不写「C3 证伪」**、不停线条款（E-056 已用尽）|
++
++---
++
++## 一、装置合规与复现核验
++
++1. **逐 run 回显核对** `[实测]`：32/32 `rd-off / alphabet-8 / arms-off / m0-instruments / emit-window-frac=0.25 / s2 全字段（rows480/cols960/patches1700/pop10000/rgm1.195/bg_low 0+0）` 全 OK；档位识别以回显 `reputation_weight_effective` 为准（与文件名 rpw0/rpw5/rpw20/rpw50 前缀互证一致）。
++2. 🔴 **锚臂跨树逐位复现 E-056** `[实测]`：锚臂（`--rep-w 0 --rep-w-solo`）M−F 与 E-056 @`a8d8f82` 同 seed 配对差 |Δ|≤0.00005（8/8，最大 0.0000）⇒ 预注册 §三 K2 行「跨树配对为统计级非逐位级」的保留意见**被实测消解**：solo 形制骨架在 RPW-KNOB 合入后新树（base 7faca82）下**确定性复现** E-056 数值。同树锚臂配对 + 跨树核验列并报**双双成立**。
++
++## 二、逐 run 读数全表（g15 窗均；F/M=int(0.25n)/中段 8–13 窗，n=20）
++
++| 档 | seed | F | M | M−F | peak_gain | K1 | 存活(pop_end) | P3 | g5_dir | emit_ratio | zero_pat |
++|---|---|---|---|---|---|---|---|---|---|---|---|
++| 0.0(锚) | 207 | 0.5295 | 0.5510 | +0.0215 | 0.0332 | Y | ALV(9833) | Y | 0.3895 | 0.9996 | 0 |
++| 0.0(锚) | 208 | 0.4837 | 0.4647 | −0.0189 | 0.0087 | N | ALV(9602) | Y | 0.3939 | 0.9732 | 0 |
++| 0.0(锚) | 209 | 0.5010 | 0.5204 | +0.0194 | 0.0434 | Y | ALV(10486) | Y | 0.4079 | 1.0748 | 0 |
++| 0.0(锚) | 210 | 0.5024 | 0.5293 | +0.0269 | 0.0378 | Y | ALV(9702) | Y | 0.3650 | 1.0129 | 0 |
++| 0.0(锚) | 211 | 0.4825 | 0.4966 | +0.0141 | 0.0179 | Y | ALV(9885) | Y | 0.3857 | 1.0036 | 0 |
++| 0.0(锚) | 212 | 0.4968 | 0.5019 | +0.0050 | 0.0189 | Y | ALV(10083) | Y | 0.3770 | 0.9798 | 0 |
++| 0.0(锚) | 213 | 0.4947 | 0.5047 | +0.0100 | 0.0162 | Y | ALV(9391) | Y | 0.3897 | 1.0291 | 0 |
++| 0.0(锚) | 214 | 0.4965 | 0.4995 | +0.0030 | 0.0239 | Y | ALV(9205) | Y | 0.3557 | 0.9652 | 0 |
++| 0.05 | 207 | 0.5324 | 0.5521 | +0.0197 | 0.0292 | Y | ALV(9371) | Y | 0.3850 | 1.0006 | 0 |
++| 0.05 | 208 | 0.4861 | 0.4768 | −0.0092 | 0.0061 | N | ALV(9177) | Y | 0.3884 | 0.9720 | 0 |
++| 0.05 | 209 | 0.5029 | 0.5245 | +0.0216 | 0.0419 | Y | ALV(10563) | Y | 0.4140 | 1.0772 | 0 |
++| 0.05 | 210 | 0.4936 | 0.4857 | −0.0079 | 0.0097 | N | ALV(10310) | Y | 0.3619 | 0.9463 | 0 |
++| 0.05 | 211 | 0.4838 | 0.4960 | +0.0122 | 0.0184 | Y | ALV(9916) | Y | 0.3908 | 1.0175 | 0 |
++| 0.05 | 212 | 0.4980 | 0.4996 | +0.0016 | 0.0122 | Y | ALV(9983) | Y | 0.3875 | 0.9608 | 0 |
++| 0.05 | 213 | 0.4908 | 0.4943 | +0.0036 | 0.0143 | Y | ALV(9299) | Y | 0.3871 | 1.0187 | 0 |
++| 0.05 | 214 | 0.5003 | 0.5134 | +0.0131 | 0.0223 | Y | ALV(9700) | Y | 0.3425 | 0.9931 | 0 |
++| 0.2 | 207 | 0.5263 | 0.5429 | +0.0166 | 0.0325 | Y | ALV(9689) | Y | 0.3842 | 0.9838 | 0 |
++| 0.2 | 208 | 0.4813 | 0.4734 | −0.0079 | 0.0111 | N | ALV(9295) | Y | 0.3920 | 0.9800 | 0 |
++| 0.2 | 209 | 0.4939 | 0.5176 | +0.0237 | 0.0404 | Y | ALV(10777) | Y | 0.4133 | 1.0743 | 0 |
++| 0.2 | 210 | 0.4881 | 0.4921 | +0.0039 | 0.0186 | Y | ALV(9984) | Y | 0.3770 | 0.9783 | 0 |
++| 0.2 | 211 | 0.4875 | 0.5017 | +0.0142 | 0.0192 | Y | ALV(9914) | Y | 0.3956 | 1.0152 | 0 |
++| 0.2 | 212 | 0.4953 | 0.5055 | +0.0102 | 0.0204 | Y | ALV(10158) | Y | 0.3911 | 0.9852 | 0 |
++| 0.2 | 213 | 0.4958 | 0.4994 | +0.0036 | 0.0087 | N | ALV(9618) | Y | 0.3863 | 1.0116 | 0 |
++| 0.2 | 214 | 0.5019 | 0.4981 | −0.0038 | 0.0172 | N | ALV(9444) | Y | 0.3565 | 0.9702 | 0 |
++| 0.5 | 207 | 0.5275 | 0.5589 | +0.0314 | 0.0359 | Y | ALV(9705) | Y | 0.3995 | 1.0269 | 0 |
++| 0.5 | 208 | 0.4857 | 0.4724 | −0.0134 | 0.0085 | N | ALV(9036) | Y | 0.3909 | 0.9613 | 0 |
++| 0.5 | 209 | 0.4988 | 0.5240 | +0.0252 | 0.0372 | Y | ALV(10379) | Y | 0.4237 | 1.0689 | 0 |
++| 0.5 | 210 | 0.4933 | 0.5150 | +0.0217 | 0.0370 | Y | ALV(9886) | Y | 0.3653 | 0.9852 | 0 |
++| 0.5 | 211 | 0.4835 | 0.5016 | +0.0181 | 0.0231 | Y | ALV(9787) | Y | 0.3788 | 1.0169 | 0 |
++| 0.5 | 212 | 0.4951 | 0.4966 | +0.0015 | 0.0120 | Y | ALV(10159) | Y | 0.3863 | 0.9643 | 0 |
++| 0.5 | 213 | 0.4923 | 0.4954 | +0.0032 | 0.0101 | Y | ALV(9888) | Y | 0.3853 | 1.0135 | 0 |
++| 0.5 | 214 | 0.4978 | 0.5052 | +0.0074 | 0.0208 | Y | ALV(9513) | Y | 0.3691 | 0.9737 | 0 |
++
++## 三、K2 主判据逐档配对差（vs 同树锚臂）
++
++| seed | Δ@0.05 | Δ@0.2 | Δ@0.5 |
++|---|---|---|---|
++| 207 | −0.0018 | −0.0049 | **+0.0099** |
++| 208 | **+0.0097** | **+0.0111** | **+0.0056** |
++| 209 | **+0.0022** | **+0.0043** | **+0.0058** |
++| 210 | **−0.0349**⚠越带 | **−0.0230**⚠越带 | −0.0053 |
++| 211 | −0.0019 | +0.0000 | **+0.0040** |
++| 212 | −0.0034 | **+0.0051** | −0.0035 |
++| 213 | −0.0064 | −0.0064 | −0.0068 |
++| 214 | **+0.0101** | −0.0068 | **+0.0044** |
++| **同向计数** | **3/8** | **4/8** | **5/8** |
++| **档 Δ 均值** | −0.0033 | −0.0026 | +0.0018 |
++
++- 判据（锁定 §三）：同向 ratio≥0.8（8 seed 需 ≥7/8）⇒ **三档全不成立** `[实测]`。
++- 功效条款（锁定 §五）：散布带 [−0.019, +0.027]（§三附）⇒ **22/24 带内 ⇒ 不可与 seed 间散布区分**；唯二越带值（均在 s210）为**负向**——s210 锚臂 M−F=+0.0269 是带内最高基线，0.05/0.2 档同 seed 走弱所致的**反向离群**，非正向效应 `[实测]`+`[推断:归因未验]`。
++- 旁证 Δpeak_gain（只报不判）：0.5 档正向 4/8（+0.0027/+0.0052 最显）；锚臂散布带内同判。
++- **档均值 −0.0033 → −0.0026 → +0.0018 随 rep_w 升单调转正** `[实测]`：形状上是一份**弱正向、幅度远小于散布**的受试信号 `[推断]`——**照锁定文本不判正**（判「方向」尚且 5/8<7/8，本批无幅度判据），仅供候裁参考。
++
++## 四、其余判据与观察列
++
++- **K1 形态辅判**：锚 7/8｜0.05 6/8｜0.2 5/8｜0.5 7/8——与设计自证（基线回测 7/8 命中、无鉴别力）同型 ⇒ 只描述，不判正（锁定文本）。
++- **发射率旁证（坑①合并列）**：emit_ratio（末窗/首窗）四臂均落 0.946–1.077，均值 ≈1.00，无档间分离；`zero_pat=0` 全 32 run ⇒ A2 含 0 码对本批发射路径仍无实质影响（与 E-056 J2 同型，GAP-A 口径下只作旁证）。
++- **g5_dir（观察列）**：各档 0.34–0.42，档间无可辨移（0.5 档 s209 0.4237 为带内高点）`[实测]`。
++- **g4_mem_bit_frac（坑③观察列，只出数不判定）** `[实测]`：四臂档均值（逐 run 全窗均值→档内均值）锚 0.6216｜0.05 0.6196｜0.2 0.6213｜0.5 0.6167，run 级带 0.596–0.650，**档间无分离**；轨迹与 E-056/青梧断言同型（首窗 ≈0.15 → 末窗 ≈0.75 强选择爬升，锚臂 s207 0.1557→0.7487）⇒ 青梧「g15 可能非最佳指标」线索在本批复现，且 rep_w **未扰动该通道**（归因 `[待核]`）。
++- **NaN**：主判据列 NaN=0；fail-loud 未触发。
++- **J4/L1**：不可测披露照 §三 原文（L1-JOINTCOL 未合 ⇒ 无列）。
++
++## 五、出口与呈裁（锁定判负出口点亮）
++
++**全三档 K2 不成立 ⇒ 上板候 PI 裁。本批不写「C3 证伪」**（功效条款：2k 窗弱选择不可测=E-039 教训条；青梧「延窗 5k–10k」被鱼直令 2000t 覆盖，随档披露候裁）`[文档]`。呈裁候选项（**不预设、不代裁**）：
++
++1. 判据零改动下复跑=无意义（同 seed 同装置确定性已证，锚臂逐位复现即铁证）；**任何后续批=新预注册**（R225 双签），候选变量只在此框架内谈：延窗（功效）/ 扩档上限（当前 0.05–0.5 幅度全落散布带）/ 换被检指标（坑③ g4 线索，青梧已埋）。
++2. 锚臂跨树逐位复现（§一-2）是**装置确定性**的正面资产：配对设计的噪声地板已知（≈带 [−0.019,+0.027]），后续批的功效可直接引用本数。
++3. R384 上报：本批 done=判读稿+台账行+板帖+群简报，见 §六。
++
++## 六、产物与复算交接
++
++| 项 | 位置 |
++|---|---|
++| 数据 | `the-world-data/e057_repw/`（32csv+32summary+manifest）+ `e057_logs/`（32log+status+PING_YAN）**@`9dbb39c`（已 push）** |
++| 读数器 | `tools/e057_readout.py`@`6256b51`（task/REPW-PREREG）：`py tools/e057_readout.py --data <dir>/e057_repw` |
++| 判据 | @`7605da1`+会签 @`2306949`（锁定） |
++| 载体 | 脚本 @`5d2cb8f`（task/BATCH-SCRIPT），base @`7faca82` |
++| 复算交接（镜） | 同款读数器或独立 stdlib 复算；请含**全 20 窗敏感性**（预注册 §四-4）+ §三 Δ 表逐值复验 + 锚臂逐位复现核验（§一-2）；出入请报口径差 |
++
++> 诚实声明：本稿全部读数由锁定读数器一次性产出（无手算改数）；档均值/单调形状为 `[实测]` 算术汇总，其「弱正向受试信号」解释为 `[推断]` 且**不作判定**；未动 main 代码面（批窗冻结 `978dde0` 收口后仍照守——本稿只增 docs 与本分支）。—— 砚（实验员·科学主管），2026-10-07 00:2x
+-- 
+2.46.1.windows.1
+

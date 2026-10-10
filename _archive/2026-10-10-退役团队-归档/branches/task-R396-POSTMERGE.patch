@@ -1,0 +1,1099 @@
+From da279219c2782008cda534f74b5f3d2ecb43da3e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanhou@the-world.local>
+Date: Mon, 5 Oct 2026 20:00:47 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?feat:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20R396=E2=91=A1=20tools/post?=
+ =?UTF-8?q?merge=5Fcheck.py=20=E9=AA=A8=E6=9E=B6=20v0=EF=BC=88=E5=90=88=20?=
+ =?UTF-8?q?main=20=E5=90=8E=E4=B8=89=E6=9F=A5=EF=BC=8C=E9=9B=B6=E6=9C=BA?=
+ =?UTF-8?q?=E6=97=B6=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+青梧提议获 PI 裁采纳（R396②）：验证走「自动化脚本 + postmerge 检查」，不加人工审核角色。
+三查全部**只读已有产物** ⇒ 不跑批（R117）、不消费 RNG、不改任何状态：
+
+- C7 仪器中立性对拍：两份同配置 CSV 剥离计时列（ms_per_tick/wall_s）后逐位比；
+- 装置档回显对比：批声明 --device X ⇒ 落盘装置字段必须等于 DEVICE_PRESETS[X]
+  （纪元级覆盖如密度批 patches=213 会被判红 ⇒ 工具**不代裁**，覆盖须 PI 批后显式放宽）；
+- 数据完整性：CSV↔summary 成对 / 行列数齐 / 无重复列名 / tick 单调 /
+  整列全空或全 NaN ⇒ 红（静默零列族），可用 --allow-empty-col 显式豁免本应 n/a 的列。
+
+fail-loud 默认：strict（SKIP 亦计红）+ 「什么都没查 ⇒ 退出码 2」，**绝不"没查也绿"**。
+退出码 0=全过 / 1=有红（或 strict 下有 SKIP）/ 2=用法或环境错 ⇒ CI（.gitee-ci.yml）
+与值班巡检每班一行调用即可。
+
+测试：tests/test_postmerge_check.py 6 例（P1–P5）+ 内置 --selftest；变异注入实跑必红
+（去掉计时列豁免 ⇒ P1/P5 红），还原后 6/6 绿。
+
+本机真数据首跑两条当场读数（值得值班注意）：
+- 今晚 m1_smoke 8 个 CSV：成对/tick/列数全过，唯一红 = g4_mem_bit_frac 整列 NaN
+  （G4 需 signal_alphabet="8"，D0=1700 装置本应 n/a ⇒ 豁免后 PASS=23 FAIL=0）；
+- p1c_density 报 patches 声明 213/425 ≠ 预设 1700（既裁的纪元级覆盖，属"须显式放宽"类）。
+
+骨架 v0 边界已写在文件头（C7 要人给基线路径 / 回显不核运行期真值 / 完整性只做通用四查）。
+CI 接线（.gitee-ci.yml 调本工具 + 豁免清单入库）归板桥，本卡不代改流水线。
+---
+ tests/test_postmerge_check.py |  69 +++++++++
+ tools/postmerge_check.py      | 271 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 340 insertions(+)
+ create mode 100644 tests/test_postmerge_check.py
+ create mode 100644 tools/postmerge_check.py
+
+diff --git a/tests/test_postmerge_check.py b/tests/test_postmerge_check.py
+new file mode 100644
+index 00000000..fbaa38c4
+--- /dev/null
++++ b/tests/test_postmerge_check.py
+@@ -0,0 +1,69 @@
++"""R396② `tools/postmerge_check.py` 靶向测试（骨架 v0）。
++
++钉三性质（改坏工具 ⇒ 必红）：
++  P1 计时列（`ms_per_tick`/`wall_s`）差异**不得**判红 ⇒ 否则巡检天天假红、门禁失去意义；
++  P2 整列全空/全 NaN **必**判红（静默零列族），且 `--allow-empty-col` 可显式豁免；
++  P3 tick 倒退/行列数不齐/缺 summary 成对 ⇒ 红；
++  P4 装置档回显：声明字段 ≠ 预设档 ⇒ 红（纪元级覆盖须显式批准，工具不代裁）；
++  P5 `main()` 退出码：全过=0 / 有红=1 / 什么都不给=2（不许"没查也绿"）。
++"""
++from __future__ import annotations
++
++import io
++import os
++
++import tools.postmerge_check as PC
++
++
++def _w(tmpdir, name, text):
++    p = os.path.join(str(tmpdir), name)
++    io.open(p, "w", encoding="utf-8", newline="").write(text)
++    return p
++
++
++def test_p1_timing_column_difference_is_not_a_failure(tmp_path):
++    a = _w(tmp_path, "a.csv", "seed,tick,pop,ms_per_tick\n7,10,21,1.11\n7,20,15,2.22\n")
++    b = _w(tmp_path, "b.csv", "seed,tick,pop,ms_per_tick\n7,10,21,9.99\n7,20,15,8.88\n")
++    assert PC.check_c7_pair(a, b)["status"] == "PASS"
++
++
++def test_p1b_real_state_difference_must_fail(tmp_path):
++    a = _w(tmp_path, "a.csv", "seed,tick,pop,ms_per_tick\n7,10,21,1.11\n")
++    b = _w(tmp_path, "b.csv", "seed,tick,pop,ms_per_tick\n7,10,22,1.11\n")
++    assert PC.check_c7_pair(a, b)["status"] == "FAIL"
++
++
++def test_p2_all_empty_column_fails_and_exemption_works(tmp_path):
++    p = _w(tmp_path, "x.csv",
++           "seed,tick,pop,g4_mem_bit_frac\n7,10,21,nan\n7,20,15,nan\n")
++    assert PC.check_integrity(p)["status"] == "FAIL"
++    ok = PC.check_integrity(p, frozenset({"g4_mem_bit_frac"}))
++    assert ok["status"] == "PASS", ok["msg"]
++
++
++def test_p3_tick_regression_and_ragged_rows_fail(tmp_path):
++    bad = _w(tmp_path, "bad.csv", "seed,tick,pop\n7,10,21\n7,9,15\n")
++    assert PC.check_integrity(bad)["status"] == "FAIL"
++    rag = _w(tmp_path, "rag.csv", "seed,tick,pop\n7,10,21,9\n7,20,15\n")
++    assert PC.check_integrity(rag)["status"] == "FAIL"
++    assert PC.check_pairing(bad)["status"] == "FAIL"          # 缺 .summary.json
++    _w(tmp_path, "bad.summary.json", '{"argv": []}')
++    assert PC.check_pairing(bad)["status"] == "PASS"
++
++
++def test_p4_device_declared_field_must_match_preset(tmp_path, monkeypatch):
++    s = _w(tmp_path, "run.summary.json",
++           '{"argv": ["--device", "s2", "--patches", "213", "--rows", "480"]}')
++    r = PC.check_device_echo(s)
++    assert r["status"] == "FAIL" and "patches" in r["msg"]     # 密度批式覆盖 ⇒ 须显式批准
++    s2 = _w(tmp_path, "ok.summary.json",
++            '{"argv": ["--device", "s2", "--rows", "480", "--cols", "960"]}')
++    assert PC.check_device_echo(s2)["status"] == "PASS"
++    s3 = _w(tmp_path, "mini.summary.json", '{"argv": ["--rows", "8"]}')
++    assert PC.check_device_echo(s3)["status"] == "SKIP"        # 微型批不传 device ⇒ 披露不判红
++
++
++def test_p5_exit_code_never_green_without_check(capsys):
++    assert PC.main(["--data-dir", "不存在的路径"]) == 2          # 环境错 ⇒ 2（不是"没查也绿"）
++    assert PC.main([]) == 2                                      # 三查一样没给 ⇒ 2
++    assert PC.main(["--selftest"]) == 0
+diff --git a/tools/postmerge_check.py b/tools/postmerge_check.py
+new file mode 100644
+index 00000000..9bf13efd
+--- /dev/null
++++ b/tools/postmerge_check.py
+@@ -0,0 +1,271 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++"""postmerge_check.py —— 合 main 之后的"三查"自动门禁（R396②，青梧提议获 PI 裁采纳）
++
++一句话：**把"合并后到底有没有把事情跑歪"从人眼值班变成脚本值班。**
++
++三查（全部零机时：只读已有产物，不跑批、不消费 RNG）：
++
++| # | 查什么 | 对应家规 | 判据 |
++|---|---|---|---|
++| **C7** | **仪器中立性采样对拍**：两份同配置 CSV 除计时列外须逐位一致 | AGENT.md §12.2 C7 | 不一致 ⇒ 观测件扰动了被测系统 = 行为变更（须按新配置重新登记） |
++| **回显** | **装置档回显对比**：批里 `--device X` 声明的装置字段，实际落盘值必须等于预设档 | R5.6 / R278 §三 / C4 | 任一字段被静默回落 = "跑出另一个装置的数据却毫无提示" |
++| **完整性** | **数据完整性**：CSV↔summary 成对、列数齐、`tick` 单调、末行 tick==ticks、整列全 NaN/空 ⇒ 报警 | 交付=提交 §3.1.3 / 静默零列族 | 缺件/断行/整列空 ⇒ 判读入口不可信 |
++
++用法
++----
++    # 巡检每班（合 main 后）——默认 strict：SKIP 也算不过
++    python tools/postmerge_check.py --data-dir the-world-data --limit 40
++    # C7 对拍（改了观测件之后，拿改前/改后两份同配置产物比）
++    python tools/postmerge_check.py --c7-baseline old.csv --c7-current new.csv
++    # 自检（无需任何数据，钉"计时列被排除""整列全空必红"两性质）
++    python tools/postmerge_check.py --selftest
++    # 宽松模式（SKIP 不计红，仅披露）——只用于考古旧批，不用于新合并
++    python tools/postmerge_check.py --data-dir the-world-data --lenient
++
++退出码：0 = 全过 ｜ 1 = 有 FAIL（或 strict 下有 SKIP）｜ 2 = 用法/环境错
++
++⚠️ 骨架 v0 的边界（诚实登记，别当成已完备）：
++  · C7 需要**人给两份产物路径**（跑对拍批属机时，须 fish 起跑令 R117 ⇒ 本工具不自跑）；
++  · 回显只核"命令行声明值 vs 预设档"，**不核**引擎运行期真值（那属 C4 读回，归
++    `experiments/preflight_check.py`）；
++  · 完整性不认识各 probe 私有 summary 结构，只做通用四查 + 成对检查。
++"""
++from __future__ import annotations
++
++import argparse
++import csv
++import io
++import json
++import os
++import sys
++
++# 从 `tools/` 直接跑时仓库根不在 sys.path ⇒ 挂上（否则 `import tools.*` 当场炸）
++_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if _ROOT not in sys.path:
++    sys.path.insert(0, _ROOT)
++
++try:
++    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
++    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
++except Exception:
++    pass
++
++# 计时列每次运行必然不同（wall-clock 读数）⇒ 逐位对拍必须排除，否则天天假红
++TIME_COLS = {"ms_per_tick", "wall_s"}
++# 装置字段（真源 tools/device_presets.py:DEVICE_PRESETS；R278 §三：只加不改）
++DEVICE_FIELDS = ("rows", "cols", "patches", "pop", "rgm",
++                 "bg_low_prod_frac", "bg_low_cap_mult")
++
++
++def _result(name: str, ok: bool, msg: str, skipped: bool = False) -> dict:
++    return {"check": name, "status": "SKIP" if skipped else ("PASS" if ok else "FAIL"),
++            "msg": msg}
++
++
++def read_table(path: str):
++    """CSV -> (header, rows)。行按位置存，避免列名重复时 DictReader 覆盖。"""
++    with open(path, "r", newline="", encoding="utf-8", errors="replace") as f:
++        rd = list(csv.reader(f))
++    if not rd:
++        raise ValueError(f"空 CSV：{path}")
++    return rd[0], [r for r in rd[1:] if r]
++
++
++def check_c7_pair(baseline: str, current: str) -> dict:
++    """C7：剥掉计时列后逐位比（列名集合须一致 ⇒ 加列要在交付说明里写明并各自剥离）。"""
++    if not baseline or not current:
++        return _result("c7-pair", False, "未给 --c7-baseline/--c7-current", skipped=True)
++    for p in (baseline, current):
++        if not os.path.isfile(p):
++            return _result("c7-pair", False, f"文件不存在：{p}")
++    h0, r0 = read_table(baseline)
++    h1, r1 = read_table(current)
++    keep0 = [i for i, c in enumerate(h0) if c not in TIME_COLS]
++    keep1 = [i for i, c in enumerate(h1) if c not in TIME_COLS]
++    n0, n1 = [h0[i] for i in keep0], [h1[i] for i in keep1]
++    if n0 != n1:
++        only0, only1 = set(n0) - set(n1), set(n1) - set(n0)
++        return _result("c7-pair", False,
++                       f"列名不一致（剔计时列后）：仅基线有 {sorted(only0)[:4]} "
++                       f"仅新表有 {sorted(only1)[:4]}")
++    a = [",".join(r[i] for i in keep0) for r in r0]
++    b = [",".join(r[i] for i in keep1) for r in r1]
++    if a != b:
++        i = next(k for k, (x, y) in enumerate(zip(a, b)) if x != y)
++        return _result("c7-pair", False, f"第 {i + 2} 行起逐位不一致 ⇒ 观测件扰动了被测系统")
++    return _result("c7-pair", True, f"逐位一致（{len(a)} 行 × {len(n0)} 列，已剔 {sorted(TIME_COLS)}）")
++
++
++def _argv_map(meta: dict) -> dict:
++    """summary 的 `argv`（p1c 族）或 `meta`（s3 族）-> 扁平 flag 字典。"""
++    out = {}
++    argv = meta.get("argv")
++    if isinstance(argv, list):
++        i = 0
++        while i < len(argv):
++            tok = str(argv[i])
++            if tok.startswith("--"):
++                key = tok[2:].replace("-", "_")
++                if i + 1 < len(argv) and not str(argv[i + 1]).startswith("--"):
++                    out[key] = str(argv[i + 1])
++                    i += 2
++                else:
++                    out[key] = "true"
++                    i += 1
++                continue
++            i += 1
++    for k, v in (meta.get("meta") or {}).items():
++        out.setdefault(str(k), str(v))
++    return out
++
++
++def check_device_echo(summary_path: str) -> dict:
++    """回显：批声明了 `--device X` ⇒ 落盘的装置字段必须等于预设档（不介入=旧行为，跳过）。"""
++    try:
++        from tools.device_presets import DEVICE_PRESETS
++    except Exception as e:
++        return _result("device-echo", False,
++                       f"读不到装置预设档（{type(e).__name__}: {e}）⇒ 无法回显对比")
++    j = json.load(io.open(summary_path, encoding="utf-8", errors="replace"))
++    flags = _argv_map(j if isinstance(j, dict) else {})
++    dev = flags.get("device")
++    if not dev:
++        return _result("device-echo", False, "无 --device（微型/考古批允许）", skipped=True)
++    preset = DEVICE_PRESETS.get(dev)
++    if preset is None:
++        return _result("device-echo", False, f"--device {dev!r} 不在预设档：{sorted(DEVICE_PRESETS)}")
++    bad = []
++    for field, want in preset.items():
++        got = flags.get(field)
++        if got is None:
++            continue                      # 没显式传 = 由预设档摁住 ⇒ 引擎侧另查（见文件头边界）
++        if str(got) != str(want):
++            bad.append(f"{field}: 声明 {got} ≠ 预设 {want}")
++    if bad:
++        return _result("device-echo", False, "; ".join(bad))
++    return _result("device-echo", True, f"--device {dev} 声明字段与预设档一致")
++
++
++def check_integrity(csv_path: str, allow_empty: frozenset = frozenset()) -> dict:
++    """完整性四查：列数齐 / 无重复列名 / tick 单调 / 整列全空（= 静默零列族）。"""
++    hdr, rows = read_table(csv_path)
++    if len(set(hdr)) != len(hdr):
++        dup = sorted({c for c in hdr if hdr.count(c) > 1})
++        return _result("integrity", False, f"重复列名 {dup[:5]}")
++    bad_w = [i for i, r in enumerate(rows) if len(r) != len(hdr)]
++    if bad_w:
++        return _result("integrity", False, f"{len(bad_w)} 行列数≠表头（首个 第{bad_w[0] + 2} 行）")
++    if not rows:
++        return _result("integrity", False, "有表头无数据行")
++    idx = {c: i for i, c in enumerate(hdr)}
++    if "tick" in idx:
++        ticks = [int(float(r[idx["tick"]])) for r in rows]
++        if any(b < a for a, b in zip(ticks, ticks[1:])):
++            return _result("integrity", False, "tick 非单调（行序坏了或被截断）")
++    all_empty = [c for c in hdr
++                 if c not in TIME_COLS and c not in allow_empty and idx[c] < len(rows[0])
++                 and all((not str(r[idx[c]]).strip()) or str(r[idx[c]]).strip().lower() in ("nan", "")
++                         for r in rows)]
++    if all_empty:
++        return _result("integrity", False,
++                       f"整列空/全 NaN（疑静默零列）：{all_empty[:6]}"
++                       f"{'…' if len(all_empty) > 6 else ''}"
++                       f"｜若该列按装置口径本应 n/a（例：G4 需 signal_alphabet='8'），"
++                       f"用 --allow-empty-col 显式豁免并在批记录写明理由")
++    return _result("integrity", True, f"{len(rows)} 行 × {len(hdr)} 列")
++
++
++def check_pairing(csv_path: str) -> dict:
++    side = os.path.splitext(csv_path)[0] + ".summary.json"
++    if not os.path.isfile(side):
++        return _result("pairing", False, f"缺 summary：{os.path.basename(side)}")
++    return _result("pairing", True, "CSV↔summary 成对")
++
++
++def sweep_data_dir(root: str, limit: int, results: list, allow_empty=frozenset()) -> None:
++    seen = 0
++    for dirpath, _dirs, files in os.walk(root):
++        for fn in sorted(files):
++            if seen >= limit:
++                return
++            p = os.path.join(dirpath, fn)
++            if fn.endswith(".csv"):
++                results.append(check_pairing(p))
++                try:
++                    results.append(check_integrity(p, allow_empty))
++                except Exception as e:
++                    results.append(_result("integrity", False, f"{p}: {type(e).__name__}: {e}"))
++                seen += 1
++            elif fn.endswith(".summary.json"):
++                try:
++                    results.append(check_device_echo(p))
++                except Exception as e:
++                    results.append(_result("device-echo", False, f"{p}: {type(e).__name__}: {e}"))
++
++
++def selftest() -> int:
++    """钉两性质：① 计时列差异不得判红；② 整列全空必红。改坏本工具 ⇒ 这里必炸。"""
++    import tempfile
++    d = tempfile.mkdtemp(prefix="postmerge_selftest_")
++    a = os.path.join(d, "a.csv")
++    b = os.path.join(d, "b.csv")
++    io.open(a, "w", encoding="utf-8", newline="").write(
++        "seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,1.63,0.56\n7,20,15,1.71,0.58\n")
++    io.open(b, "w", encoding="utf-8", newline="").write(
++        "seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,9.99,0.56\n7,20,15,8.88,0.58\n")
++    r1 = check_c7_pair(a, b)
++    io.open(b, "w", encoding="utf-8", newline="").write(
++        "seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,1.63,\n7,20,15,1.71,nan\n")
++    r2 = check_integrity(b)
++    io.open(b, "w", encoding="utf-8", newline="").write(
++        "seed,tick,pop,ms_per_tick\n7,10,21,1.63\n7,9,15,1.71\n")
++    r3 = check_integrity(b)
++    ok = (r1["status"] == "PASS" and r2["status"] == "FAIL" and r3["status"] == "FAIL")
++    print(f"[selftest] 计时列豁免={r1['status']} 整列全空={r2['status']} "
++          f"tick 倒退={r3['status']} ⇒ {'PASS' if ok else 'FAIL'}")
++    for r in (r1, r2, r3):
++        print("   ", r["check"], r["status"], r["msg"])
++    return 0 if ok else 1
++
++
++def main(argv=None) -> int:
++    ap = argparse.ArgumentParser(description="合 main 后三查（C7 对拍/装置档回显/数据完整性）")
++    ap.add_argument("--data-dir", help="要扫的产物目录（如 the-world-data）")
++    ap.add_argument("--limit", type=int, default=40, help="最多扫多少个 CSV（默认 40）")
++    ap.add_argument("--c7-baseline", help="对拍基线 CSV")
++    ap.add_argument("--c7-current", help="对拍当前 CSV")
++    ap.add_argument("--lenient", action="store_true",
++                    help="SKIP 不计红（只用于考古旧批；新合并不建议）")
++    ap.add_argument("--selftest", action="store_true", help="跑内置自检（不需要任何数据）")
++    ap.add_argument("--allow-empty-col", action="append", default=[], metavar="COL",
++                    help="豁免某个「按装置口径本应 n/a」的列（可重复；须在批记录写理由）")
++    a = ap.parse_args(argv)
++    if a.selftest:
++        return selftest()
++    results = []
++    if a.c7_baseline or a.c7_current:
++        results.append(check_c7_pair(a.c7_baseline or "", a.c7_current or ""))
++    if a.data_dir:
++        if not os.path.isdir(a.data_dir):
++            print(f"🔴 --data-dir 不存在：{a.data_dir}", file=sys.stderr)
++            return 2
++        sweep_data_dir(a.data_dir, a.limit, results, frozenset(a.allow_empty_col))
++    if not results:
++        print("🔴 什么都没查（给 --data-dir 或 --c7-baseline/--c7-current，或 --selftest）",
++              file=sys.stderr)
++        return 2
++    counts = {"PASS": 0, "FAIL": 0, "SKIP": 0}
++    for r in results:
++        counts[r["status"]] += 1
++        if r["status"] != "PASS":
++            print(f"[{r['status']}] {r['check']} —— {r['msg']}")
++    verdict = ("FAIL" if counts["FAIL"] else
++               ("SKIP-red" if (not a.lenient and counts["SKIP"]) else "PASS"))
++    print(f"# postmerge_check: PASS={counts['PASS']} FAIL={counts['FAIL']} "
++          f"SKIP={counts['SKIP']} lenient={a.lenient} ⇒ {verdict}")
++    return 0 if verdict == "PASS" else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.46.1.windows.1
+
+
+From 069f540920431550c33eb1bea69d43849a1e9ba9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Tue, 6 Oct 2026 00:01:37 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?fix:=20[=E5=BC=80=E5=8F=91=C2=B7=E4=BA=8C?=
+ =?UTF-8?q?=E7=BA=BF=C2=B7=E6=BE=9C=E8=88=9F]=20R396=E2=91=A1=20postmerge?=
+ =?UTF-8?q?=20=E4=B8=89=E5=AE=9E=E8=A3=85=E5=89=8D=E7=BD=AE=20P-A/P-B/P-C(?=
+ =?UTF-8?q?=E7=94=B2)+=E9=A1=BA=E5=B8=A6=20P-D=E2=80=A6P-I?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+按 镜·队列③ 审结（板 4971733 / 审头 1f57b40）修 task/R396-POSTMERGE：
+- P-A C7 行数不等崩穿（StopIteration+无汇总行）⇒ 先比 len 判 FAIL，整腿 try/except 兜底
+- P-B 零字段可比仍报 PASS ⇒ n_cmp==0 归 SKIP「无可比字段」（缺件即红；strict 下自然计红）
+- P-C 回显腿判别面恒 0 ⇒ 走甲案：真读落盘值（summary.readback 引擎真值 > meta 生效值）
+  与 argv 交叉比，检出 R275/批A 那类「传了 device 却静默回落成另一档」
+- P-D --allow-device-override FIELD=VALUE 豁免通道（设计内覆盖，msg 内披露）
+- P-E --only/--since 收窄巡检范围 + 末行「实查 N / 语料 M（limit 截断）」
+- P-F 单边 --c7-* ⇒ rc=2（置于 lenient 判定之前，不许"没查也绿"）
+- P-G 末行 tick<目标 ticks ⇒ FAIL 疑截断（读同目录 summary，目标未知不判，免历史误红）
+- P-H tick 脏值/空值归红不抛 ValueError；删死条件
+- P-I 写文件统一 with
+
+新工具四律实证：18 例靶向全绿（v0 的 6 例保留）；三处变异注入必红
+（摘 len 比较→test_pa / 摘 n_cmp→test_pb / 摘落盘腿→test_pc）；selftest rc=0；
+真语料 1068 件零新增红（v0-only 8 项、v1-only 0 项）；全量 41 红 = 既有基线
+（postmerge 不在 r98 违规名单，非 main 件）。不合 main，候 PI 复审。
+---
+ tests/test_postmerge_check.py | 147 ++++++++++++++-
+ tools/postmerge_check.py      | 346 ++++++++++++++++++++++++++++------
+ 2 files changed, 432 insertions(+), 61 deletions(-)
+
+diff --git a/tests/test_postmerge_check.py b/tests/test_postmerge_check.py
+index fbaa38c4..afd8008e 100644
+--- a/tests/test_postmerge_check.py
++++ b/tests/test_postmerge_check.py
+@@ -1,15 +1,26 @@
+-"""R396② `tools/postmerge_check.py` 靶向测试（骨架 v0）。
++"""R396② `tools/postmerge_check.py` 靶向测试（v1，镜队列③ 审结后补强）。
+ 
+-钉三性质（改坏工具 ⇒ 必红）：
++钉性质（改坏工具 ⇒ 必红）：
+   P1 计时列（`ms_per_tick`/`wall_s`）差异**不得**判红 ⇒ 否则巡检天天假红、门禁失去意义；
+   P2 整列全空/全 NaN **必**判红（静默零列族），且 `--allow-empty-col` 可显式豁免；
+   P3 tick 倒退/行列数不齐/缺 summary 成对 ⇒ 红；
+   P4 装置档回显：声明字段 ≠ 预设档 ⇒ 红（纪元级覆盖须显式批准，工具不代裁）；
+-  P5 `main()` 退出码：全过=0 / 有红=1 / 什么都不给=2（不许"没查也绿"）。
++  P5 `main()` 退出码：全过=0 / 有红=1 / 什么都不给=2（不许"没查也绿"）；
++  P-A C7 行数不等 ⇒ FAIL（不崩穿、不 traceback）；
++  P-B 无可比字段 ⇒ SKIP（strict 下计红；不静默 PASS）；
++  P-C 落盘腿：`readback`/`meta` 与预设档分叉 ⇒ FAIL（甲案）；
++  P-D `--allow-device-override FIELD=VALUE` ⇒ 降级为披露性豁免；
++  P-E 末行披露「实查 N / 语料 M」；
++  P-F 单边 C7 ⇒ rc=2（置于 lenient 之前）；
++  P-G 末行 tick < 目标 ticks ⇒ FAIL「疑截断」；
++  P-H tick 列脏值 ⇒ FAIL（不抛 ValueError）；
++  M6 摘成对检查 ⇒ 必须被 main() 输出体现（变异守）；
++  M7 预设档读不到 ⇒ device-echo 腿 FAIL（变异守）；
++  M8 strict 下 SKIP 计红（变异守）。
+ """
+ from __future__ import annotations
+ 
+-import io
++import json
+ import os
+ 
+ import tools.postmerge_check as PC
+@@ -17,7 +28,8 @@ import tools.postmerge_check as PC
+ 
+ def _w(tmpdir, name, text):
+     p = os.path.join(str(tmpdir), name)
+-    io.open(p, "w", encoding="utf-8", newline="").write(text)
++    with open(p, "w", encoding="utf-8", newline="") as f:
++        f.write(text)
+     return p
+ 
+ 
+@@ -67,3 +79,128 @@ def test_p5_exit_code_never_green_without_check(capsys):
+     assert PC.main(["--data-dir", "不存在的路径"]) == 2          # 环境错 ⇒ 2（不是"没查也绿"）
+     assert PC.main([]) == 2                                      # 三查一样没给 ⇒ 2
+     assert PC.main(["--selftest"]) == 0
++
++
++# ---- v1 新增（镜队列③ 审结 P-A…P-H + 变异守 M6/M7/M8）----
++
++def test_pa_c7_row_count_mismatch_is_fail_not_crash(tmp_path):
++    """P-A：行数不等 ⇒ FAIL（不崩穿、不 traceback）；rc=1 与有 FAIL 同号但必须有 [FAIL] 行。"""
++    a = _w(tmp_path, "a.csv", "seed,tick,pop\n7,10,21\n7,20,15\n7,30,12\n")
++    b = _w(tmp_path, "b.csv", "seed,tick,pop\n7,10,21\n7,20,15\n")
++    r = PC.check_c7_pair(a, b)
++    assert r["status"] == "FAIL"
++    assert "行数不等" in r["msg"] and "3 vs 2" in r["msg"]
++
++
++def test_pb_zero_comparable_fields_is_skip_not_pass(tmp_path):
++    """P-B：声明了 --device 但 argv/落盘均无装置字段可比 ⇒ SKIP（strict 下计红）。"""
++    s = _w(tmp_path, "bare.summary.json", '{"argv": ["--device", "s2"]}')
++    r = PC.check_device_echo(s)
++    assert r["status"] == "SKIP"
++    assert "无可比字段" in r["msg"]
++
++
++def test_pc_landed_leg_detects_silent_fallback(tmp_path):
++    """P-C 甲案：argv 声明与预设一致，但落盘值（readback）分叉 ⇒ FAIL。
++    这是 R275/批 A 那类"静默回落"的形态；v0 检不出，v1 必须检出。"""
++    s = _w(tmp_path, "fork.summary.json", json.dumps({
++        "argv": ["--device", "s2", "--rows", "480", "--cols", "960"],
++        "readback": {"rows": 60, "cols": 120, "patches": 1700, "initial_pop": 10000},
++    }))
++    r = PC.check_device_echo(s)
++    assert r["status"] == "FAIL"
++    assert "rows" in r["msg"] and "cols" in r["msg"] and "落盘" in r["msg"]
++
++
++def test_pd_allow_device_override_downgrades_to_disclosure(tmp_path):
++    """P-D：`--allow-device-override patches=213` ⇒ 匹配的分叉降级为披露性豁免，不 FAIL。"""
++    s = _w(tmp_path, "density.summary.json", json.dumps({
++        "argv": ["--device", "s2", "--patches", "213", "--rows", "480", "--cols", "960"],
++        "readback": {"rows": 480, "cols": 960, "patches": 213, "initial_pop": 10000},
++    }))
++    r_no = PC.check_device_echo(s)
++    assert r_no["status"] == "FAIL" and "patches" in r_no["msg"]
++    r_yes = PC.check_device_echo(s, frozenset({("patches", "213")}))
++    assert r_yes["status"] == "PASS"
++    assert "豁免" in r_yes["msg"] and "patches" in r_yes["msg"]
++
++
++def test_pe_discloses_scanned_vs_total(tmp_path, capsys):
++    """P-E：末行必须披露「实查 N / 语料 M」。"""
++    d = tmp_path / "data"
++    d.mkdir()
++    _w(d, "a.csv", "seed,tick,pop\n7,10,21\n")
++    _w(d, "a.summary.json", '{"argv": []}')
++    _w(d, "b.csv", "seed,tick,pop\n8,10,21\n")
++    _w(d, "b.summary.json", '{"argv": []}')
++    PC.main(["--data-dir", str(d), "--limit", "1"])
++    out = capsys.readouterr().out
++    assert "实查" in out and "语料" in out and "limit 截断" in out
++
++
++def test_pf_single_side_c7_is_usage_error():
++    """P-F：单边 C7 = 用法错 ⇒ rc=2（置于 lenient 之前；不许"没查也绿"）。"""
++    assert PC.main(["--c7-baseline", "x.csv"]) == 2
++    assert PC.main(["--c7-baseline", "x.csv", "--lenient"]) == 2
++
++
++def test_pg_truncation_detected_when_last_tick_below_target(tmp_path):
++    """P-G：末行 tick < 目标 ticks ⇒ FAIL「疑截断」。"""
++    csv = _w(tmp_path, "t.csv", "seed,tick,pop\n7,10,21\n7,20,15\n7,30,12\n")
++    summ = _w(tmp_path, "t.summary.json", json.dumps({"ticks": 100}))
++    r = PC.check_integrity(csv, summary_path=summ)
++    assert r["status"] == "FAIL"
++    assert "疑截断" in r["msg"] and "30" in r["msg"] and "100" in r["msg"]
++
++
++def test_pg_truncation_not_flagged_when_target_unknown(tmp_path):
++    """P-G：summary 里没有目标 ticks ⇒ 不判截断（免历史件误红）。"""
++    csv = _w(tmp_path, "t.csv", "seed,tick,pop\n7,10,21\n7,20,15\n")
++    summ = _w(tmp_path, "t.summary.json", '{"argv": []}')
++    r = PC.check_integrity(csv, summary_path=summ)
++    assert r["status"] == "PASS"
++
++
++def test_ph_dirty_tick_column_is_fail_not_exception(tmp_path):
++    """P-H：tick 列含脏值/空值 ⇒ FAIL（不抛 ValueError）。"""
++    csv = _w(tmp_path, "dirty.csv", "seed,tick,pop\n7,10,21\n7,,15\n7,abc,12\n")
++    r = PC.check_integrity(csv)
++    assert r["status"] == "FAIL"
++    assert "脏值" in r["msg"]
++
++
++def test_m6_pairing_failure_surfaced_in_main(tmp_path, capsys):
++    """M6 变异守：摘掉成对检查 ⇒ main() 输出必须体现 pairing FAIL。"""
++    d = tmp_path / "data"
++    d.mkdir()
++    _w(d, "orphan.csv", "seed,tick,pop\n7,10,21\n")
++    rc = PC.main(["--data-dir", str(d)])
++    out = capsys.readouterr().out
++    assert rc == 1
++    assert "pairing" in out and "FAIL" in out
++
++
++def test_m7_preset_unreadable_is_fail(tmp_path):
++    """M7 变异守：预设档读不到 ⇒ device-echo 腿 FAIL（不静默 PASS）。"""
++    import sys
++    saved = sys.modules.pop("tools.device_presets", None)
++    sys.modules["tools.device_presets"] = None
++    try:
++        s = _w(tmp_path, "x.summary.json", '{"argv": ["--device", "s2"]}')
++        r = PC.check_device_echo(s)
++        assert r["status"] == "FAIL"
++        assert "预设档" in r["msg"]
++    finally:
++        if saved is not None:
++            sys.modules["tools.device_presets"] = saved
++        else:
++            sys.modules.pop("tools.device_presets", None)
++
++
++def test_m8_strict_skip_counts_red(tmp_path):
++    """M8 变异守：strict 下 SKIP 计红（rc=1）；lenient 下 rc=0。"""
++    d = tmp_path / "data"
++    d.mkdir()
++    _w(d, "mini.summary.json", '{"argv": ["--rows", "8"]}')
++    assert PC.main(["--data-dir", str(d)]) == 1
++    assert PC.main(["--data-dir", str(d), "--lenient"]) == 0
+diff --git a/tools/postmerge_check.py b/tools/postmerge_check.py
+index 9bf13efd..35fb5df7 100644
+--- a/tools/postmerge_check.py
++++ b/tools/postmerge_check.py
+@@ -8,34 +8,46 @@
+ 
+ | # | 查什么 | 对应家规 | 判据 |
+ |---|---|---|---|
+-| **C7** | **仪器中立性采样对拍**：两份同配置 CSV 除计时列外须逐位一致 | AGENT.md §12.2 C7 | 不一致 ⇒ 观测件扰动了被测系统 = 行为变更（须按新配置重新登记） |
+-| **回显** | **装置档回显对比**：批里 `--device X` 声明的装置字段，实际落盘值必须等于预设档 | R5.6 / R278 §三 / C4 | 任一字段被静默回落 = "跑出另一个装置的数据却毫无提示" |
+-| **完整性** | **数据完整性**：CSV↔summary 成对、列数齐、`tick` 单调、末行 tick==ticks、整列全 NaN/空 ⇒ 报警 | 交付=提交 §3.1.3 / 静默零列族 | 缺件/断行/整列空 ⇒ 判读入口不可信 |
++| **C7** | **仪器中立性采样对拍**：两份同配置 CSV 除计时列外须逐位一致；**行数不等本身即违规** | AGENT.md §12.2 C7 | 不一致或行数不等 ⇒ 观测件扰动了被测系统 = 行为变更（须按新配置重新登记）；本腿任何异常一律收进 FAIL，**不许 traceback** |
++| **回显** | **装置档回显对比（两腿）**：① 声明腿 = 批里 `--device X` 显式带的装置字段须等于预设档；② **落盘腿（P-C 甲案）= 从 `summary.readback`（引擎真值）/`summary.meta`（探针生效值）读回的实落值须等于预设档** | R5.6 / R278 §三 / C4 | 落盘值 ≠ 预设档 = "跑出另一个装置的数据却毫无提示"（R275/批 A 那类静默回落）；**无可比字段 ⇒ 判 SKIP 不算核过**（缺件即红，不静默跳过） |
++| **完整性** | **数据完整性**：CSV↔summary 成对、列数齐、`tick` 单调（脏值归红不抛异常）、**末行 tick==目标 ticks**、整列全 NaN/空 ⇒ 报警 | 交付=提交 §3.1.3 / 静默零列族 | 缺件/断行/整列空/**疑截断（跑完再崩、数据半件）** ⇒ 判读入口不可信 |
+ 
+ 用法
+ ----
+     # 巡检每班（合 main 后）——默认 strict：SKIP 也算不过
+     python tools/postmerge_check.py --data-dir the-world-data --limit 40
++    # 只查新产物目录 / 某日期之后（P-E：避免历史件把门禁顶成常红灯）
++    python tools/postmerge_check.py --data-dir the-world-data --only m1_smoke --since 2026-10-01
+     # C7 对拍（改了观测件之后，拿改前/改后两份同配置产物比）
+     python tools/postmerge_check.py --c7-baseline old.csv --c7-current new.csv
+-    # 自检（无需任何数据，钉"计时列被排除""整列全空必红"两性质）
++    # 密度/覆盖率是设计内用法 ⇒ 显式豁免某个装置字段的某个值（须在 msg/批记录留理由）
++    python tools/postmerge_check.py --data-dir the-world-data --allow-device-override patches=213
++    # 自检（无需任何数据，钉"计时列被排除""整列全空必红""落盘分叉必红"等性质）
+     python tools/postmerge_check.py --selftest
+     # 宽松模式（SKIP 不计红，仅披露）——只用于考古旧批，不用于新合并
+     python tools/postmerge_check.py --data-dir the-world-data --lenient
+ 
+ 退出码：0 = 全过 ｜ 1 = 有 FAIL（或 strict 下有 SKIP）｜ 2 = 用法/环境错
++        （`--c7-baseline` 与 `--c7-current` 只给一边 = 用法错 ⇒ 2，**不是 lenient 下的绿**）
+ 
+-⚠️ 骨架 v0 的边界（诚实登记，别当成已完备）：
++⚠️ 边界（v1 如实登记，别当成已完备）：
+   · C7 需要**人给两份产物路径**（跑对拍批属机时，须 fish 起跑令 R117 ⇒ 本工具不自跑）；
+-  · 回显只核"命令行声明值 vs 预设档"，**不核**引擎运行期真值（那属 C4 读回，归
+-    `experiments/preflight_check.py`）；
+-  · 完整性不认识各 probe 私有 summary 结构，只做通用四查 + 成对检查。
++  · 回显的**落盘腿读的是产物里已落盘的装置字段**（`readback` = 引擎运行期读回，优先级高；
++    `meta` = 探针 argparse 生效值，弱一档）⇒ 能拦"传了 device 却静默回落成另一档"；
++    **仍拦不住**"整批忘传 `--device`"（那形态落进 SKIP，归 `experiments/preflight_check.py`
++    起跑前 C4 读回 + 起跑令 `--device` 显式 R5.6）；
++  · 完整性不认识各 probe 私有 summary 结构，只做通用查 + 成对检查；目标 ticks 读不到时
++    **不判截断**（只披露），免历史件误红。
++
++修订（2026-10-05 23:0x，按 `[代码审核·镜]` 队列③ 审结 板帖 4971733 / 审头 1f57b40）：
++  P-A C7 行数不等崩穿 / P-B 零字段可比仍 PASS / P-C 回显腿判别面恒 0（走甲案）
++  ＋ 顺带 P-D 装置字段豁免通道 / P-E 巡检范围与实查披露 / P-F 单边 C7 的退出码
++  / P-G 末行 tick==目标 ticks（截断探测）/ P-H tick 脏值与死条件 / P-I 写文件统一 `with`。
+ """
+ from __future__ import annotations
+ 
+ import argparse
+ import csv
+-import io
+ import json
+ import os
+ import sys
+@@ -57,6 +69,62 @@ TIME_COLS = {"ms_per_tick", "wall_s"}
+ DEVICE_FIELDS = ("rows", "cols", "patches", "pop", "rgm",
+                  "bg_low_prod_frac", "bg_low_cap_mult")
+ 
++# 落盘真值的字段别名（引擎真值 `readback` > 探针生效值 `meta`）。
++# 注意命名分歧：`pop` 在 readback 里叫 `initial_pop`；`bg_low_cap_mult` 在 readback 里叫
++# `bg_cap_mult`。统一归一后按 DEVICE_FIELDS 顺序比。
++LANDED_ALIASES: dict[str, tuple[str, ...]] = {
++    "rows": ("rows",),
++    "cols": ("cols",),
++    "patches": ("patches",),
++    "pop": ("pop", "initial_pop"),
++    "rgm": ("rgm",),
++    "bg_low_prod_frac": ("bg_low_prod_frac",),
++    "bg_low_cap_mult": ("bg_low_cap_mult", "bg_cap_mult"),
++}
++
++
++def _same_value(got, want) -> bool:
++    """数值/字符串两路比：先尝试 float 等（480 vs "480"、1.195 vs "1.195"），
++    再退到 str 等。NaN 与 NaN 视为等（不判红）；空值不参与比（由调用方过滤）。"""
++    if got is None or want is None:
++        return True
++    try:
++        gf, wf = float(got), float(want)
++        if gf == wf:
++            return True
++        if str(gf) != str(wf):
++            return False
++        return True
++    except (TypeError, ValueError):
++        return str(got) == str(want)
++
++
++def _landed_fields(j: dict) -> tuple[dict, str | None]:
++    """从 summary 里读"落盘装置字段"（只读已有件 ⇒ 零机时、不新造判据）。
++    优先级 readback(引擎真值) > meta(探针 argparse 生效值)。
++    返回 (值字典, 来源名)；来源名用于 msg 披露，让判读知道比的是哪一档真值。"""
++    for src in ("readback", "meta"):
++        d = j.get(src)
++        if isinstance(d, dict):
++            out = {}
++            for field, aliases in LANDED_ALIASES.items():
++                for a in aliases:
++                    if a in d:
++                        out[field] = d[a]
++                        break
++            if out:
++                return out, src
++    return {}, None
++
++
++def _parse_override(spec: str) -> tuple[str, str] | None:
++    """`--allow-device-override FIELD=VALUE` 的解析；格式错 ⇒ 返回 None，调用方报错。"""
++    if "=" not in spec:
++        return None
++    f, _, v = spec.partition("=")
++    f = f.strip()
++    return (f, v) if f in DEVICE_FIELDS else None
++
+ 
+ def _result(name: str, ok: bool, msg: str, skipped: bool = False) -> dict:
+     return {"check": name, "status": "SKIP" if skipped else ("PASS" if ok else "FAIL"),
+@@ -73,14 +141,19 @@ def read_table(path: str):
+ 
+ 
+ def check_c7_pair(baseline: str, current: str) -> dict:
+-    """C7：剥掉计时列后逐位比（列名集合须一致 ⇒ 加列要在交付说明里写明并各自剥离）。"""
++    """C7：剥掉计时列后逐位比（列名集合须一致 ⇒ 加列要在交付说明里写明并各自剥离）。
++    P-A（镜队列③ 审结）：行数不等本身即违规（采样面/存活面被扰动）⇒ 先比 len 判 FAIL；
++    整腿 try/except 兜底，**不许 traceback 泄漏**（rc=1 与有 FAIL 同号但无汇总行 = 事故）。"""
+     if not baseline or not current:
+         return _result("c7-pair", False, "未给 --c7-baseline/--c7-current", skipped=True)
+     for p in (baseline, current):
+         if not os.path.isfile(p):
+             return _result("c7-pair", False, f"文件不存在：{p}")
+-    h0, r0 = read_table(baseline)
+-    h1, r1 = read_table(current)
++    try:
++        h0, r0 = read_table(baseline)
++        h1, r1 = read_table(current)
++    except Exception as e:
++        return _result("c7-pair", False, f"读 CSV 失败（{type(e).__name__}: {e}）")
+     keep0 = [i for i, c in enumerate(h0) if c not in TIME_COLS]
+     keep1 = [i for i, c in enumerate(h1) if c not in TIME_COLS]
+     n0, n1 = [h0[i] for i in keep0], [h1[i] for i in keep1]
+@@ -89,10 +162,16 @@ def check_c7_pair(baseline: str, current: str) -> dict:
+         return _result("c7-pair", False,
+                        f"列名不一致（剔计时列后）：仅基线有 {sorted(only0)[:4]} "
+                        f"仅新表有 {sorted(only1)[:4]}")
+-    a = [",".join(r[i] for i in keep0) for r in r0]
+-    b = [",".join(r[i] for i in keep1) for r in r1]
++    if len(r0) != len(r1):
++        return _result("c7-pair", False,
++                       f"行数不等 {len(r0)} vs {len(r1)} ⇒ 采样面/存活面被扰动（C7 违规）")
++    try:
++        a = [",".join(r[i] for i in keep0) for r in r0]
++        b = [",".join(r[i] for i in keep1) for r in r1]
++    except Exception as e:
++        return _result("c7-pair", False, f"对拍拼接失败（{type(e).__name__}: {e}）")
+     if a != b:
+-        i = next(k for k, (x, y) in enumerate(zip(a, b)) if x != y)
++        i = next((k for k, (x, y) in enumerate(zip(a, b)) if x != y), 0)
+         return _result("c7-pair", False, f"第 {i + 2} 行起逐位不一致 ⇒ 观测件扰动了被测系统")
+     return _result("c7-pair", True, f"逐位一致（{len(a)} 行 × {len(n0)} 列，已剔 {sorted(TIME_COLS)}）")
+ 
+@@ -120,35 +199,97 @@ def _argv_map(meta: dict) -> dict:
+     return out
+ 
+ 
+-def check_device_echo(summary_path: str) -> dict:
+-    """回显：批声明了 `--device X` ⇒ 落盘的装置字段必须等于预设档（不介入=旧行为，跳过）。"""
++def check_device_echo(summary_path: str, overrides: frozenset = frozenset()) -> dict:
++    """回显两腿（P-C 甲案）：
++      ① 声明腿 = argv 显式带的装置字段 vs 预设档；
++      ② 落盘腿 = 从 `summary.readback`（引擎真值）/`summary.meta`（探针生效值）读回的
++         实落值 vs 预设档。
++    任一腿出现分叉 ⇒ FAIL；两腿都无分叉且至少可比 1 字段 ⇒ PASS；
++    两腿都无可比字段 ⇒ SKIP「无可比字段」（P-B：缺件即红，不静默跳过；strict 下自然计红）。
++    `overrides` = `frozenset({(field, value), ...})`，匹配 ⇒ 降级为披露性豁免（P-D）。"""
+     try:
+         from tools.device_presets import DEVICE_PRESETS
+     except Exception as e:
+         return _result("device-echo", False,
+                        f"读不到装置预设档（{type(e).__name__}: {e}）⇒ 无法回显对比")
+-    j = json.load(io.open(summary_path, encoding="utf-8", errors="replace"))
+-    flags = _argv_map(j if isinstance(j, dict) else {})
++    try:
++        with open(summary_path, encoding="utf-8", errors="replace") as f:
++            j = json.load(f)
++    except Exception as e:
++        return _result("device-echo", False, f"读 summary 失败（{type(e).__name__}: {e}）")
++    if not isinstance(j, dict):
++        return _result("device-echo", False, "summary 不是 dict")
++    flags = _argv_map(j)
+     dev = flags.get("device")
+     if not dev:
+         return _result("device-echo", False, "无 --device（微型/考古批允许）", skipped=True)
+     preset = DEVICE_PRESETS.get(dev)
+     if preset is None:
+         return _result("device-echo", False, f"--device {dev!r} 不在预设档：{sorted(DEVICE_PRESETS)}")
+-    bad = []
++    landed, lsrc = _landed_fields(j)
++    bad_decl, bad_land, n_cmp_decl, n_cmp_land, ovr = [], [], 0, 0, []
+     for field, want in preset.items():
+-        got = flags.get(field)
+-        if got is None:
+-            continue                      # 没显式传 = 由预设档摁住 ⇒ 引擎侧另查（见文件头边界）
+-        if str(got) != str(want):
+-            bad.append(f"{field}: 声明 {got} ≠ 预设 {want}")
+-    if bad:
+-        return _result("device-echo", False, "; ".join(bad))
+-    return _result("device-echo", True, f"--device {dev} 声明字段与预设档一致")
+-
+-
+-def check_integrity(csv_path: str, allow_empty: frozenset = frozenset()) -> dict:
+-    """完整性四查：列数齐 / 无重复列名 / tick 单调 / 整列全空（= 静默零列族）。"""
++        got_d = flags.get(field)
++        if got_d is not None:
++            n_cmp_decl += 1
++            if not _same_value(got_d, want):
++                if (field, str(got_d)) in overrides:
++                    ovr.append(f"[豁免·声明]{field}={got_d}（预设 {want}；已显式批准）")
++                else:
++                    bad_decl.append(f"[声明]{field}: 声明 {got_d} ≠ 预设 {want}")
++        got_l = landed.get(field)
++        if got_l is not None:
++            n_cmp_land += 1
++            if not _same_value(got_l, want):
++                if (field, str(got_l)) in overrides:
++                    ovr.append(f"[豁免·落盘]{field}={got_l}（预设 {want}；已显式批准）")
++                else:
++                    bad_land.append(f"[落盘·{lsrc}]{field}: 落盘 {got_l} ≠ 预设 {want}")
++    n_cmp = n_cmp_decl + n_cmp_land
++    if n_cmp == 0:
++        return _result("device-echo", False,
++                       f"--device {dev} 已声明但 argv/落盘均无装置字段可比 ⇒ 无可比字段"
++                       f"（本腿检不出，须靠 preflight_check.py 起跑前 C4 读回兜住）",
++                       skipped=True)
++    if bad_decl or bad_land:
++        return _result("device-echo", False,
++                       "；".join(bad_decl + bad_land)
++                       + (f"｜{len(ovr)} 项豁免" if ovr else ""))
++    msg = (f"--device {dev} 两腿一致（声明可比 {n_cmp_decl} / 落盘可比 {n_cmp_land}"
++           f"（源 {lsrc or 'n/a'}））")
++    if ovr:
++        msg += "；" + "；".join(ovr)
++    return _result("device-echo", True, msg)
++
++
++def _target_ticks(summary_path: str) -> int | None:
++    """从同目录 summary 读目标 ticks（p1c 族 top-level `ticks` / `ticks_target`；
++    s3 族 `meta.ticks`）；读不到 ⇒ None（不判截断，免历史件误红）。"""
++    if not summary_path or not os.path.isfile(summary_path):
++        return None
++    try:
++        with open(summary_path, encoding="utf-8", errors="replace") as f:
++            j = json.load(f)
++    except Exception:
++        return None
++    if not isinstance(j, dict):
++        return None
++    for k in ("ticks", "ticks_target"):
++        v = j.get(k)
++        if isinstance(v, int) and v > 0:
++            return v
++    m = j.get("meta")
++    if isinstance(m, dict):
++        v = m.get("ticks")
++        if isinstance(v, int) and v > 0:
++            return v
++    return None
++
++
++def check_integrity(csv_path: str, allow_empty: frozenset = frozenset(),
++                    summary_path: str | None = None) -> dict:
++    """完整性五查：列数齐 / 无重复列名 / tick 单调（脏值归红不抛异常）/ 整列全空 /
++    **末行 tick==目标 ticks（P-G 截断探测）**。"""
+     hdr, rows = read_table(csv_path)
+     if len(set(hdr)) != len(hdr):
+         dup = sorted({c for c in hdr if hdr.count(c) > 1})
+@@ -160,11 +301,33 @@ def check_integrity(csv_path: str, allow_empty: frozenset = frozenset()) -> dict
+         return _result("integrity", False, "有表头无数据行")
+     idx = {c: i for i, c in enumerate(hdr)}
+     if "tick" in idx:
+-        ticks = [int(float(r[idx["tick"]])) for r in rows]
+-        if any(b < a for a, b in zip(ticks, ticks[1:])):
++        ticks: list[int | None] = []
++        bad_ticks = 0
++        for r in rows:
++            raw = r[idx["tick"]].strip()
++            if not raw:
++                bad_ticks += 1
++                ticks.append(None)
++                continue
++            try:
++                ticks.append(int(float(raw)))
++            except (TypeError, ValueError):
++                bad_ticks += 1
++                ticks.append(None)
++        if bad_ticks:
++            return _result("integrity", False,
++                           f"tick 列含 {bad_ticks} 个脏值/空值（P-H：解析失败 ⇒ 整列视为脏）")
++        clean = [t for t in ticks if t is not None]
++        if any(b < a for a, b in zip(clean, clean[1:])):
+             return _result("integrity", False, "tick 非单调（行序坏了或被截断）")
++        if clean and summary_path is not None:
++            target = _target_ticks(summary_path)
++            if target is not None and clean[-1] < target:
++                return _result("integrity", False,
++                               f"疑截断（末行 tick={clean[-1]} < 目标 ticks={target}；"
++                               f"跑完再崩/数据半件形态）")
+     all_empty = [c for c in hdr
+-                 if c not in TIME_COLS and c not in allow_empty and idx[c] < len(rows[0])
++                 if c not in TIME_COLS and c not in allow_empty
+                  and all((not str(r[idx[c]]).strip()) or str(r[idx[c]]).strip().lower() in ("nan", "")
+                          for r in rows)]
+     if all_empty:
+@@ -183,48 +346,93 @@ def check_pairing(csv_path: str) -> dict:
+     return _result("pairing", True, "CSV↔summary 成对")
+ 
+ 
+-def sweep_data_dir(root: str, limit: int, results: list, allow_empty=frozenset()) -> None:
++def sweep_data_dir(root: str, limit: int, results: list, allow_empty=frozenset(),
++                   only: str | None = None, since: str | None = None,
++                   overrides: frozenset = frozenset(),
++                   counters: dict | None = None) -> None:
++    """扫产物目录。`only` = 只查某一级子目录（相对 root）；`since` = 只查 mtime ≥ YYYY-MM-DD；
++    `counters` = 输出时回填 `{scanned, total, truncated}`（P-E：末行披露实查 N / 共 M）。"""
++    import time
++    since_ts = None
++    if since:
++        try:
++            since_ts = time.mktime(time.strptime(since, "%Y-%m-%d"))
++        except Exception:
++            pass
+     seen = 0
++    total = 0
+     for dirpath, _dirs, files in os.walk(root):
++        rel = os.path.relpath(dirpath, root)
++        first = rel.split(os.sep)[0] if rel and rel != "." else ""
++        if only and first != only:
++            continue
+         for fn in sorted(files):
+-            if seen >= limit:
+-                return
+             p = os.path.join(dirpath, fn)
++            if since_ts is not None:
++                try:
++                    if os.path.getmtime(p) < since_ts:
++                        continue
++                except OSError:
++                    pass
+             if fn.endswith(".csv"):
++                total += 1
++                if seen >= limit:
++                    continue
+                 results.append(check_pairing(p))
+                 try:
+-                    results.append(check_integrity(p, allow_empty))
++                    results.append(check_integrity(p, allow_empty,
++                                                   os.path.splitext(p)[0] + ".summary.json"))
+                 except Exception as e:
+                     results.append(_result("integrity", False, f"{p}: {type(e).__name__}: {e}"))
+                 seen += 1
+             elif fn.endswith(".summary.json"):
++                total += 1
++                if seen >= limit:
++                    continue
+                 try:
+-                    results.append(check_device_echo(p))
++                    results.append(check_device_echo(p, overrides))
+                 except Exception as e:
+                     results.append(_result("device-echo", False, f"{p}: {type(e).__name__}: {e}"))
++                seen += 1
++    if counters is not None:
++        counters["scanned"] = seen
++        counters["total"] = total
++        counters["truncated"] = total > limit
+ 
+ 
+ def selftest() -> int:
+-    """钉两性质：① 计时列差异不得判红；② 整列全空必红。改坏本工具 ⇒ 这里必炸。"""
++    """钉四性质（v1 比 v0 多两条）：
++      ① 计时列差异不得判红；② 整列全空必红；③ 行数不等必红（P-A）；④ 落盘分叉必红（P-C 甲）。
++    改坏本工具 ⇒ 这里必炸。"""
+     import tempfile
+     d = tempfile.mkdtemp(prefix="postmerge_selftest_")
+     a = os.path.join(d, "a.csv")
+     b = os.path.join(d, "b.csv")
+-    io.open(a, "w", encoding="utf-8", newline="").write(
+-        "seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,1.63,0.56\n7,20,15,1.71,0.58\n")
+-    io.open(b, "w", encoding="utf-8", newline="").write(
+-        "seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,9.99,0.56\n7,20,15,8.88,0.58\n")
++    with open(a, "w", encoding="utf-8", newline="") as f:
++        f.write("seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,1.63,0.56\n7,20,15,1.71,0.58\n")
++    with open(b, "w", encoding="utf-8", newline="") as f:
++        f.write("seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,9.99,0.56\n7,20,15,8.88,0.58\n")
+     r1 = check_c7_pair(a, b)
+-    io.open(b, "w", encoding="utf-8", newline="").write(
+-        "seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,1.63,\n7,20,15,1.71,nan\n")
++    with open(b, "w", encoding="utf-8", newline="") as f:
++        f.write("seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,1.63,\n7,20,15,1.71,nan\n")
+     r2 = check_integrity(b)
+-    io.open(b, "w", encoding="utf-8", newline="").write(
+-        "seed,tick,pop,ms_per_tick\n7,10,21,1.63\n7,9,15,1.71\n")
++    with open(b, "w", encoding="utf-8", newline="") as f:
++        f.write("seed,tick,pop,ms_per_tick\n7,10,21,1.63\n7,9,15,1.71\n")
+     r3 = check_integrity(b)
+-    ok = (r1["status"] == "PASS" and r2["status"] == "FAIL" and r3["status"] == "FAIL")
++    with open(b, "w", encoding="utf-8", newline="") as f:
++        f.write("seed,tick,pop,ms_per_tick,g6_emit_rate_cum\n7,10,21,1.63,0.56\n")
++    r4 = check_c7_pair(a, b)                                       # 行数不等（同列名）
++    s = os.path.join(d, "fork.summary.json")
++    with open(s, "w", encoding="utf-8") as f:
++        json.dump({"argv": ["--device", "s2", "--rows", "480", "--cols", "960"],
++                   "readback": {"rows": 60, "cols": 120, "patches": 1700, "initial_pop": 10000}}, f)
++    r5 = check_device_echo(s)                                      # 落盘分叉
++    ok = (r1["status"] == "PASS" and r2["status"] == "FAIL" and r3["status"] == "FAIL"
++          and r4["status"] == "FAIL" and r5["status"] == "FAIL")
+     print(f"[selftest] 计时列豁免={r1['status']} 整列全空={r2['status']} "
+-          f"tick 倒退={r3['status']} ⇒ {'PASS' if ok else 'FAIL'}")
+-    for r in (r1, r2, r3):
++          f"tick 倒退={r3['status']} 行数不等={r4['status']} 落盘分叉={r5['status']} "
++          f"⇒ {'PASS' if ok else 'FAIL'}")
++    for r in (r1, r2, r3, r4, r5):
+         print("   ", r["check"], r["status"], r["msg"])
+     return 0 if ok else 1
+ 
+@@ -232,7 +440,9 @@ def selftest() -> int:
+ def main(argv=None) -> int:
+     ap = argparse.ArgumentParser(description="合 main 后三查（C7 对拍/装置档回显/数据完整性）")
+     ap.add_argument("--data-dir", help="要扫的产物目录（如 the-world-data）")
+-    ap.add_argument("--limit", type=int, default=40, help="最多扫多少个 CSV（默认 40）")
++    ap.add_argument("--limit", type=int, default=40, help="最多扫多少个（默认 40）")
++    ap.add_argument("--only", help="只查某一级子目录（相对 --data-dir；P-E：避免历史件常红）")
++    ap.add_argument("--since", help="只查 mtime ≥ YYYY-MM-DD 的件（P-E）")
+     ap.add_argument("--c7-baseline", help="对拍基线 CSV")
+     ap.add_argument("--c7-current", help="对拍当前 CSV")
+     ap.add_argument("--lenient", action="store_true",
+@@ -240,17 +450,37 @@ def main(argv=None) -> int:
+     ap.add_argument("--selftest", action="store_true", help="跑内置自检（不需要任何数据）")
+     ap.add_argument("--allow-empty-col", action="append", default=[], metavar="COL",
+                     help="豁免某个「按装置口径本应 n/a」的列（可重复；须在批记录写理由）")
++    ap.add_argument("--allow-device-override", action="append", default=[],
++                    metavar="FIELD=VALUE",
++                    help="豁免某个装置字段的某个值（P-D：设计内覆盖，如 patches=213；"
++                         "可重复；msg 内披露，批记录留痕）")
+     a = ap.parse_args(argv)
+     if a.selftest:
+         return selftest()
++    # P-F：单边 C7 = 用法错 ⇒ rc=2（置于 lenient 判定之前；不许"没查也绿"）
++    if bool(a.c7_baseline) ^ bool(a.c7_current):
++        print("🔴 --c7-baseline 与 --c7-current 必须同时给或同时不给（单边 = 用法错）",
++              file=sys.stderr)
++        return 2
++    overrides: set[tuple[str, str]] = set()
++    for spec in a.allow_device_override:
++        p = _parse_override(spec)
++        if p is None:
++            print(f"🔴 --allow-device-override 格式错或字段不在 DEVICE_FIELDS：{spec!r}",
++                  file=sys.stderr)
++            return 2
++        overrides.add(p)
+     results = []
+-    if a.c7_baseline or a.c7_current:
+-        results.append(check_c7_pair(a.c7_baseline or "", a.c7_current or ""))
++    if a.c7_baseline and a.c7_current:
++        results.append(check_c7_pair(a.c7_baseline, a.c7_current))
++    counters: dict[str, int | bool] = {}
+     if a.data_dir:
+         if not os.path.isdir(a.data_dir):
+             print(f"🔴 --data-dir 不存在：{a.data_dir}", file=sys.stderr)
+             return 2
+-        sweep_data_dir(a.data_dir, a.limit, results, frozenset(a.allow_empty_col))
++        sweep_data_dir(a.data_dir, a.limit, results, frozenset(a.allow_empty_col),
++                       only=a.only, since=a.since, overrides=frozenset(overrides),
++                       counters=counters)
+     if not results:
+         print("🔴 什么都没查（给 --data-dir 或 --c7-baseline/--c7-current，或 --selftest）",
+               file=sys.stderr)
+@@ -264,6 +494,10 @@ def main(argv=None) -> int:
+                ("SKIP-red" if (not a.lenient and counts["SKIP"]) else "PASS"))
+     print(f"# postmerge_check: PASS={counts['PASS']} FAIL={counts['FAIL']} "
+           f"SKIP={counts['SKIP']} lenient={a.lenient} ⇒ {verdict}")
++    if counters:
++        n, m = counters.get("scanned", 0), counters.get("total", 0)
++        trunc = "（limit 截断）" if counters.get("truncated") else ""
++        print(f"# 实查 {n} / 语料 {m}{trunc}")
+     return 0 if verdict == "PASS" else 1
+ 
+ 
+-- 
+2.46.1.windows.1
+

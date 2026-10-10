@@ -1,0 +1,73 @@
+From f99256a4e156b5011eb1c70e664ba139b49709e5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=BF=E6=A1=A5?= <banqiao@the-world.local>
+Date: Mon, 5 Oct 2026 19:21:51 +0800
+Subject: [PATCH] =?UTF-8?q?demo:=20[=E5=8D=8F=E4=BD=9C=C2=B7=E6=9D=BF?=
+ =?UTF-8?q?=E6=A1=A5]=20SIGN-HOOK=20=E6=8B=A6=E6=88=AA/=E6=94=BE=E8=A1=8C?=
+ =?UTF-8?q?=E6=BC=94=E7=A4=BA=E5=AE=9E=E5=BD=95=EF=BC=88A=E5=86=92?=
+ =?UTF-8?q?=E5=85=85=E5=9C=A8=E5=86=8C=E4=BB=96=E4=BA=BA=E6=8B=A6/B?=
+ =?UTF-8?q?=E8=8A=B1=E5=90=8D=E5=86=8C=E5=A4=96=E6=8B=A6/C=20PI=E7=99=BD?=
+ =?UTF-8?q?=E5=90=8D=E5=8D=95=E6=94=BE=E8=A1=8C/D=E4=B8=BB=E6=A0=91?=
+ =?UTF-8?q?=E8=AD=A6=E5=91=8A=E7=BA=A7=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ ...0\252\346\224\276\350\241\214-20261005.md" | 45 +++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+ create mode 100644 "docs/\346\274\224\347\244\272-SIGN-HOOK\346\213\246\346\210\252\346\224\276\350\241\214-20261005.md"
+
+diff --git "a/docs/\346\274\224\347\244\272-SIGN-HOOK\346\213\246\346\210\252\346\224\276\350\241\214-20261005.md" "b/docs/\346\274\224\347\244\272-SIGN-HOOK\346\213\246\346\210\252\346\224\276\350\241\214-20261005.md"
+new file mode 100644
+index 00000000..d7b13b13
+--- /dev/null
++++ "b/docs/\346\274\224\347\244\272-SIGN-HOOK\346\213\246\346\210\252\346\224\276\350\241\214-20261005.md"
+@@ -0,0 +1,45 @@
++# SIGN-HOOK 拦截/放行演示实录（卡 SIGN-HOOK 验收件）
++
++> 日期 2026-10-05｜执行 板桥｜环境 .worktrees/SIGN-HOOK（卡 SIGN-HOOK 负责人=板桥）
++> 钩子：主树 .git/hooks/pre-commit（the-world-sign-gate v2，R393②）；闸门实现 collab-toolkit/tools/sign_hook.py @task/ONBOARD-V2
++- 演示 A（砚署名≠卡主）应被拦：见下
++
++## 演示 D：无卡/主树 ⇒ 警告级不阻断（R393③）
++
++主树提交由 PI/砚/各开发线照常落库（见 git log 各署名 HEAD），闸门只警告不拦截；
++有卡工作树才硬拦——上方 A/B 即卡内拦截实录。
++
++## 实录（原样输出）
++
++```text
++=== 演示A：冒充在册他人（砚）===
++warning: in the working copy of 'docs/演示-SIGN-HOOK拦截放行-20261005.md', LF will be replaced by CRLF the next time Git touches it
++warning: in the working copy of 'docs/演示-SIGN-HOOK拦截放行-20261005.md', LF will be replaced by CRLF the next time Git touches it
++[署名闸门] 位置=SIGN-HOOK 分支=task/SIGN-HOOK 作者=砚 <yan@the-world.local>
++🔴 ⛔ [卡 SIGN-HOOK] 作者位 砚 <yan@the-world.local> ≠ 应然 板桥 <banqiao@the-world.local>（来源：任务卡负责人）
++[拒绝] 修法三选一：
++  a) 本树重设署名（推荐，一次生效）：python.exe collab-toolkit/tools/worktree.py setup <卡号> --owner <本人花名>
++  b) 只给本会话注入（零共享写）：eval "$(python.exe collab-toolkit/tools/git_id.py env --role <角色键>)"
++  c) 逐命令显式署名（R371 老口径）：git -c user.name=<花名> -c user.email=<花名拼音>@the-world.local commit …
++  d) 卡已转人：先改 _share/任务卡.md 的「负责」列（task_card.py claim <卡> --owner <新负责人>）再重提
++[署名闸门] rc=2 —— 提交被拦（详见上方 🔴 行与修法）
++RC_A=1
++=== 演示B：花名册外署名 ===
++warning: in the working copy of 'docs/演示-SIGN-HOOK拦截放行-20261005.md', LF will be replaced by CRLF the next time Git touches it
++warning: in the working copy of 'docs/演示-SIGN-HOOK拦截放行-20261005.md', LF will be replaced by CRLF the next time Git touches it
++[署名闸门] 位置=SIGN-HOOK 分支=task/SIGN-HOOK 作者=无名氏 <nobody@example.com>
++🔴 ⛔ 作者名 '无名氏' 不在花名册在册花名里（R227：禁匿名/代名提交）
++🔴 ⛔ [卡 SIGN-HOOK] 作者位 无名氏 <nobody@example.com> ≠ 应然 板桥 <banqiao@the-world.local>（来源：任务卡负责人）
++[拒绝] 修法三选一：
++  a) 本树重设署名（推荐，一次生效）：python.exe collab-toolkit/tools/worktree.py setup <卡号> --owner <本人花名>
++  b) 只给本会话注入（零共享写）：eval "$(python.exe collab-toolkit/tools/git_id.py env --role <角色键>)"
++  c) 逐命令显式署名（R371 老口径）：git -c user.name=<花名> -c user.email=<花名拼音>@the-world.local commit …
++  d) 卡已转人：先改 _share/任务卡.md 的「负责」列（task_card.py claim <卡> --owner <新负责人>）再重提
++[署名闸门] rc=2 —— 提交被拦（详见上方 🔴 行与修法）
++RC_B=1
++=== 拦截后提交数应为0：0
++=== 演示C：PI/fish 白名单（仅跑闸门校验，不落提交）===
++[署名闸门] 位置=SIGN-HOOK 分支=task/SIGN-HOOK 作者=fish(1) <pi@the-world.local>
++  ✅ PI/fish 白名单放行：fish(1) <pi@the-world.local>（本卡应然=板桥 <banqiao@the-world.local>，裁定/合并动作归 PI）
++RC_C=0
++```
+-- 
+2.46.1.windows.1
+

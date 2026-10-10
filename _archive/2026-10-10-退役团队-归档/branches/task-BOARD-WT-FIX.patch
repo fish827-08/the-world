@@ -1,0 +1,215 @@
+From 1755f0304d5e7fdb6afb9f51fcd97c45fded1ec1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=BF=E6=A1=A5?= <banqiao@the-world.local>
+Date: Mon, 5 Oct 2026 21:38:00 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?fix:=20[=E5=8D=8F=E4=BD=9C=C2=B7=E6=9D=BF?=
+ =?UTF-8?q?=E6=A1=A5]=20board=5Fpost=20worktree=20=E5=85=BC=E5=AE=B9?=
+ =?UTF-8?q?=E2=80=94=E2=80=94resolve=5Fpost=5Froot=20=E6=8A=8A=20linked=20?=
+ =?UTF-8?q?worktree=20=E9=87=8D=E5=AE=9A=E5=90=91=E4=B8=BB=E6=A0=91?=
+ =?UTF-8?q?=E5=8F=91=E5=B8=96=EF=BC=88=E9=9B=B6=E5=8F=B7=E8=A7=84=E5=88=99?=
+ =?UTF-8?q?=EF=BC=9A=E5=88=86=E6=94=AF=E5=B8=96=3D=E5=90=88=E5=B9=B6?=
+ =?UTF-8?q?=E5=89=8D=E4=B8=8D=E5=8F=AF=E8=A7=81=3D=E6=B2=A1=E5=8F=91?=
+ =?UTF-8?q?=E8=A8=80=EF=BC=89=EF=BC=9B=E6=97=A7=E5=AE=88=E5=8D=AB=20isdir(?=
+ =?UTF-8?q?.git)=20=E8=AF=AF=E6=8B=92=20gitdir=20=E6=8C=87=E9=92=88?=
+ =?UTF-8?q?=E6=96=87=E4=BB=B6=E5=BF=85=E7=A1=AC=E5=A4=B1=E8=B4=A5=EF=BC=9B?=
+ =?UTF-8?q?=E5=9D=8F=E6=8C=87=E9=92=88/=E9=9D=9E=E4=BB=93=E5=BA=93=20fail-?=
+ =?UTF-8?q?loud=20=E4=B8=8D=E7=8C=9C=E8=B7=AF=E5=BE=84=EF=BC=9B=E7=BD=B2?=
+ =?UTF-8?q?=E5=90=8D=E6=B3=A8=E5=85=A5=E4=BB=8D=E6=8C=89=E6=89=80=E5=9C=A8?=
+ =?UTF-8?q?=E6=A0=91=20.qoder-sign.env=EF=BC=9B=E6=B5=8B=E8=AF=95+5?=
+ =?UTF-8?q?=EF=BC=88=E5=90=AB=E7=AB=AF=E5=88=B0=E7=AB=AF=E5=B8=96=E8=90=BD?=
+ =?UTF-8?q?=20origin/main=20=E4=B8=94=E5=88=86=E6=94=AF=E6=9D=BF=E9=9D=A2?=
+ =?UTF-8?q?=E4=B8=8D=E5=8A=A8=EF=BC=89=EF=BC=8Ccollab=20=E5=85=A8=E9=87=8F?=
+ =?UTF-8?q?=20164=20passed=20=C3=973=20=E8=BF=9E=E8=B7=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ collab-toolkit/tests/test_board_post.py | 52 +++++++++++++++++++++++++
+ collab-toolkit/tools/board_post.py      | 44 +++++++++++++++++----
+ 2 files changed, 89 insertions(+), 7 deletions(-)
+
+diff --git a/collab-toolkit/tests/test_board_post.py b/collab-toolkit/tests/test_board_post.py
+index ab0f8190..2716e466 100644
+--- a/collab-toolkit/tests/test_board_post.py
++++ b/collab-toolkit/tests/test_board_post.py
+@@ -262,3 +262,55 @@ def test_auto_inject_identity_without_file_changes_nothing(tmp_path, _git_env_sa
+     """没有署名文件 ⇒ 绝不动身份（不静默改环境，行为与改前一致）。"""
+     bp.auto_inject_identity(str(tmp_path / "empty"))
+     assert "GIT_CONFIG_COUNT" not in os.environ
++
++
++# ---------------- worktree 兼容（挂账修复：:315 曾判 isdir(.git) 必拒 linked worktree） ----------------
++def test_resolve_post_root_main_passthrough(repo_pair):
++    """主工作树（.git 为目录）⇒ 原样返回、无重定向提示。"""
++    root, note = bp.resolve_post_root(repo_pair)
++    assert os.path.abspath(root) == os.path.abspath(repo_pair)
++    assert note is None
++
++
++def test_resolve_post_root_linked_worktree_redirects_to_main(repo_pair, tmp_path):
++    """linked worktree（.git 为 gitdir 指针文件）⇒ 解析回主工作树 + 提示（零号规则）。"""
++    wt = str(tmp_path / "wt")
++    git(repo_pair, "worktree", "add", "-b", "feature/wt", wt, "HEAD")
++    assert os.path.isfile(os.path.join(wt, ".git"))   # 旧守卫在此必误拒
++    root, note = bp.resolve_post_root(wt)
++    assert os.path.abspath(root) == os.path.abspath(repo_pair)
++    assert note and "worktree" in note
++
++
++def test_resolve_post_root_junk_pointer_fails_loud(tmp_path):
++    """指针文件内容解析不出主树 ⇒ PostError，绝不猜路径。"""
++    fake = tmp_path / "fake"
++    fake.mkdir()
++    (fake / ".git").write_text("gitdir: /nowhere/else/.git/worktrees/x", encoding="utf-8")
++    with pytest.raises(bp.PostError):
++        bp.resolve_post_root(str(fake))
++
++
++def test_resolve_post_root_nonrepo_fails_loud(tmp_path):
++    with pytest.raises(bp.PostError):
++        bp.resolve_post_root(str(tmp_path / "nope"))
++
++
++def test_board_post_in_linked_worktree_lands_on_main(repo_pair, tmp_path):
++    """旧行为：worktree 下 isdir(.git) 假 ⇒ 硬失败"不是 git 仓库"，逼人手工 7 步。
++    新行为：自动重定向到主树执行，帖落 origin/main 可见；worktree 分支板面不动。"""
++    wt = str(tmp_path / "wt")
++    git(repo_pair, "worktree", "add", "-b", "feature/wt", wt, "HEAD")
++    msg = tmp_path / "post.md"
++    msg.write_text(
++        "**主题**：worktree 内发帖\n\n**内容**：重定向主树验证。",
++        encoding="utf-8")
++    rc = bp.main(_post_args(wt, msg))
++    assert rc == 0
++    board_main = os.path.join(repo_pair, "_share", "讨论板.md")
++    assert "worktree 内发帖" in open(board_main, encoding="utf-8").read()
++    board_wt = os.path.join(wt, "_share", "讨论板.md")
++    assert "worktree 内发帖" not in open(board_wt, encoding="utf-8").read()
++    head = git(repo_pair, "rev-parse", "HEAD").stdout.strip()
++    remote = git(repo_pair, "ls-remote", "origin", "refs/heads/main").stdout.split()[0]
++    assert head == remote
+diff --git a/collab-toolkit/tools/board_post.py b/collab-toolkit/tools/board_post.py
+index 81dba3ea..2aee571f 100644
+--- a/collab-toolkit/tools/board_post.py
++++ b/collab-toolkit/tools/board_post.py
+@@ -301,19 +301,49 @@ def auto_inject_identity(root: str) -> None:
+         print(f"[署名注入] 跳过（{type(e).__name__}: {e}）")
+ 
+ 
++# ---------------- worktree 兼容（挂账修复 2026-10-05，PI 点名：:315 判 isdir(.git) 必拒） ----------------
++def resolve_post_root(root: str) -> tuple:
++    """发言实际用的工作树根：主树 ⇒ 原样；linked worktree ⇒ 解析回**主工作树**。
++
++    零号规则：发言=落 main 分支的板。worktree 里追加讨论板 = 落进该卡分支，
++    合并前他人不可见 ⇒ 等同没发言。旧守卫 `isdir(.git)` 在 worktree（.git 为
++    gitdir 指针文件）直接误拒"不是 git 仓库"，逼使用者手工 7 步上板（镜 10-05 实证）。
++    返回 (root_for_7steps, note|None)；解析不出 ⇒ PostError（不猜路径，fail-loud）。
++    """
++    g = os.path.join(root, ".git")
++    if os.path.isdir(g):
++        return root, None
++    if os.path.isfile(g):
++        try:
++            with open(g, "rb") as f:
++                txt = os.fsdecode(f.read()).strip().replace("\\", "/")
++        except OSError as e:
++            raise PostError(f"读不到 .git 指针文件: {g}（{type(e).__name__}: {e}）")
++        m = re.match(r"gitdir:\s*(.+?/\.git)/worktrees/[^/]+/?$", txt, re.I)
++        if m:
++            main_root = m.group(1)[:-len("/.git")] or "/"
++            if os.path.isdir(os.path.join(main_root, ".git")):
++                return main_root, (f"[worktree→主树] 当前={root} 是 linked worktree，"
++                                   f"发言改在主树执行（零号规则：帖须落 main 可见）：{main_root}")
++        raise PostError(f"无法从 worktree 指针解析主树（内容={txt!r}）"
++                        "——请显式改用 --root <主树路径> 重试；勿手工绕过 7 步")
++    raise PostError(f"不是 git 仓库: {root}")
++
++
+ def cmd_post(args) -> int:
+-    root = os.path.abspath(args.root)
++    orig_root = os.path.abspath(args.root)
++    locked = False
++    install_signal_guard()
++    auto_inject_identity(orig_root)   # 署名注入按**使用者所在树**（worktree 的 .qoder-sign.env 照常生效）
++    root, redirect_note = resolve_post_root(orig_root)
++    if redirect_note:
++        print(redirect_note)
+     args.root = root
+     board = os.path.join(root, args.board)
+-    locked = False
+     STATE["args"] = args
+     STATE["journal"] = journal_path(root, args.slot)
+-    install_signal_guard()
+-    auto_inject_identity(root)
+     try:
+-        # ⓪ 环境检查
+-        if not os.path.isdir(os.path.join(root, ".git")):
+-            raise PostError(f"不是 git 仓库: {root}")
++        # ⓪ 环境检查（worktree 已在 resolve_post_root 重定向主树；此处不再判 isdir(.git)）
+         if not os.path.isfile(board):
+             raise PostError(f"讨论板不存在: {board}")
+         if not os.path.isfile(args.lock_tool):
+-- 
+2.46.1.windows.1
+
+
+From 9c8ffbea916152dd696ec944da70c73de1298755 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=BF=E6=A1=A5?= <banqiao@the-world.local>
+Date: Mon, 5 Oct 2026 21:38:01 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?fix(test):=20[=E5=8D=8F=E4=BD=9C=C2=B7?=
+ =?UTF-8?q?=E6=9D=BF=E6=A1=A5]=20=E5=AD=98=E9=87=8F=20GBK=20=E7=BA=A2=20ha?=
+ =?UTF-8?q?rness=20=E4=BF=AE=E2=80=94=E2=80=94r278/r287=20=E4=B8=A4?=
+ =?UTF-8?q?=E5=A4=84=20=5Frun=20=E5=AD=90=E8=BF=9B=E7=A8=8B=E6=8D=95?=
+ =?UTF-8?q?=E8=8E=B7=E5=8A=A0=20encoding=3Dutf-8,errors=3Dreplace=EF=BC=88?=
+ =?UTF-8?q?=E7=88=B6=E8=BF=9B=E7=A8=8B=20cp936=20=E8=A7=A3=E7=A0=81?=
+ =?UTF-8?q?=E5=AD=90=E8=BF=9B=E7=A8=8B=20UTF-8=20=E8=BE=93=E5=87=BA?=
+ =?UTF-8?q?=E7=9A=84=2011=20=E7=BA=A2=E6=A0=B9=E5=9B=A0=EF=BC=8C=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E9=9D=A2=E4=B8=8D=E8=A7=A6=E7=A7=91=E5=AD=A6=EF=BC=89?=
+ =?UTF-8?q?=EF=BC=9B29=20=E4=BE=8B=2028=20=E7=BB=BF=EF=BC=8C=E4=BD=99=20T2?=
+ =?UTF-8?q?b=20=E4=B8=BA=E5=9F=BA=E7=BA=BF=20fixture=20=E6=9C=AB=E4=BD=8D?=
+ =?UTF-8?q?=201-ULP=20=E5=B7=AE=EF=BC=88global=5Fsat=20=E2=80=A679=20vs=20?=
+ =?UTF-8?q?=E2=80=A678=EF=BC=8C=E7=A1=AE=E5=AE=9A=E6=80=A7=E5=A4=8D?=
+ =?UTF-8?q?=E7=8E=B0=EF=BC=8C=E7=96=91=E4=BA=91=E6=9C=BA=E5=9F=BA=E7=BA=BF?=
+ =?UTF-8?q?=EF=BC=89=E9=9D=9E=20GBK=EF=BC=8C=E4=B8=8A=E5=91=88=20PI/?=
+ =?UTF-8?q?=E6=BE=9C=E8=88=9F=E5=AE=9A=E5=A4=BA=EF=BC=8C=E4=B8=8D=E6=94=BE?=
+ =?UTF-8?q?=E5=AE=BD=E5=AE=B9=E5=B7=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ tests/test_r278_p3_device_flush.py  | 3 ++-
+ tests/test_r287_s3_sample_resume.py | 3 ++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/tests/test_r278_p3_device_flush.py b/tests/test_r278_p3_device_flush.py
+index f054302d..940a1fec 100644
+--- a/tests/test_r278_p3_device_flush.py
++++ b/tests/test_r278_p3_device_flush.py
+@@ -48,7 +48,8 @@ def _run(probe: str, args: list[str], out: Path, seed: str = "165") -> subproces
+     return subprocess.run(
+         [sys.executable, "-u", "-m", probe, *args, "--seeds", seed,
+          "--ticks", str(TICKS), "--out", str(out)],
+-        cwd=str(REPO), env=env, capture_output=True, text=True)
++        cwd=str(REPO), env=env, capture_output=True, text=True,
++        encoding="utf-8", errors="replace")
+ 
+ 
+ def _rows(p: Path) -> list[dict]:
+diff --git a/tests/test_r287_s3_sample_resume.py b/tests/test_r287_s3_sample_resume.py
+index 44d1307b..35cf423c 100644
+--- a/tests/test_r287_s3_sample_resume.py
++++ b/tests/test_r287_s3_sample_resume.py
+@@ -50,7 +50,8 @@ def _run(args: list[str], out: Path) -> subprocess.CompletedProcess:
+                MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+     return subprocess.run(
+         [sys.executable, "-u", "-m", PROBE, *args, "--out", str(out)],
+-        cwd=str(REPO), env=env, capture_output=True, text=True)
++        cwd=str(REPO), env=env, capture_output=True, text=True,
++        encoding="utf-8", errors="replace")
+ 
+ 
+ def _rows(p: Path) -> list[dict]:
+-- 
+2.46.1.windows.1
+

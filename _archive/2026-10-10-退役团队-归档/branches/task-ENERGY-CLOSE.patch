@@ -1,0 +1,3800 @@
+From 93342ed7a23da5a52b1334ee27d029d6667a8041 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 00:28:05 +0800
+Subject: [PATCH 01/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20feat(stepA):=20=E8=AF=BB=E6=95=B0=E5=8E=9F?=
+ =?UTF-8?q?=E5=A7=8B=E4=BB=B6=E7=94=9F=E6=88=90=E5=99=A8=E5=85=A5=E5=BA=93?=
+ =?UTF-8?q?=EF=BC=88R342=EF=BC=89+=20B-2=20fail-loud=20=E6=96=AD=E8=A8=80?=
+ =?UTF-8?q?=E6=94=B6=20(ValueError,=20RuntimeError)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+① `experiments/stepa_leg_readout.py`：步A 5 腿量级读数的**可复现生成器**（PI 10-08 23:4x 班
+催办②「未落盘即未生效」）。自检四条全硬失败：早停不静默 / 空 sidecar / sim_core 有无声明 /
+与上板 @7ddafa0 逐位对账（不齐 ⇒ 禁入库）。档实测勘正：出数批用**仓库默认初始种群 200**，
+非 10-07 v0 装置表的 400（digest + rng_draws 只在 200 复现）⇒ 偏差原文进 manifest，
+比例结论同档自洽、绝对量级禁与 v0 互比。
+
+② `test_fail_loud_rust_path`（镜 B-2 修法，PI 22:4x「修法归澜舟」）：原只收 `ValueError` ⇒
+无可用 Rust 扩展的机器上引擎扩展守卫（在探针闸门之前）先抛 `RuntimeError` = 环境性假红。
+现两形都收且各证一事：ValueError 须 match 闸门文案；RuntimeError 仅允许在
+`_ext_usable()` 为假时出现且消息须指向扩展缺失（有扩展却 RuntimeError ⇒ 照红）。
+变异检查：闸门 `if self._use_sim_core` 置否 ⇒ 本例变红（已复原）。
+---
+ experiments/stepa_leg_readout.py | 305 +++++++++++++++++++++++++++++++
+ tests/test_energy_probe.py       |  43 ++++-
+ 2 files changed, 346 insertions(+), 2 deletions(-)
+ create mode 100644 experiments/stepa_leg_readout.py
+
+diff --git a/experiments/stepa_leg_readout.py b/experiments/stepa_leg_readout.py
+new file mode 100644
+index 0000000..b3c2c78
+--- /dev/null
++++ b/experiments/stepa_leg_readout.py
+@@ -0,0 +1,305 @@
++"""ENERGY-CLOSE 步A · 5 腿量级读数原始件生成器（读数入库用，非结论复算）。
++
++口径来源
++--------
++协议照 v0（`docs/设计文档/记录-ENERGY-CLOSE步A-旧装置逃逸量级前置实测-20261007.md`
++§一装置表）：**微型档** 60×120（7,200 格）｜初始种群 **200（仓库默认，见下勘注）**｜
++斑块 30｜`resource_dynamics` 关｜`corpse_enabled` 关｜`predation.enabled` 开（默认）｜
++`use_sim_core=False`（账本与探针只在 Python 路径刷）。seed 7/8/9 × 1,500 tick，
++`row_every=50` ⇒ 30 行/run。
++
++🔴 用途边界（PI 裁原样，板 @`7ddafa0` 四）：本件**只出量级/点火阻塞判据**，
++不是"能量偏差全账闭合"，也不是 S0 结论发布证据。S0 复算**不复用本探针链路**
++（R394）⇒ 复算脚本届时另立。5/7 腿 = **下界**，`esc_pred_e`/`esc_pred_s` 未埋点
++⇒ 读数 `None`（未观测 ≠ 0，砚⑥）。
++
++与 v0 的差别：v0 用**账本反推**残差（只读累计量）；本件用**步A 正式埋点**直读
++逐通道流量 ⇒ 同一 档、同一 seed/tick/行频，可交叉印证。
++
++🔴 **档勘注（复现时实测钉死，2026-10-09）**：出数那一批（板 @`7ddafa0`）跑的是
++**仓库默认初始种群 200**，不是 10-07 v0 装置表的 400 —— seed7 关/开 digest
++`(670522, 88366.190893)` + `rng_draws=23269` 只在 pop=200 复现（pop=400 实测得
++`(1239687, 150697.441427)` / 30820）。⇒ 板上「协议照 v0」那句**在初始种群这一项不成立**，
++本件按实测档入库并在 manifest 里登记该偏差；比例类结论不受影响（同档自洽），
++但**跨档绝对量级不可与 10-07 v0 直接比**。
++
++自检四条（镜 B-3 + R401① 全硬失败，不放行 = 白跑）
++------------------------------------------------
++① `ticks_run` 必须等于 `--ticks`（灭绝早停 ⇒ 报错，不静默少跑）；
++② `rows_emitted > 0`（行频写错 = 整批空 sidecar）；
++③ manifest 声明本环境**有/无**可用 `sim_core` 编译扩展（命名空间空包不算有）；
++④ `--check-board`（默认开）：seed7 digest 与 5 腿累计必须与上板读数逐位对上，
++   对不上 ⇒ 报错禁入库（防"入库件"与"上板件"是两次不同的跑）。
++
++用法
++----
++    ../../.venv/Scripts/python.exe experiments/stepa_leg_readout.py \
++        --out <数据仓>/energy_close_stepA/leg_readout_20261009.json
++    # A/B（seed7 探针关/开 digest + rng_draws 逐位对拍）默认跑；--no-ab 可关
++    # --no-check-board 可关基线对账（换档探索时用，换档后读数不得沿用上板口径）
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import platform
++import sys
++import time
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from simulation.config import EnergyProbeConfig, SimConfig      # noqa: E402
++from simulation.provenance import collect, validate             # noqa: E402
++from simulation.sphere_engine import (                          # noqa: E402
++    EP_CHANNELS, EP_IMPLEMENTED, SphereEngine,
++)
++
++# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print 会让脚本 rc=1 假失败）---
++try:
++    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
++    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
++except Exception:
++    pass
++
++V0_SEEDS = (7, 8, 9)
++V0_TICKS = 1500
++V0_ROW_EVERY = 50
++V0_POP = 200        # 🔴 = 仓库默认（出数批实测档，非 10-07 v0 的 400，见模块勘注）
++
++#: 上板读数（板 @`7ddafa0` §三，1500 tick 累计；digest/rng_draws 见 §二）。
++#: 键 = seed，值 = 5 腿累计；单位=能量，round(…, 6) 与 sidecar 同口径。
++BOARD_READOUT: dict[int, dict[str, float]] = {
++    7: {"dis_meta": 248848.38, "dis_move": 21330.90, "dis_attack": 67.70,
++        "dis_signal": 10801.30, "esc_death_e": 29869.18},
++    8: {"dis_meta": 221445.17, "dis_move": 20152.05, "dis_attack": 64.70,
++        "dis_signal": 9196.00, "esc_death_e": 35528.15},
++    9: {"dis_meta": 297313.91, "dis_move": 17794.96, "dis_attack": 57.70,
++        "dis_signal": 11396.80, "esc_death_e": 25892.72},
++}
++BOARD_DIGEST: dict[int, tuple[int, float]] = {7: (670522, 88366.190893)}
++BOARD_RNG_DRAWS: dict[int, int] = {7: 23269}
++
++
++def build_cfg(seed: int, *, pop: int, probe: bool, row_every: int) -> SimConfig:
++    """出数批档（显式覆盖仅 = 初始种群 + 探针开关；其余全走仓库默认）。"""
++    cfg = SimConfig(seed=int(seed))
++    cfg.simulation.use_sim_core = False
++    cfg.population.initial_count = int(pop)
++    if probe:
++        cfg.energy_probe = EnergyProbeConfig(enabled=True, row_every=int(row_every))
++    return cfg
++
++
++def _digest(e: SphereEngine) -> tuple[int, float]:
++    """与 `test_135_energy_calib._digest` / `test_energy_probe._digest` 同口径。"""
++    return (int(e._flat.sum()), round(float(e._energy.sum()), 6))
++
++
++def _ext_usable() -> bool:
++    """本环境是否有**可用**的 sim_core 编译扩展（命名空间空包 ⇒ False）。"""
++    try:
++        import sim_core
++    except Exception:
++        return False
++    return hasattr(sim_core, "step_vectors_stage1")
++
++
++def run_one(seed: int, args: argparse.Namespace, *, probe: bool) -> dict:
++    cfg = build_cfg(seed, pop=args.pop, probe=probe, row_every=args.row_every)
++    e = SphereEngine(cfg)
++    t0 = time.perf_counter()
++    ticks = 0
++    for _ in range(args.ticks):
++        if e.extinct:
++            break
++        e.step()
++        ticks += 1
++    wall = round(time.perf_counter() - t0, 3)
++
++    if ticks != args.ticks:
++        raise RuntimeError(
++            f"自检①失败：seed={seed} probe={probe} 只跑了 {ticks}/{args.ticks} tick"
++            f"（灭绝早停或中断）⇒ 本批读数不可与 v0 同档比，请调小 tick 或换档，"
++            f"不要混账"
++        )
++    totals = e.energy_probe_totals()
++    rows = e.energy_probe_rows()
++    if probe:
++        if int(totals["rows_emitted"]) <= 0:
++            raise RuntimeError(
++                f"自检②失败：seed={seed} 探针开档但 rows_emitted=0"
++                f"（row_every={args.row_every} 写错 = 整批空 sidecar 白跑）"
++            )
++        if int(totals["ticks_recorded"]) != args.ticks:
++            raise RuntimeError(
++                f"自检②失败：seed={seed} ticks_recorded="
++                f"{totals['ticks_recorded']} ≠ {args.ticks}"
++            )
++        if int(totals["rows_emitted"]) != len(rows):
++            raise RuntimeError(f"自检②失败：seed={seed} totals/rows 行数不一致")
++
++    return {
++        "seed": int(seed),
++        "probe_enabled": bool(probe),
++        "ticks_run": int(ticks),
++        "wall_seconds": wall,
++        "digest": list(_digest(e)),
++        "rng_draws": int(e.rng_draws),
++        "pop_n": int(len(e._id)),
++        "totals": totals if probe else {"enabled": False},
++        "rows": rows,
++        "_engine": e,
++    }
++
++
++def _reconcile_run(manifest: dict, r: dict) -> None:
++    """与上板读数逐位对账（板帖为 2 位小数**展示值** ⇒ 通道项按 round(…, 2) 比；
++    digest/rng_draws 是原样整数与 6 位小数，按精确等值比）。"""
++    s = int(r["seed"])
++    bad = manifest["board_reconcile"]["mismatches"]
++    if s in BOARD_DIGEST and tuple(r["digest"]) != tuple(BOARD_DIGEST[s]):
++        bad.append({"seed": s, "field": "digest",
++                    "board": list(BOARD_DIGEST[s]), "actual": r["digest"]})
++    if s in BOARD_RNG_DRAWS and int(r["rng_draws"]) != int(BOARD_RNG_DRAWS[s]):
++        bad.append({"seed": s, "field": "rng_draws",
++                    "board": BOARD_RNG_DRAWS[s], "actual": r["rng_draws"]})
++    for ch, board_v in BOARD_READOUT.get(s, {}).items():
++        actual = r["totals"].get(ch + "_sum")
++        if actual is None or round(float(actual), 2) != round(float(board_v), 2):
++            bad.append({"seed": s, "field": ch, "board": board_v, "actual": actual})
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
++    ap.add_argument("--seeds", default=",".join(str(s) for s in V0_SEEDS))
++    ap.add_argument("--ticks", type=int, default=V0_TICKS)
++    ap.add_argument("--row-every", type=int, default=V0_ROW_EVERY)
++    ap.add_argument("--pop", type=int, default=V0_POP)
++    ap.add_argument("--no-ab", action="store_true", help="跳过 seed7 关/开对拍")
++    ap.add_argument("--no-check-board", action="store_true",
++                    help="跳过与上板读数（@7ddafa0）的逐位对账；换档探索时用")
++    ap.add_argument("--out", default="", help="读数 JSON 输出路径（必填才落盘）")
++    args = ap.parse_args()
++
++    if args.ticks < 1 or args.row_every < 1:
++        raise RuntimeError("ticks / row_every 必须 ≥ 1")
++    seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
++    if not seeds:
++        raise RuntimeError("seeds 为空")
++    check_board = (not args.no_check_board
++                   and tuple(seeds) == V0_SEEDS and args.ticks == V0_TICKS
++                   and args.pop == V0_POP)
++    if not args.no_check_board and not check_board:
++        raise RuntimeError(
++            "默认要求与上板读数对账，但本次参数（seeds/ticks/pop）已偏离出数档 ⇒ "
++            "要么按原档跑，要么显式 --no-check-board 并在产物里另标新档，不许混档对账"
++        )
++
++    manifest = {
++        "tool": "experiments/stepa_leg_readout.py",
++        "purpose": "ENERGY-CLOSE 步A 5 腿量级读数原始件（点火阻塞判据，非结论复算）",
++        "caliber": {
++            "grid": "60x120（7,200 格，仓库默认微型档，非 480×960 正式档）",
++            "initial_count": args.pop, "patch_count": 30,
++            "resource_dynamics": "off", "corpse_enabled": "off",
++            "predation": "on（默认）", "use_sim_core": False,
++            "seeds": seeds, "ticks": args.ticks, "row_every": args.row_every,
++            "protocol_source": "记录-ENERGY-CLOSE步A-旧装置逃逸量级前置实测-20261007.md §一",
++            "deviation_note": (
++                "🔴 与 10-07 v0 装置表**唯一**偏差 = 初始种群：出数批实测用仓库默认 200"
++                "（非 v0 的 400）；seed7 digest (670522, 88366.190893) + rng_draws 23269 "
++                "仅在 pop=200 复现，pop=400 实测 (1239687, 150697.441427) / 30820。"
++                "⇒ 板帖「协议照 v0」在初始种群项不成立，本件按实测档入库；"
++                "比例结论同档自洽不受影响，绝对量级不与 v0 互比。"
++            ),
++        },
++        "channels": {"all": list(EP_CHANNELS),
++                     "implemented": list(EP_IMPLEMENTED),
++                     "uninstrumented_read_none": [c for c in EP_CHANNELS
++                                                  if c not in EP_IMPLEMENTED]},
++        "env": {
++            "python": sys.version.split()[0],
++            "platform": platform.platform(),
++            "sim_core_usable": _ext_usable(),
++        },
++        "board_reconcile": {"enabled": bool(check_board),
++                            "board_commit": "7ddafa0" if check_board else None,
++                            "mismatches": []},
++        "runs": [],
++    }
++
++    # ---- A/B：seed 首值 探针关 vs 开 ⇒ digest + rng_draws 逐位对拍（R401 第一层）----
++    first = run_one(seeds[0], args, probe=True)
++    if not args.no_ab:
++        off = run_one(seeds[0], args, probe=False)
++        ab = {
++            "seed": seeds[0], "arm_off_digest": off["digest"], "arm_on_digest": first["digest"],
++            "arm_off_rng_draws": off["rng_draws"], "arm_on_rng_draws": first["rng_draws"],
++            "bit_equal": off["digest"] == first["digest"],
++            "rng_equal": off["rng_draws"] == first["rng_draws"],
++        }
++        del off["_engine"]
++        manifest["ab_check"] = ab
++        if not ab["bit_equal"] or not ab["rng_equal"]:
++            raise RuntimeError(
++                f"A/B 对拍失败：探针开档改动了行为 {ab} ⇒ 探针不再是只读，禁入库"
++            )
++        print(f"[A/B] seed={seeds[0]} bit_equal={ab['bit_equal']} "
++              f"rng_equal={ab['rng_equal']} digest={tuple(ab['arm_on_digest'])} "
++              f"rng_draws={ab['arm_on_rng_draws']}")
++    else:
++        manifest["ab_check"] = None
++    manifest["runs"].append(first)
++
++    for s in seeds[1:]:
++        r = run_one(s, args, probe=True)
++        manifest["runs"].append(r)
++
++    if check_board:
++        for r in manifest["runs"]:
++            _reconcile_run(manifest, r)
++        mis = manifest["board_reconcile"]["mismatches"]
++        if mis:
++            raise RuntimeError(
++                "自检④失败：与上板读数 @7ddafa0 对账不齐 ⇒ 本次产物不是上板那批，"
++                f"禁入库（先查档/代码漂移）。差异：{json.dumps(mis, ensure_ascii=False)}"
++            )
++        print(f"[对账] 与板 @7ddafa0 逐位齐：digest/rng_draws/5 腿累计 ×"
++              f"{len(manifest['runs'])} run 全中")
++
++    prov = collect(build_cfg(seeds[0], pop=args.pop, probe=True,
++                             row_every=args.row_every),
++                   rng_draws=first["rng_draws"])
++    validate(prov)
++    manifest["provenance"] = prov
++
++    for r in manifest["runs"]:
++        del r["_engine"]
++
++    print(f"\n===== {len(EP_IMPLEMENTED)} 腿累计流量（{args.ticks} tick，"
++          f"单位=能量，非净额）=====")
++    hdr = "seed | " + " | ".join(f"{c:>12}" for c in EP_IMPLEMENTED)
++    print(hdr)
++    for r in manifest["runs"]:
++        cells = []
++        for c in EP_IMPLEMENTED:
++            v = r["totals"].get(c + "_sum")
++            cells.append(f"{v:>12.2f}" if v is not None else f"{'None':>12}")
++        print(f"{r['seed']:>4} | " + " | ".join(cells))
++
++    if args.out:
++        out = Path(args.out)
++        out.parent.mkdir(parents=True, exist_ok=True)
++        out.write_text(json.dumps(manifest, ensure_ascii=False, indent=1,
++                                  sort_keys=True) + "\n", encoding="utf-8",
++                       newline="\n")
++        print(f"\n[落盘] {out}（runs={len(manifest['runs'])}，"
++              f"每 run rows={len(manifest['runs'][0]['rows'])}）")
++    else:
++        print("\n[未落盘] 未给 --out ⇒ 仅打印；入库请指定 --out（读数原始件必须落盘）")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/test_energy_probe.py b/tests/test_energy_probe.py
+index aca9b3f..bf12102 100644
+--- a/tests/test_energy_probe.py
++++ b/tests/test_energy_probe.py
+@@ -364,13 +364,52 @@ def test_probe_read_api_does_not_touch_ledger_arrays() -> None:
+ 
+ # ------------------------------------------------------------------ ③ fail-loud
+ 
++def _ext_usable() -> bool:
++    """本环境是否具备**可用的**编译扩展（`sim_core` 可导入且带关键符号）。
++
++    🔴 不用 `find_spec` 判存在——仓库自带 `sim_core/` 源码目录在未编译机上会成为
++    **命名空间空包**（`sphere_engine.py:778-790` R249 实录），`find_spec` 返回 spec 但
++    模块是空的 ⇒ 用它判档会把 B-2 的第二形误判成"有扩展"，反成新的红。
++    """
++    try:
++        import sim_core
++    except Exception:
++        return False
++    return hasattr(sim_core, "step_vectors_stage1")
++
++
+ def test_fail_loud_rust_path() -> None:
+-    """③ Rust 路径 + 开探针 ⇒ 构造期硬失败（不放行 = 白跑一整批空 sidecar）。"""
++    """③ Rust 路径 + 开探针 ⇒ 构造期硬失败（不放行 = 白跑一整批空 sidecar）。
++
++    🔴 **镜 B-2 修法**（`dd6066c`，PI 22:4x 落"不判红、不阻塞、修法归澜舟"）：本例原先
++    只收 `ValueError` ⇒ 在**无可用 Rust 扩展**的机器上，引擎的扩展守卫（`:770-790`，位于
++    探针闸门 `:900` **之前**）先抛 `RuntimeError`，探针闸门根本没被执行 ⇒ 该处不可复算。
++    两形都收，且各证一事（**不许**退化成"抛了就算过"）：
++      · `ValueError` ⇒ 证**探针闸门**在（消息必须 match 闸门文案）；
++      · `RuntimeError` ⇒ 只允许出现在**本环境确实没有可用扩展**时，且消息必须指向扩展缺失
++        （`sim_core`／`maturin`／Rust）；有扩展却抛 RuntimeError ⇒ = 闸门没被执行 ⇒ 照红。
++    ⇒ 两档环境都必须"构造失败"，白跑空 sidecar 的防线都成立。**出数批 manifest 须声明
++    有/无 `sim_core`**（R401① 独立复算门对齐所需；本批读数原始件已按此登记）。
++    """
+     cfg = _base_cfg()
+     cfg.simulation.use_sim_core = True
+     cfg.energy_probe = EnergyProbeConfig(enabled=True)
+-    with pytest.raises(ValueError, match="energy_probe.enabled=True"):
++    with pytest.raises((ValueError, RuntimeError)) as excinfo:
+         SphereEngine(cfg)
++    err = excinfo.value
++    if isinstance(err, ValueError):
++        assert "energy_probe.enabled=True" in str(err), (
++            f"ValueError 但不是探针闸门 ⇒ {err}"
++        )
++    else:
++        assert not _ext_usable(), (
++            "本环境有可用 sim_core 扩展却撞 RuntimeError ⇒ 探针闸门没被执行到，"
++            f"B-2 第二形不成立（消息：{err}）"
++        )
++        msg = str(err)
++        assert ("sim_core" in msg) or ("maturin" in msg) or ("Rust" in msg) or (
++            "rust" in msg
++        ), f"无扩展环境的 RuntimeError 必须指向扩展缺失，实得：{msg}"
+ 
+ 
+ def test_fail_loud_unknown_channel() -> None:
+-- 
+2.46.1.windows.1
+
+
+From 2111d15783e7a6900290160ce3a3cde21218cf7a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 00:34:22 +0800
+Subject: [PATCH 02/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E8=AE=BE=E8=AE=A1):=20ENERGY-CLOSE=20?=
+ =?UTF-8?q?=E6=AD=A5B=20=E5=AE=88=E6=81=92=E9=97=AD=E5=90=88=E8=AE=BE?=
+ =?UTF-8?q?=E8=AE=A1=E7=A8=BF=EF=BC=88PI=2010-08=2023:4x=20=E7=8F=AD?=
+ =?UTF-8?q?=E5=82=AC=E5=8A=9E=E2=91=A0=EF=BC=8C=E4=BA=A4=E7=A8=BF=E5=8D=B3?=
+ =?UTF-8?q?=E5=80=99=E9=95=9C=E5=AE=A1=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+四核心件 B-1 营养池约束再生 / B-2 归还账户补全（四根只读计数腿，含 assim 回流腿
+`sphere_engine.py:3451` 自述的缺账）/ B-3 热账=Σ_DIS 物理量三硬要求 + 逃逸单列 / B-4 补捕食扣减；
+§四 闭合语义两形态（甲整份转移/乙蒸发入账）候 PI→fish 会签，本稿倾向乙仅标[非裁定]；
+§五 config 面与纪元（默认关逐位 + 指纹变行为不变 + `ec_ledger_v2` 禁并表 + 快照白名单 fail-loud）；
+§六 埋点锚照 §六⑴ 两支口径（符号主/行号辅，含 10-07 E2 行 `:4663-4677`→`:4841-4867` 勘注、
+默认关档只落第一支、集合边界按轻舟丙法写并候砚裁、E2 开档记真 0）；
+§七 不变量门位置（`:547`/`:6027` 自述"非守恒检验"⇒ 新门须独立算式）+ 变异靶 M4/M5；
+§八 性能 ≤1.10 门 + 机时判级改引点火程序令 @dda9d5d / R402（作废措辞不再引用）；
+§九 生态门按砚#5 强冲击分支默认启动；§十 切批 B-α（零行为，2.5–3 人日）/B-β（换纪元，5–8）；
+§十一 风险与未决逐条标 [假设]/[待裁定]。
+
+🔴 零行为面：本批只加一个 docs 文件，未触任何 .py。
+---
+ ...1\222\351\227\255\345\220\210-20261009.md" | 200 ++++++++++++++++++
+ 1 file changed, 200 insertions(+)
+ create mode 100644 "docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241-ENERGY-CLOSE\346\255\245B-\345\256\210\346\201\222\351\227\255\345\220\210-20261009.md"
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241-ENERGY-CLOSE\346\255\245B-\345\256\210\346\201\222\351\227\255\345\220\210-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241-ENERGY-CLOSE\346\255\245B-\345\256\210\346\201\222\351\227\255\345\220\210-20261009.md"
+new file mode 100644
+index 0000000..8164a87
+--- /dev/null
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241-ENERGY-CLOSE\346\255\245B-\345\256\210\346\201\222\351\227\255\345\220\210-20261009.md"
+@@ -0,0 +1,200 @@
++# 设计 · ENERGY-CLOSE 步B —— 守恒闭合（机制面）
++
++> 版本 2026-10-09｜作者 澜舟 `[开发·二线]`｜分支 `task/ENERGY-CLOSE`｜代码基线 `93342ed`
++> 审阅路由：成稿 @镜 代码/设计审核（R383④，不通过按稿修复、计轮次）；集合边界与判据口径 @砚；
++> 资源与切批 @PI；闭合语义两形态（§四）由 PI→fish 会签。
++> 🔴 本稿是**设计稿**，不含任何行为改动实装；§二 引用的他人裁定一律**只引用、不改写**。
++> 标注法：`[代码实测读]` = 我在本分支直读/实跑；`[板]` = 讨论板既有裁定；`[外推]` = 他人量级估算；
++> `⚠️[假设]` = 未验证前提；`🔴[待裁定]` = 非我权限，产出按最保守可行形态写。
++
++---
++
++## §一 定位：步A / 步B 边界与否决项
++
++| | 步A（在途，已交付 5/7 腿） | 步B（本稿） |
++|---|---|---|
++| 性质 | **纯记账**：只读 sidecar 探针，零行为变更 | **机制变更**：改能量流本身 ⇒ 换纪元 |
++| 关档 | 逐位等价（C7 钉死基线 `(574887, 11266.746993)`） | 逐位等价（同纪律，另立基线锚） |
++| 指纹 | 挂 `SimConfig` ⇒ **指纹变、行为不变**（已写明） | 三本账进 config ⇒ 指纹变**且行为可变** |
++| 结论权 | 只出量级/点火阻塞判据 | 闭合声明须过 §七 不变量门 + §九 生态门 |
++
++🔴 **本稿明确否决/排除**（写了就不做，防越界）：
++1. **不动** `EC_*` 枚举与 `energy_ledger` 列面 `[板]`（轻舟约束 1 + 砚⑤）⇒ 步B 新账走**新 sidecar 键 / 新列族**，`tools/calib_solve.py` 现列面消费者零改动。
++2. **不提前**改 `SimConfig` 指纹：三本账成物理量之前不入 config `[板]`（镜：步A 不得提前改指纹）⇒ 本文只给落点，实装随 B-β 批。
++3. **不复用**步A 探针链路做 S0 复算（R394）⇒ 复算脚本届时另立。
++4. **热账不当配平尾差**`[板]`（镜，`test_o7` 假绿同族教训）⇒ §三 B-3 必须是独立通道驱动的**物理量**。
++5. **不裁语义**：被食者能量"整份转移 vs 蒸发入账"是选择题不是工程题 ⇒ §四 候 PI→fish 会签，本稿两形态都写、都不默认选。
++6. 不在步B 里顺手做性能优化以外的行为改动（一次批一件事，门才好守）。
++
++---
++
++## §二 设计输入登记（只引用，不改）
++
++- **砚 口径 #3/#4/#5/#6**`[板 :1114/:1118]`：
++  - #4「读不扣」= **账目口径**问题（E2/E3 按旧纪元既有逃逸入账），**不是 bug 定性**；闭合语义两形态归步B 会签。
++  - #5 注入 ≤10⁻²×摄入通量 才算弱扰动；实测净逃逸/摄入通量中位 **0.106–0.120**、p95 0.23–0.33 ⇒ **强生态冲击分支默认启动**（§九）。
++  - #6 热账 = Σ_DIS 照准，但**逃逸不入热账**，散逸/逃逸**分列**。
++  - #2 禁 `net` 验 A2（同因：不得从累加器反推）。
++- **砚 B 定义面**`[板 :761]`：B1 换纪元 EC 列加版本标记 `ec_ledger_v2`，两纪元**禁并表**；B3 尸体族**计数列**跨纪元可比、**能量通量列**禁；B4 热账两项 → 三项。
++- **镜 审核门**`[板 :744/:745]`：热账须物理量、逐事件可核；三条归因坑——
++  ① `_corpse_decayed_e` 已计 decayed，勿重复入账 `[代码实测读]`（`:1751/:1858`）；
++  ② `corpse_cap_per_cell` 钳制丢的那段（`_corpse_overflow_e`，`:1749/:1832-1836`）= **可修 bug，不是热**；
++  ③ 腐烂归还受容量封顶（`room`/`put`，`:1861-1866`）⇒ **未吸收回流须先补计数**，再谈闭合。
++- **轻舟 E2/E3 ack**（`.qoder-collab-runtime/msg_e2e3_ack.md`，2026-10-08 22:0x）：放行、无附加前置；赠送锚公开作废 ⇒ E2 引擎侧现场直记；**集合边界三选一**（甲/乙/丙，轻舟推丙）待砚裁；E3 必须真埋点（`np.minimum` 封顶不可反推、三行 `_s0/_sp` 前后差、禁拆 if/else、两处结算点同式）；sidecar 补 `corpse_on` 布尔（零新 config ⇒ 指纹不再变）；性能门 on/off 中位比 ≤1.10（≥2000t，A7 口径），超标改形。
++- **PI 22:0x 注释级更正**：已随 `1117a26` 落码（`sphere_engine.py:4833-4845` 块），本稿**只引用、不再改**。
++- **PI 步B 四核心件**`[板 :1326]` ⇒ 展开为 §三 B-1…B-4。
++
++---
++
++## §三 四核心件
++
++### B-1 营养池约束再生（补"物质预算"）
++
++**病灶**`[代码实测读]`：再生由 `_regrowth_amount(tick)` 给出、`new = _grid[idx] + growth` 后按 `_capacity` 封顶（`world/resource_field.py:440/:496-500/:504`；引擎侧管线 `sphere_engine.py:1875-1888`、`:2893-2970`）⇒ **增长不从任何有限池取料**：被吃掉的能量与再生产生的能量之间没有物质守恒关系。板引行号 `:1019/:3283` 是当时读者所在分支的锚，符号锚为准。
++
++⚠️ 关键澄清：**已有的 `ResourceDynamicsConfig`（`config.py:1206-1265`，默认关）不是守恒装置**。它给的是"取食压力→斑块休耕/死亡"的**负反馈**（产能时变），regrowth 仍然 ex nihilo ⇒ 开了它也**补不上物质预算**。步B 若把它当守恒件用 = 把反馈机制冒充预算约束，判据直接废。⇒ B-1 是**新增**，与 `resource_dynamics` 正交并存。
++
++**设计（最小形态）**：
++- 新增**全球营养池**标量 `nutrient_pool`（或逐格 `soil[n]`，两形态见下）：
++  - 进料 = 步B 归还账户（B-2）的**实际被吸收**部分（不是"意图归还"）+ 尸体腐烂被吸收部分；
++  - 出料 = `_regrowth_amount` 实落值（**受池余额钳制**，非名义值）；
++  - `growth = min(名义 growth, 可取份额)` ⇒ 取不满的那部分留池、下 tick 可再取（**不得静蒸发**，须记 `unmet_growth`）。
++- 落点：**新文件** `world/nutrient_pool.py`（纯逻辑、零引擎依赖，同 `world/resource_dynamics.py` 先例）；引擎只在 regrow 段前/后各一次调用，`enabled=False` ⇒ 全部方法 no-op ⇒ 关档逐位等价。
++- ⚠️[假设] 逐格池 vs 全球池：全球池实现最省（1 标量 + 3 处接线），但会把空间异质性抹平（赤道取料可补极点），生态面可能失真。**推荐逐格池**（`soil = np.zeros(n_cells)`，+1 数组），代价见 §八。
++
++### B-2 归还账户补全（先补计数，零行为变更）
++
++**病灶**`[代码实测读]`：
++- 腐烂归还 `ret = corpse_energy × corpse_to_plant_frac`（`:1860`）→ `put = min(ret, room)`（`:1861-1864`）⇒ **`ret − put` 现在没有任何计数**（镜③）。
++- 投放侧 `np.clip(_corpse_energy, 0, cap)`（`:1836`）丢的量已有 `_corpse_overflow_e`（`:1749/:1834-1835`），但它是**可修 bug**，镜② ⇒ 不得混进热账。
++- 食腐/胃容量封顶同理：`_step_scavenging` 的 `room = max(0, stomach_cap − stomach)`（`:1917`）⇒ 取而不满的部分同样需要账户。
++
++**设计（B-α 批，纯计数）**：新增四根只读计数腿（走 sidecar 新键，**不进 `EC_*`**）：
++`ret_unabsorbed_e`（腐烂归还被容量顶掉）、`scav_unmet_e`（食腐被胃容顶掉）、`deposit_overflow_e`（已有 `_corpse_overflow_e` ⇒ 只需**披露为账户项**并在判读侧与热账分列）、`assim_unreturned_e`（吸收未同化回流腿）。
++最后一根的现状 `[代码实测读]`：`_ah/_ac/_ar` 读自 `:3452-3454`，回流仅在 `_ah<1.0 or _ac<1.0` 时算 `_back`（`:3465-3466`），代码自述 `:3451`「未吸收回流目前只落回植物池、**无独立账户**（S3 前补一个计数）」⇒ 默认双吸收率 1.0 时该腿**结构恒零**（砚#3）⇒ ① 判读按**运行时生效值**、`_ah/_ac/_ar` 三者**回显进 manifest**（禁以默认值代实测）；② 计数腿照记（恒零也要记 0，与 `None` 分开）。
++⇒ 四腿全部零行为变更、零 RNG、默认关档零开销；**这批可以走在步B 机制之前**（§十 B-α），因为它是"先把账看清"的前置。
++🔴 判据纪律：补完计数后**必须先重跑 §八 的 5 腿读数**，拿"未归还占比"回来再谈 B-1/B-4 的语义。
++
++### B-3 热账（Σ_DIS，物理量，逃逸单列）
++
++**定义**（照 砚#6 + 镜物理量门）：`HEAT = Σ DIS_散逸腿`，即 `dis_meta + dis_move + dis_attack + dis_signal`（步A 已实装 4/4 散逸腿 `[代码实测读]`：扣费现场直记，如 `dis_attack` 在 `:4815-4818`）。
++- 🔴 **物理量三条硬要求**（否则 = 配平尾差，`test_o7` 假绿同族）：
++  1. **逐事件现场直记**：只在扣费/流失发生处 `_ep_add(...)`，不从任何累计量反推（砚#2）；
++  2. **独立通道驱动**：HEAT 由通道求和得到，**不参与**残差配平；恒等式两侧各算各的；
++  3. **可核**：sidecar 行带 `{tick, pop_n}` 锚 + `corpse_on` 布尔 ⇒ 可与主 CSV 逐 tick 回 join。
++- **逃逸（ESC）单列**：`esc_death_e`/`esc_pred_e`/`esc_pred_s` 不入 HEAT；散逸/逃逸分列成两本账（砚#6）。
++- 砚 B4：热账"两项→三项"⇒ 本稿采 **三本账**：`INTAKE`（摄入，含 photo）/ `HEAT`（散逸）/ `ESC`（逃逸）+ 一张 `BALANCE` 表做恒等核对（`BALANCE` 是**核对表不是账**，禁止往里塞配平项）。
++
++### B-4 补捕食扣减（被食者能量真正离场）
++
++**病灶**`[代码实测读]`（`predation` 结算段 `:4800-4906`）：
++- 成功一击支（site-1，`:4841-4867`）：`_tr = float(energy[prey]) × transfer_ratio`（`:4859`）加给攻击者，**`energy[prey]` 全程只读不扣**，被食者随后在同 tick 死亡压缩里移出槽位；`transfer_ratio` 默认 **0.4** ⇒ 每击杀净蒸发 `(1−0.4)×E_prey`（PI 22:0x 更正块 `:4833-4845` 已把这个口径钉进注释）。
++- 血条致死支（site-2，`:4880-4898`）：同构问题（`stomach[prey]=0.0` 在 `:4898`）。默认 `wound_enabled=False` ⇒ site-2 整段不可达，但**实装必须两处同式**（轻舟 ack：只加 site-1 = 把 R391 C-B 踩过的洞原样搬进来）。
++- `stomach[idx] = np.minimum(stomach[idx] + stomach[prey] × stomach_transfer, cap)` ⇒ **封顶丢掉的那份也蒸发**，且现无计数（E3 的 `esc_pred_s` 就是补它，不可用 `stomach_transfer` 反推）。
++
++**设计（B-β，行为变更）**：`energy[prey] -= _tr`（转移额）+ 剩余 `E_prey − _tr` 按 §四 会签形态处置；同式两支点。
++🔴 这条**必然**改 digest ⇒ 只能进换纪元批（§五），且开启前后各留一套钉死基线。
++
++---
++
++## §四 闭合语义两形态（候 PI→fish 会签）
++
++同一笔"被食者没被吃走的那份能量"，两种合法闭环语义：
++
++| 形态 | 语义 | 守恒式后果 | 代价 |
++|---|---|---|---|
++| **甲 · 整份转移** | `transfer_ratio` 改为**整份**进入攻击者/尸体（不蒸发） | ESC 腿里 `esc_pred_*` 归零 ⇒ 账最干净 | **改营养动力学**：捕食收益 ×2.5（0.4→1.0）⇒ 强生态冲击（砚#5 之上再叠），须重跑生态门全套 |
++| **乙 · 蒸发入账** | 保留 0.4 转移，`(1−frac)` 记为**逃逸腿**（真离场、进不了任何账户） | 三本账恒等可核：`INTAKE = HEAT + ESC + Δ存储` | 需要 E2/E3 埋点先落地（步A 尾），否则 `ESC` 缺腿对不平 |
++
++**我的技术倾向（⚠️[非裁定]）**：乙。理由只有一条工程性的——乙**不需要**在本批重新标态强度（甲把收益改了 2.5 倍，等于把 B-1/B-4/生态三件事塞进一批，门守不住）。若 fish 选甲，建议**拆两批**：先乙（补账可核），再单独评估收益倍率是否调回。
++🔴 会签前 B-4 **不实装**；B-2/B-3 不受此选择阻塞（§十）。
++
++---
++
++## §五 config 面与纪元
++
++1. **新配置**（B-β 才进 `SimConfig`）：`NutrientPoolConfig`、`PredationClosureConfig`（形态位）、`HeatAccountConfig`（口径版本）；全部 `enabled=False` 默认 ⇒ 关档逐位等价；`from_dict` 显式接线 + **字段白名单**（照 `EnergyProbeConfig`/`_ENERGY_PROBE_FIELDS` 先例，`config.py:1418-1452`）⇒ 旧档缺键回退全关，**不许静默续跑**。
++2. **指纹**：进 `SimConfig` ⇒ 经 `asdict` 自动进 `fingerprint()` ⇒ 跨档续跑被拦；commit/manifest 须写明"指纹变、行为不变（关档）"。
++3. 🔴 **纪元标记（砚 B1）**：能量列族加版本标记 `ec_ledger_v2`；两纪元**禁并表**（`tools/*` 消费者按标记分流）。
++4. **可比性（砚 B3）**：换纪元后**尸体族计数列**（`_corpse_eaten_n`/`_corpse_deposited_e` 等事件的"次数"）跨纪元可比；**能量通量列**禁跨比（R320/R218 同律）。
++5. **快照**：新列进 snapshot 须带 `SNAPSHOT_VERSION` 语义声明 + fail-loud（照 `test_fail_loud_old_snapshot_with_probe_enabled` / `test_snapshot_rejects_probe_config_drift` 先例）；旧快照遇开档配置 ⇒ 硬失败，不放行静默归零。
++6. **Rust 面**：探针只在 Python 路径可用（`:900-908` 构造期硬失败）。步B 若把再生/归还下沉 Rust，**双路径逐位对拍**是验收门之一（AGENTS.md 关键约束 1），本稿阶段先不实装下沉。
++
++---
++
++## §六 埋点锚（照我 §六⑴ 两支口径；符号锚为主、行号为辅 —— PI 裁④/砚 永久法）
++
++**⑴ 两支口径**`[代码实测读 @93342ed]`：
++- **第一支（成功一击，`wound` 无关）**：起 `for k, idx in enumerate(attackers)`（`:4800`）→ 扣费现场 `self._ep_add("dis_attack", pcfg.attack_cost)`（`:4818`）→ site-1 结算块 `self._ec_prey_e_sum += float(energy[prey])`（`:4848`）/ `_ec_prey_kill_n += 1`（`:4849`）→ `_tr = float(energy[prey]) * pcfg.transfer_ratio`（`:4859`）→ **止于** `stomach[prey] = 0.0`（`:4867`）。
++- **第二支（血条致死，`wound_enabled=True` 才可达）**：同循环内致伤块 `:4870-4898`，`health[prey] <= 0` 分支的 `_ec_prey_e_sum`（`:4880` 附近）→ `_tr` → **止于** `stomach[prey] = 0.0`（`:4898`）。
++- **覆盖判定双腿算**：`real_attempts`（`:4814`）为分母；两支任一命中即记事件，**不得只统计第一支**（轻舟实测 seed221/mini 100t/`wound_base=1.0` ⇒ site-2 命中 19/54）。
++- **循环外统一记账不计埋点**：R141 的 `if _atk_amt: self._ec_add(...)` / `if _pred_amt: ...`（`:4902-4906`）是**批量账**，与 `_ep_*` 无数据通路 ⇒ 埋点一律在循环内现场记（轻舟 ack 二：赠送锚已作废，`test_dis_meta_is_not_a_copy_of_the_channel_ledger` 钉着）。
++
++**⑵ 勘注（同批必发）**：10-07《通道枚举与A2三账口径》里 E2 行记的 `:4663-4677` **已过期**（步A 埋点插行 ⇒ 现号 `:4841-4867`）。符号锚不变，行号按上表勘正。
++
++**⑶ 默认关档只落第一支**：`wound_enabled=False` ⇒ 第二支不可达 ⇒ 默认档读数**只含第一支**；任何"两支都已覆盖"的表述都必须附 `wound_enabled=True` 的对照跑，否则视为口径不实。
++
++**⑷ 集合边界（🔴[待裁定] 砚）**：轻舟 ack 三指出 E1/E2/E3 **现在不是 partition**（`dead = starved | expired | predation_mask` ⇒ 捕食受害者**在** E1 掩码内；开档时 E2 完全落在 E1 内）。三选一（甲：E1 改 `dead & ~predation_mask`；乙：E2 只作 E1 子项披露；**丙：E1 埋点不动，判读侧用 `EC_PRED` 扣 E1 得真值，E2 仍现场直记作独立校验腿**——轻舟推丙、零引擎返工）。**本稿默认按丙写**（不改已交付读数），若砚裁甲/乙则 §六⑴ 与相关测试随之返工，计一轮。
++E2 开档（`corpse_enabled=True`）语义 = **真 0**（进尸体、非逃逸）⇒ 按"0 与 None 分开"律记 0 不记 None；该口径同样候砚落 §七bis。
++
++---
++
++## §七 守恒不变量门禁位置 + 变异靶
++
++**门的位置**（先定位置，再定值）：
++1. `step()` 末（现有 `_audit_*` 段之后）加**构造恒等 vs 实测恒等分离**：现有 `_audit_*` 是**构造恒等（A1）**——代码自述 `[代码实测读]` `:547`「定位 = 对账……**不是**守恒检验」、`:6027`「本字段是"对账"而非"守恒检验"，它抓不到」、`:6045` `role: …非守恒检验` ⇒ 新门必须用**独立算式**（通道现场累计）核对 `INTAKE − HEAT − ESC − Δ存储 ≈ 0`，容差随 §八 实测标定。
++   ⚠️ 顺带勘注（零行为面，随 B-α 批）：`sphere_engine.py:4839-4840` 的 PI 22:0x 更正块内**引用**的 `:527`/`:5842` 两个行号是当时读数，现分支已漂到 `:547`/`:6027` ⇒ 只改注释内行号、符号锚不动。
++2. 门只在 `enabled=True` 时执行 ⇒ 关档零开销、零 RNG 消费。
++3. fail-loud：容差超阈 ⇒ 抛错停批（不写"疑似漂移"日志继续跑）。
++4. 合成闭环硬零门沿用步A《记录-ENERGY-CLOSE步A-合成闭环硬零门-20261007.md》，新增 **M4/M5** 变异靶进验收：
++   - **M4**：把 `_tr` 加给攻击者的行注释掉 ⇒ `ESC` 与 `INTAKE` 必须变红（证 E2/E3 真在核这条腿）；
++   - **M5**：把腐烂归还的 `put` 改成 `ret`（去掉容量封顶）⇒ `ret_unabsorbed_e` 必须变红（证 B-2 计数腿不是装饰）。
++   两靶都要求"变异必红"，与步A 5/5 红同标准；靶名进测试 docstring 便于回溯。
++
++---
++
++## §八 性能与机时
++
++- ⚠️[外推]（轻舟，板 `:900`）：营养池 3–5 个全场数组 + 吸收/归还 ⇒ **+15–60 ms/t**；2k run 267–356 s（1.13–1.5×）、60k 批 1.5–2.1 天 ⇒ **可承**，但须实测复核。
++- **门**：on/off 中位比 **≤1.10**（≥2000t，A7 基线口径）；正式门归轻舟 C1 T10 档，本线只跑 mini 先声（自报口径已认）。
++- **超标改形**（不动探针语义）：循环内只 `list.append`、tick 末一次 `sum()`（D6/E2 的 per-attempt 标量加法是主要税源；轻舟 R288-T1 用同法压掉 11.6 ms/t 的 cos 税，可直接抄）。
++- **机时判级**：🔴 不再引用"单 run ≥20000 tick 须请示"（PI 10-09 勘正：该句作废）⇒ 以 **owner 放行 S0 长实验轴 @`c269d08`** + **点火程序令 @`dda9d5d`** 为准，按 **R402 长/短分级授权**判级。
++
++---
++
++## §九 生态门（先门后结论）
++
++- 砚#5：净逃逸/摄入通量中位 0.106–0.120 远超 10⁻² ⇒ **强生态冲击分支默认启动**（不是"如果崩了再看"）。
++- 要求：① **预写崩盘中间态**（N 半衰 / 断殖 / 单极化三档形态各写判读口径，免得事后凑叙事）；② 新装置先跑 **mini 生态门**（微型档 ×≥3 seed 存活至目标 tick）再谈守恒结论；③ 正式生态门沿用 R3/R6：**≥5 seed 多数存活、N 稳定 >0 持续 50k tick**，不过门 ⇒ 步B 任何正面/负面判读**视为不可执行**。
++- **判读归砚**，本线只出数与门状态。
++
++---
++
++## §十 切批建议 + 人日自估 + 验收门
++
++| 批 | 内容 | 行为 | 纪元 | 人日（⚠️[假设] 单人） |
++|---|---|---|---|---|
++| **B-α**（可即刻，走在步A 尾） | E2/E3 埋点（时序采甲：E2/E3 → #11 `alpha_W` 定名 → #10 谷窗）+ B-2 三根计数腿 + `corpse_on` sidecar 布尔 + §六⑵ 勘注 | **零**（只读） | 不换 | 2.5–3 |
++| **B-β**（候 §四 会签） | B-1 营养池（逐格）+ B-4 补扣减 + 三本账进 config + `ec_ledger_v2` 标记 + 不变量门 + M4/M5 | 改 | **换** | 5–8（含双路径对拍与生态门全套） |
++
++🔴 合计自估 **7.5–11 人日**，但 B-α 与 B-β 之间有**外部阻塞点**（§四 会签 + §六⑷ 砚裁 + 标定批鱼印②），不可并行压缩。
++**验收门（逐条，缺一不算交付）**：① 默认关档逐位等价（新钉基线 + C7 不动）；② 不消费 RNG；③ fail-loud（含旧快照/跨档续跑/Rust 路径三形）；④ 靶向测试 + 变异靶 M1–M5 全红；⑤ A/B 对拍 `bit_equal && rng_equal`；⑥ 性能门 ≤1.10；⑦ 生态门状态明示；⑧ 读数原始件落盘 + manifest 登记档偏差；⑨ provenance 含 `code_tree_sha256` + 干净树。
++
++---
++
++## §十一 风险与未决（假设标注）
++
++1. 🔴[待裁定] §四 闭合语义两形态 → PI→fish 会签；本稿倾向乙是**技术倾向非裁定**。
++2. 🔴[待裁定] §六⑷ E1/E2/E3 集合边界（甲/乙/丙）→ 砚；本稿按丙写。
++3. 🔴[待裁定] 砚 §7.2 `cost_meta` 列面口径（在途，未闭）。
++4. ⚠️[假设] 营养池采**逐格**形态；全球池若被选，§八 量级与 §九 生态冲击评估都要重做。
++5. ⚠️[假设] B-1 进料只取"实际被吸收"部分；若裁定改为"意图归还"入池，池会被顶掉的量污染 ⇒ 需另加 `unmet` 腿，本稿按前者写。
++6. ⚠️[假设] `transfer_ratio=0.4` 的 0.4 份在本纪元**不追改**（砚#4：账目口径问题，非 bug）。
++7. 风险：B-β 一旦开档，与历史全部能量读数**禁并表**（砚 B1）⇒ 上板须同步广播"纪元切换点"，否则跨比误用会追不回来。
++8. 风险：步A 读数批的 `pop=200` 档勘正（板将另发）⇒ §八 量级若沿用该读数，绝对值不与 10-07 v0 同档可比，只可用比例。
++
++---
++
++**【交球】** @镜 审本稿（R383④；重点 §三 B-3 物理量三条 / §六 两支口径 / §十 切批）；@砚 裁 §六⑷ 集合边界 + E2 开档记 0 口径 + §七bis 10–11 序备注；@PI §四 两形态上呈 fish 会签、`alpha_W` 落点（只落 `s0_kernel/` 还是进 `SimConfig`）一拍。B-α 不等任何人：镜过稿即动笔。
++
++—— 澜舟 🛥️ `[开发·二线]` 2026-10-09
+-- 
+2.46.1.windows.1
+
+
+From d8b8b46ee4111abbe6f5d149f414f9b6e0713d4c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 00:51:49 +0800
+Subject: [PATCH 03/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E9=A2=84=E6=B3=A8=E5=86=8C):=20H2=20?=
+ =?UTF-8?q?=E8=90=BD=E7=AC=94=E2=80=94=E2=80=94F0=20#10=20attack=5Fcost/k?=
+ =?UTF-8?q?=20=E8=B0=B7=E7=AA=97=E5=A3=B0=E6=98=8E=20+=20#11=20alpha=5FW?=
+ =?UTF-8?q?=20=E5=AE=9A=E5=90=8D=20+=20A=20=E8=87=82=E7=A7=BB=E6=A4=8D?=
+ =?UTF-8?q?=E5=8F=A3=E5=BE=84=EF=BC=88owner=20=E6=80=A5=E4=BB=A4=E7=AC=AC?=
+ =?UTF-8?q?=E4=B8=80=E4=BC=98=E5=85=88=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+#11 定名 alpha_W（符号 α_W／机读 alpha_W 双形；裸 alpha 与 pleasure.alpha=0.05、hunger_mod.alpha=0.5 撞名实测在案）；
+落点=只在 s0_kernel/arms.py、不进 SimConfig（三条理由，PI 可翻不返工：指纹不变+轻舟约束3不需口头承诺+24run降级路与落点无关）；
+B 臂运行批 1.0／Z2 对照批显式 0.0 且 f(g,n) 短路不算（不消费 RNG）；A 臂记 null 不记 0.0（"该项不存在"≠"系数为零"，同"未观测≠0"律）。
+#10 定参 attack_cost=0.1／forage_tradeoff_k=0.0 ⇒ 对 R197 谷窗 cost×[250,500] 落窗外，
+且两种 cs 单位读法（倍率⇒窗外250×；绝对⇒窗外1000×）都成立 ⇒ 声明不依赖待核口径；
+配机读五字段 + Pre-Flight 硬门 C-A11（cost≥25.0 或 k≠0 ⇒ inside_window ⇒ 单列不进主 2×2 并报砚+PI）
++ 新增建议 probe_valley 造谷 run 禁入正式批/禁入 Z1（δ 峰位阈标定污染）。
+A 臂移植按永久法符号锚逐位映射到现分支（enumerate(attackers) :4800／掠得腿 :4859-4867 与 :4890-4898／
+非移植面 :4902-4906；旧锚漏项 attack_cost+success_rate 补抄），并写死纪元取舍：A 臂=旧纪元账面公式，
+禁把步B 补扣减或整份转移混进 S0（污 A/B 差分+跨纪元比）。
+H5 结论=两臂可对齐 ⇒ 不升待裁点（附"若 A 臂改解析网格才是真分歧须回板重裁"边界）。
+§四 差分表 10 条供砚并稿；§五 跑前实话：arms.py 我即刻开工（2-3h），chain 脚本 run_one 只改 1 行、候砚 ack，
+C1-C8+冒烟+计时/置换两项不被我阻塞可即刻并行。🔴 零行为面：只加一个 docs 文件。
+---
+ ...\345\217\214\350\207\202S0-H2-20261009.md" | 114 ++++++++++++++++++
+ 1 file changed, 114 insertions(+)
+ create mode 100644 "docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md"
+
+diff --git "a/docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md" "b/docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md"
+new file mode 100644
+index 0000000..2328f3c
+--- /dev/null
++++ "b/docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md"
+@@ -0,0 +1,114 @@
++# 落笔 · 双臂 S0 —— H2（F0 填值位 #10 ＋ #11 ＋ A 臂移植口径）
++
++> 作者 澜舟 `[开发·二线]`｜2026-10-09｜代码基线 `task/ENERGY-CLOSE@2111d15`（干净树，已 push）
++> 应令：owner 急令（PI 转 08:1x）「H2 提第一优先，实验优先于并行文面」＋ PI 00:5x「H2＝S0 唯一串行阻塞」
++> 承接对象：`docs/预注册/预注册-双臂S0-正式版-填值位标注-20261008.md` §七bis #10/#11、§二 A 臂定义、§七 H2/H5（@`task/S0-PREREG`）
++> 纪律：本稿**不改砚的预注册正文**，只落 H2 三件＋与预注册文本的差分；并稿与 §七bis 勾位归砚，会签归 PI。
++> 标注：`[代码实测读]`＝我在上述基线直读；`[板]`/`[稿]`＝他人裁定只引用；`⚠️[假设]`/`🔴[待一拍]`。
++
++---
++
++## §一 #11 `alpha_W` 定名（落笔即闭，缺键→24 run 那条路**已被本笔消掉**）
++
++1. **键名 = `alpha_W`**（ASCII，dataclass 字段／JSON 键／manifest 行三处同形，不引变体）。
++   - 符号层同时披露两形：`α_W`（公式符号，镜建议使用名 `[稿 §二:44]`）／`alpha_W`（机读键）。判读文本用 `α_W`，任何机读面只用 `alpha_W`。
++   - 撞名核实 `[代码实测读]`：config 里已存在 `pleasure.alpha=0.05`、`hunger_mod.alpha=0.5`（＋各自 `beta`），另有 MSD 指数 `α` 的文献用法 ⇒ **裸 `alpha` 必撞**；带 `_W` 后缀的 `alpha_W` 在 `simulation/config.py` 全字符面**零命中** ⇒ 定名成立。
++2. **落点 = 只在 `s0_kernel/arms.py`（`ArmOptions.alpha_W`），不进 `SimConfig`。** 🔴[待一拍] PI 可翻，但翻与不翻都不返工读数，理由三条：
++   - ① 引擎里**没有** `W(g,n)` 这个量：双臂获取函数是 harness／判读侧构造（`[稿 §二:31]`「同一 harness（s0_kernel 家族独立 MVP）」），进 `SimConfig` 会留下"引擎消费它"的错读；
++   - ② 不进 ⇒ **主仓 config 指纹不变** ⇒ 轻舟约束 3（快照 drift/`from_dict` 白名单/fail-loud）不需要靠口头承诺兜，也不用占她 C1 T10 档代做 config 面（她的 ack 六原文就是"落点请 PI 一拍"）；
++   - ③ 与 24-run 降级风险**无关**：那条只问"键存不存在、能不能显式置 0"，不问键住在哪个 dataclass。
++   - 若 PI 裁"进 `SimConfig`"：我保持定名不动，`ArmOptions.alpha_W` 留作 harness 读取口 ＋ 一处 alias 转发；config 面（默认值／白名单／drift 拒／指纹声明）按轻舟 ack 由她线代做。
++3. **类型与语义（写死，防"0 与 None 混读"）**：
++   - B 臂：`alpha_W: float`，**运行批 = 1.0**（`W(g,n)=W₀(g)+1.0·f(g,n)`），**Z2 对照批 = 0.0**（显式覆写，不靠默认值兜）；
++   - B 臂 `alpha_W == 0.0` 时 `f(g,n)` **短路不算**（不是"算完乘 0"）⇒ 零对照的"构造上不该出谷"由代码路径保证，且**不消费 RNG、不占额外数组**；
++   - A 臂：`alpha_W = null`（**未消费**），禁止记成 `0.0`——`0.0` 在本实验里是 Z2 零对照的**专用语义**，A 臂的"无显式频率依赖"是"该项不存在"，与"该项系数为零"不同命题（同我探针"未观测≠0"一条律，砚⑥）。
++   - A 臂重复批**不需新键** `[稿 §七-H2]`：重复批＝同 seed 集独立重跑，走既有 seed 轴，我不动任何键。
++4. `f(g,n)` 的**形式**不属本笔（属 B 臂 `W_mr` 设计面，H-1／H5 线）；本笔只定：键名／形状（`g∈[0,1]` 原始轴，禁分位·秩变换 `[稿 §七bis v1.1.3①]`；`n`＝同格可猎个体数）／消费点／0 与 null 的语义。
++
++---
++
++## §二 #10 `attack_cost`／`k` 与 R197 谷窗关系声明（辅件 (i) 的机读形）
++
++**定参（A 臂＝现公式臂，取引擎默认，本批不动这两个旋钮）**`[代码实测读]`：
++
++| 量 | 值 | 源 |
++|---|---|---|
++| `predation.attack_cost` | **0.1** | `config.py` PredationConfig 默认（进 `config_fingerprint`） |
++| `predation.forage_tradeoff_k` | **0.0** | 同上（引擎消费点 `sphere_engine.py:3602`） |
++
++**声明**：E-034/R197 的有谷窗口 ≈ `attack_cost × [250, 500]`（`[稿 §二:35 引 docs/实验记录.md:54]`），基准倍率 ×1 = 当时的默认 cost ⇒ **A 臂落点 = ×1，在窗外，且距窗左边界 250 倍**。
++
++🔴 **该声明不依赖一个 [待核] 口径**（我两条都验，所以窗外性稳）：R197 原文里 `cs` 有两种可读单位——
++- 读法甲：`cs` = 倍率 ⇒ 窗 = `[250,500]×` = 绝对 `attack_cost ∈ [25.0, 50.0]`；A 臂 0.1 ⇒ 窗外 **250×**；
++- 读法乙：`cs` = 绝对 cost（配 k=2 解析式 `g* = 0.1 + 0.002·cs`，`cs>100` 必有内部驻点）⇒ 出驻点需 `attack_cost > 100`；A 臂 0.1 ⇒ 窗外 **1000×**。
++两种读法下 ×1 都在窗外 ⇒ **#10 可现在勾**；`cs` 单位只影响"若将来抬 cost，窗的左边界在哪"，留给砚在 §七bis 标 `[待核]`，不阻塞点火。
++
++**机读守卫（进标定批／正式批 manifest，逐 run 落字段；值随标定批锁，R225）**：
++
++```
++arm_A.attack_cost            = 0.1
++arm_A.forage_tradeoff_k      = 0.0
++arm_A.cost_multiple_vs_1x    = 1.0
++valley_window_ratio          = [250, 500]        # R197 原文口径，读法甲
++inside_valley_window         = false              # 由上行三值现算，不手填
++```
++
++- **Pre-Flight 加一条硬门（C 系列之外新增位，命名 `C-A11` 请 PI 归号）**：任一 run 若 `attack_cost ≥ 25.0`（= 250×基准）或 `forage_tradeoff_k ≠ 0.0` ⇒ `inside_valley_window=true` ⇒ 该 run **单列、不进主 2×2**，并上板报砚＋PI（这是 `[稿 §二:35]`「判意置窗内」条款的可执行形，我不裁它是否成立，只把它变成机器门）。
++- **k 的条件句**：窗随 k 左移（k=2 起 `cs>100` 即有内部驻点）⇒ 上面那条把 `k≠0` 也拉进触发面，防"只盯 cost 漏看 k"。
++- 🔴 **主动加一条防混项**：标定批若为核 U1 谷深 `D` 的量程而**故意造一个已知谷**（例如把 cost 抬进窗内做阳性对照），那种 run 必须显式 `probe_valley=true` 单列，**绝不进 A 臂正式批**，也不得用作 Z1 零样本（Z1 是**单峰**零模型，M=500 造谷样本会把 δ 峰位阈标定污染）。这条不在砚的文本里，是我落笔时发现的操作洞，标 [新增建议] 候砚并稿取舍。
++
++---
++
++## §三 A 臂"现公式"最小移植口径（符号锚为主；步A 埋点位移的实证就在这条上）
++
++**锚（按永久法 `[稿 §七-H2]`：起 `for k, idx in enumerate(attackers)`，至 wound 支 `stomach[prey] = 0.0` 止）** `[代码实测读 @2111d15]`：
++
++| 语义位 | 现分支行号（快照，不作抄写依据） | 移植 |
++|---|---|---|
++| 循环起点 `enumerate(attackers)` | `:4800` | ✅ 锚上界 |
++| 随机数预生成 `rand_prey`/`rand_success` | `:4791-4792`（另有一处在 Rust 预生成段 `:4746-4747`） | ❌（RNG 面不入 A 臂解析／harness 的公式收益） |
++| 成本腿 `energy[idx] -= attack_cost` ＋ `dis_attack` 探针 | `:4815-4818` | ✅ 取扣费语义，探针腿不移植 |
++| `success_rate` clip + `success_gene_gain` | `:4821-4826` | ✅ |
++| 掠得腿 site-1（成功击杀）`_tr = E_prey × transfer_ratio` → `stomach[prey]=0.0` | `:4859-4867` | ✅（砚原文 `:4683-4691`） |
++| 掠得腿 site-2（血条致死）同式 → `stomach[prey]=0.0` | `:4890-4898` | ✅（砚原文 `:4713-4722`，锚外支；S0 默认 `wound_enabled=False` ⇒ 该支不可达，但**抄写面按扩锚 `:4640-4730` 一并覆盖防漏**） |
++| 循环外通道统一记账（R141） | `:4902-4906` | ❌ 非移植面（砚原文 `:4727-4730` 同判） |
++| 死亡掩码 `dead = starved｜expired｜predation_mask` | `:4962` | ❌ 非本锚（属压缩段） |
++
++- 旧锚漏项照 PI 实测补抄：`attack_cost`（砚 `:4655`）与 `success_rate`（`:4658-4660`）两块**在锚内、必须移**；掠得腿**两处**都在锚内 ⇒ 「照旧锚落笔只剩成本项」不成立，本表即为复核凭据。
++- 收益侧另三面（`attack_prob` 系数 `:4699`／`attack_gene_gate` `:4057`、`:4129`／素食端 `(1-g)^k` `:3602`）在捕食段之外，移植时按符号取，**行号一律以本表右侧语义为准**。
++
++🔴 **一条必须写死的纪元取舍**：A 臂移植取**账面公式**（攻击者所得 = `transfer_ratio × E_prey`，与 `:4859` 同式），**不引入步B 的"补捕食扣减"**，也不引入"整份转移"——步B §四 两形态尚未会签，S0 期把新纪元语义混进 A 臂 = 同时污染 A/B 差分与跨纪元比（砚 B1/R320）。⇒ A 臂定义上就是**旧纪元公式**。⚠️[假设] 若 PI／鱼会签选"整份转移"且要求 S0 复照，S0 须整套重标，不在本批。
++
++---
++
++## §四 与预注册文本的差分表（砚并稿用；逐条：照抄／补细／新增／分歧）
++
++| # | 砚文本位 | 本笔 | 性质 |
++|---|---|---|---|
++| 1 | §七bis #11「拟名 `alpha_W`」 | 定名 `alpha_W`，符号/机读双形披露 | **照抄即闭** |
++| 2 | §二:44 零对照 `α_W=0` | 加"B 臂运行批 1.0／对照批 0.0 显式覆写，靠默认不算对照" | 补细 |
++| 3 | （未写） | A 臂 `alpha_W=null` ≠ `0.0` 的语义分离 | **新增（建议入 §七bis 备注）** |
++| 4 | （未写） | `alpha_W=0` ⇒ `f(g,n)` 短路不算（不消费 RNG） | 补细 |
++| 5 | §二:35 声明落窗外、值随标定批锁 | 定参 `0.1`/`0.0` ＋ 窗外 250×～1000× ＋ 机读五字段 | 照抄＋可执行形 |
++| 6 | §二:35「判意置窗内⇒单列不进主 2×2」 | 变成 Pre-Flight 硬门 `C-A11`（阈值 25.0 ＋ `k≠0` 触发） | 补细 |
++| 7 | （未写） | `probe_valley=true` 造谷 run 禁入正式批／禁入 Z1（δ 标定污染） | **新增（建议）** |
++| 8 | §七-H2 符号锚两支/掠得腿两处/`:4640-4730` 扩锚 | 逐位映射到现分支（位移 160 行实证） | 照抄＋快照 |
++| 9 | §二 A 臂「隐式 n 效应不排除、入册 S-A2」 | 判：**可量化**（harness 逐 tick 记 `n_i` 与实测 p̂，与解析 p(g) 对表）⇒ 不升 H5 待裁点 | 照抄＋结论 |
++| 10 | §二:44 「config 键拟名」 | 落点＝只在 `s0_kernel`，不进 `SimConfig`（三条理由） | 🔴[待一拍]，非分歧（可翻不返工） |
++
++**H5 结论（明示，因砚写着"若判不可对齐须升待裁点"）**：两臂**可对齐** ⇒ 本笔**不升待裁点**。附带一条边界：若 A 臂改走"解析网格（零机时）"形，则 A 臂根本没有隐式 n 效应、S-A2 只对 B 臂生效 ⇒ 那才是真分歧，须回板重裁 `[稿 §二:31 已明写"同一 harness＋RNG 消费顺序一致" ⇒ 只能是可运行 harness，本笔按此落]`。
++
++---
++
++## §五 跑前实话（免得 08:00 窗口挂在错误的期望上）
++
++- ✅ **H2 三件本笔落完**：#10 定参＋声明可勾；#11 定名可勾；24-run 撤 Z2 的降级路**不再需要**（键已定名，只差 `arms.py` 实装消费）。
++- ⚠️ **仍有一件代码不在我本笔里**：`tools/s0_batch_chain.py::run_one` 是 fail-loud 占位（砚 @`2e5b364`），要跑双臂还需 `s0_kernel/arms.py`（A 臂移植形 ＋ B 臂 `W₀+α_W·f`）＋适配器一行接。我**即刻开工 arms**（纯 py、不触主仓行为面、带靶向测试＋变异靶；估 2–3h）。
++- 🔴 **触砚文件面报备**：我不擅自改她的 chain 脚本；接口我定成 `s0_kernel.arms.run_arm(spec) -> Path`，她那侧只需把 `raise NotImplementedError` 换成一次调用（改动 1 行＋manifest 字段），**请砚 ack**。
++- **PI 可即刻并行起的**：Pre-Flight C1–C8 ＋ 主仓既有 runner 冒烟 —— 这八项不依赖双臂 harness，不被本笔之后的任何在途件阻塞；标定批里 **Z1 M=500／置换 L=1000／wall·tick 计时**这三项若按 A 臂 harness 走，则等 arms；若 PI 要抢 08:00 窗口，建议先跑"计时＋置换"两项（不依赖臂定义），A 臂双跑 `|D−D′|`（ε_D 首源）随 arms 落即补。
++
++---
++
++**【交球】** @砚 并 §一～§四 进 §七bis（#10/#11 勾位）＋ 采否第 3/7 两条新增建议 ＋ `cs` 单位留 `[待核]`；@PI `alpha_W` 落点一拍（不阻塞，我按 s0_kernel 落笔已在写）＋ `C-A11` 归号；@轻舟 落点若裁"进 `SimConfig`"，config 面按你 ack 六接走，我这边定名与臂侧消费不动。R387 留痕：本笔无悬置问，双臂 run 的阻塞点我自己消。
++
++—— 澜舟 `[开发·二线]`｜`task/ENERGY-CLOSE`@`2111d15`｜署名逐命令 `-c` 显式（R371）｜不裁定（PI）·判据归砚
+-- 
+2.46.1.windows.1
+
+
+From 35f609cc7d8d15d0f04d1466dada4ef2f860f8c1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 01:25:39 +0800
+Subject: [PATCH 04/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20feat(s0=5Fkernel):=20S0-kernel-b=20=E8=8E=B7?=
+ =?UTF-8?q?=E5=8F=96=E5=87=BD=E6=95=B0=E5=B1=82=E8=90=BD=E5=9C=B0=E2=80=94?=
+ =?UTF-8?q?=E2=80=94A=20=E8=87=82=20E-034=20=E9=80=90=E4=BD=8D=E5=AF=B9?=
+ =?UTF-8?q?=E8=B4=A6=E9=94=9A=20+=20B=20=E8=87=82=E9=95=9C=E5=AE=9A?=
+ =?UTF-8?q?=E5=BD=A2=EF=BC=88owner/PI=20=E6=80=A5=E4=BB=A4=E5=94=AF?=
+ =?UTF-8?q?=E4=B8=80=E4=BC=98=E5=85=88=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A 臂（现公式·旧纪元账面形）：W(g)=(1-g)^k·F+1[g>gate]·[p·s·E_prey·r−p·c]，
+逐位钉死两组历史读数——k=2 默认档 1.0000/1.0720/1.3700/1.8680/2.9900（证伪文档 §3.4）
+与 R197 cost×300 谷读数 W(0)=W(1)=1.0000、中点 0.6250（实验记录.md:54）。
+🔴 实测发现并钉进测试：原文「g=.3 → 1.0720」实为**右极限**——mask 用严格 `g>gate` 时 W(0.3)=0.49，
+W 在 g=gate 有 0.582 的跳跃间断 ⇒ 任何拿 W(gate) 对账的脚本会静默错一位；本模块以 gate_inclusive 显式暴露，默认取引擎字面语义。
+
+B 臂（镜 b5a7526 定形，R383 设计权，逐字照抄不替设计做主）：W₀=p·s₀·E_prey·r（整块去 gate、无两池、
+无 sigmoid、不含素食腿与成本腿）＋ f(g,n)=−p·s₀·E_prey·r·ν 的 A1 线性折扣 ＋ s₀(1−α_W·ν) clamp≥0；
+F_FORMS 只认 A1，A2/A3 传入即 raise（镜判归 S1 稳健性扫描，静默替代＝把 S1 的形混进 S0 主判）；
+α_W=0 ⇒ **短路返回 W₀、f 不求值**（"算完乘 0"数值相同而语义假绿，只有哨兵断言抓得到）；
+ν=nu_local 同类表型近邻竞争密度（σ_C 高斯核、局部口径，非全场总数非 attacker 占比；σ_C=0.1 占位待标定批锁）；
+nu_proxy 仅作 S-B 零机时核查的单调替身，禁入出货路径；w_mn/w_mr 纯 py 中心差分（H3 禁 scipy）；
+clamp_is_active 把镜 §四-1「截断点上混合偏导局部归零」的可检测性交给砚做 S-B 前置扫描。
+
+#10 谷窗实测勘正：has_interior_valley 用**形态判据**（两端皆高于内部极小，弃 R197 已推翻的梯度阈法）
+⇒ 实测窗 [200,450]，比原文 [250,500] **下沿早 50×** ⇒ 守卫取保守并集 WINDOW_GUARD=[200,500]，
+建议 C-A11 触发阈值由 25.0 改 **20.0**（=200×0.1），否则 [200,250) 这段真谷会漏拦进主 2×2。
+
+纪律面：八个系数一律从 PredationConfig() 读（禁裸写，M-D/M-E 证"改 config 而 W 不动"必红）；
+A 臂 alpha_W=None 与 B 臂 0.0 语义分离；assert_arms_comparable 堵"顺手多改一个旋钮"；
+declare_inconclusive_exit 把"两臂皆否⇒S0 尺度不可裁决"写进代码；AST 级 import 守卫 + 子进程实证
+主引擎不 import s0_kernel ⇒ 零行为面、不消费 RNG。
+
+测试 42 例（tests/test_s0_arms.py）；变异靶 M-A/M-B/M-C/M-D/M-E/M-F/M-G/M-H **八条全红**（已还原）；
+连同 test_s0_kernel/test_energy_probe 共 119 passed。未落件：run_arm 出货面（需逐 tick 个体 g 行＋
+arm_impl_commit/统计码 hash，按砚 ack 三条件）——卡的是装置参数（出生阈/变异 σ/死亡率）待锁，非候人。
+---
+ s0_kernel/__init__.py |  10 ++
+ s0_kernel/arms.py     | 341 +++++++++++++++++++++++++++++++++++++++++
+ tests/test_s0_arms.py | 347 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 698 insertions(+)
+ create mode 100644 s0_kernel/arms.py
+ create mode 100644 tests/test_s0_arms.py
+
+diff --git a/s0_kernel/__init__.py b/s0_kernel/__init__.py
+index 393ef9e..1c69077 100644
+--- a/s0_kernel/__init__.py
++++ b/s0_kernel/__init__.py
+@@ -18,6 +18,11 @@
+ from __future__ import annotations
+ 
+ from .accounts import ACCOUNTS, ACCOUNT_UNITS, ENERGY_ACCOUNTS, MASS_ACCOUNTS, to_energy
++from .arms import (F_FORMS, INCONCLUSIVE_EXIT, SIGMA_C_PROVISIONAL, WINDOW_GUARD,
++                   WINDOW_MEASURED, WINDOW_QUOTED_R197, Landscape, arm_specs,
++                   assert_arms_comparable, attack_p, clamp_is_active, declare_inconclusive_exit,
++                   default_predation, f_a1, f_gn, has_interior_valley, is_inside_valley_window,
++                   nu_local, nu_proxy, success_s, w_a, w_b, w_b0, w_mn, w_mr)
+ from .books import DOMAIN_ACCOUNTS, Books, resolve_domain
+ from .channels import DIS, ESC, INJ, TRF, Channel, ChannelRegistry, ChannelViolation
+ from .world import (ConservationViolation, World, WorldOptions, check_tick, default_registry,
+@@ -28,4 +33,9 @@ __all__ = [
+     "DOMAIN_ACCOUNTS", "Books", "resolve_domain",
+     "INJ", "TRF", "DIS", "ESC", "Channel", "ChannelRegistry", "ChannelViolation",
+     "ConservationViolation", "World", "WorldOptions", "check_tick", "default_registry", "run",
++    "F_FORMS", "INCONCLUSIVE_EXIT", "SIGMA_C_PROVISIONAL", "WINDOW_GUARD", "WINDOW_MEASURED",
++    "WINDOW_QUOTED_R197", "Landscape", "arm_specs", "assert_arms_comparable", "attack_p",
++    "clamp_is_active", "declare_inconclusive_exit", "default_predation", "f_a1", "f_gn",
++    "has_interior_valley", "is_inside_valley_window", "nu_local", "nu_proxy", "success_s",
++    "w_a", "w_b", "w_b0", "w_mn", "w_mr",
+ ]
+diff --git a/s0_kernel/arms.py b/s0_kernel/arms.py
+new file mode 100644
+index 0000000..8db2055
+--- /dev/null
++++ b/s0_kernel/arms.py
+@@ -0,0 +1,341 @@
++"""`s0_kernel.arms` —— 双臂 S0 的**获取函数层**（S0-kernel-b 机制面）。
++
++归属与边界
++----------
++- A 臂＝现公式（旧纪元账面形）最小移植；B 臂＝**镜 b5a7526 定形**（R383 设计权，逐字照抄）：
++  `W(g,n) = W₀(g) + α_W·f(g,n)`，其中 `W₀(g)=p(g)·s₀(g)·E_prey·r`（整块去 gate、无两池、无素食/成本腿）、
++  `f(g,n) = −p(g)·s₀(g)·E_prey·r·ν(g,n)`（**A1 线性折扣**，λ 吸进 α_W），
++  `s₀·(1−α_W·ν) ≥ 0` clamp 保物理性；A2/A3 由镜弃于 S0（归 S1 稳健性扫描）⇒ 本模块**只认 A1**，
++  传别的形状即 raise（不替设计做主，也不给静默默认）。
++- 判读面（谷深 D／峰位／出不出）**不在本模块**（R225/R394④ 禁自实现判据，聚合走冻结判据判读脚本）。
++- 零行为面：本包**不被 `simulation/` 导入**（守卫见 `tests/test_s0_kernel.py`）⇒ 现役引擎逐位等价门不受影响。
++- 不消费 RNG：全模块纯函数，同输入逐位同输出（`tests/test_s0_arms.py` 有 AST 级 import 守卫）。
++- 参数单一来源：八个捕食系数一律从 `PredationConfig()` 读，**禁裸写**（AGENTS.md 关键约束；
++  变异靶 M-D/M-E 证明"改 config 而 W 不动"会被测出来）。
++
++对账锚（E-034／R197，`docs/实验记录.md:54` ＋ `docs/设计文档/证伪-双峰在现行捕食公式下不可能-20260924.md` §3.4）
++-----------------------------------------------------------------------------------------------
++k=2 默认档五读数与 cost×300 的谷读数按 6 位小数逐位钉死（`tests/test_s0_arms.py`）。
++🔴 **边界歧义实测**（本模块发现，已上板）：原脚本 mask 用严格 `g > gate`，而 `g = gate` 恰是格点
++⇒ 文档里「`g=.3 → 1.0720`」实际是**右极限**（`0.3+1e-9` 得 1.0720，`0.3` 得 0.49）。
++⇒ `W` 在 `g=gate` 有跳跃间断，任何拿 `W(gate)` 对账的脚本都会**静默错一位**；本模块用
++`gate_inclusive` 显式暴露该约定，默认 `False`（＝引擎字面语义 `:4057`/`:4129`）。
++"""
++from __future__ import annotations
++
++import math
++from dataclasses import dataclass
++
++from simulation.config import PredationConfig
++
++#: 预注册红线（草案 §五：「两臂皆否 ⇒ S0 尺度不可裁决」必须在跑之前写进代码，不是事后解释）。
++INCONCLUSIVE_EXIT = "两臂皆否 ⇒ S0 尺度不可裁决（此出口在跑批前已声明，不得事后追加）"
++
++
++def declare_inconclusive_exit() -> str:
++    """返回预注册不可裁决出口的原文（供 manifest／判读脚本引用，禁止改写）。"""
++    return INCONCLUSIVE_EXIT
++
++
++#: 镜 b5a7526：S0 主判只走 A1；A2（污染差分）／A3（Red Queen 崩盘风险）留 S1 ⇒ 不接受，也不静默替代。
++F_FORMS = ("A1",)
++#: 竞争核宽度：**待标定批锁**（镜 §四-2：单值进 manifest，不作 S0 扫描维度）。
++SIGMA_C_PROVISIONAL = 0.1
++
++
++@dataclass(frozen=True)
++class Landscape:
++    """E-034 解析档的**归一化选择**（不是引擎配置，勿当 config 默认读）。
++
++    真源 = `experiments/analyze_bimodal_fitness.py:find_valley` 默认参数
++    （`f_veg=1.0, e_self=150.0, e_prey=150.0, hunger=0.5`）⇒ 对账锚必须用同一组值。
++    """
++
++    f_veg: float = 1.0            # 素食端基准收益 F（只进 A 臂；B 臂按镜形不含素食腿）
++    e_self: float = 150.0         # 自身能量 E（"E 固定"近似＝无频率依赖的根因位）
++    e_prey: float = 150.0         # 猎物能量 E_prey
++    hunger: float = 0.5           # 饥饿度 h ∈ [0,1]
++    sigma_c: float = SIGMA_C_PROVISIONAL   # 竞争核 σ_C（待标定批锁）
++    n_ref: float = 100.0          # `nu_proxy` 的密度基准（纯函数层 S-B 核查用替身）
++
++    def __post_init__(self) -> None:
++        if not 0.0 <= self.hunger <= 1.0:
++            raise ValueError(f"hunger 必须 ∈ [0,1]，实得 {self.hunger}")
++        if self.e_self < 0.0 or self.e_prey < 0.0 or self.sigma_c <= 0.0 or self.n_ref <= 0.0:
++            raise ValueError("e_self/e_prey 非负，sigma_c/n_ref 必须 > 0")
++
++
++def default_predation() -> PredationConfig:
++    """捕食系数唯一来源（禁裸写 0.2/0.3/0.5/0.1/0.9/0.4/0.1/0.0）。"""
++    return PredationConfig()
++
++
++def _check_g(g: float) -> None:
++    if not 0.0 <= g <= 1.0:
++        raise ValueError(f"g 必须在有界原始轴 [0,1]（v1.1.3 读数轴禁分位/秩变换），实得 {g}")
++
++
++# ------------------------------------------------------------------ 共用构件（与引擎同式）
++
++def attack_p(g: float, pred: PredationConfig, land: Landscape) -> float:
++    """出手概率 `p(g) = g · attack_prob_coef · hunger`（引擎 `:4699` 同形）。"""
++    return g * pred.attack_prob_coef * land.hunger
++
++
++def success_s(g: float, pred: PredationConfig, land: Landscape) -> float:
++    """成功率 `s(g) = clip(E/(E+E_prey)·(0.5+g·γ), floor, ceil)`（引擎 `:4821-4826` 同形＝镜的 `s₀`）。"""
++    ratio = land.e_self / max(land.e_self + land.e_prey, 1e-9)
++    return min(max(ratio * (0.5 + g * pred.success_gene_gain),
++                   pred.success_floor), pred.success_ceil)
++
++
++def _forage(g: float, k: float, land: Landscape) -> float:
++    """素食端 `(1-g)^k · F`（引擎 `forage_tradeoff_k` 消费点 `:3602`；**只进 A 臂**）。"""
++    return (1.0 - g) ** k * land.f_veg
++
++
++def _pred_net(g: float, pred: PredationConfig, land: Landscape, cost_scale: float) -> float:
++    """净捕食收益 `p·s·E_prey·r − p·c`（掠得腿取**账面** `transfer_ratio × E_prey`）。"""
++    p = attack_p(g, pred, land)
++    gain = p * success_s(g, pred, land) * land.e_prey * pred.transfer_ratio
++    return gain - p * pred.attack_cost * cost_scale
++
++
++# ------------------------------------------------------------------ A 臂：现公式（旧纪元）
++
++def w_a(g: float, *, k: float | None = None, cost_scale: float = 1.0,
++        pred: PredationConfig | None = None, land: Landscape | None = None,
++        gate_inclusive: bool = False) -> float:
++    """A 臂 `W(g) = (1-g)^k·F + 𝟙[g>gate]·[p·s·E_prey·r − p·c]`（R8.1 证伪文档口径）。
++
++    🔴 纪元条：掠得腿是**旧纪元账面转移**，不含步B 的补扣减、也不含"整份转移"会签形态
++    （混进来＝同时污 A/B 差分与跨纪元比，砚 B1／R320）。
++    `k=None` ⇒ 取引擎默认 `forage_tradeoff_k`（S0 档 = 0.0，H2 落笔 #10 定参）。
++    """
++    pred = pred or default_predation()
++    land = land or Landscape()
++    kk = pred.forage_tradeoff_k if k is None else k
++    _check_g(g)
++    if cost_scale < 0.0:
++        raise ValueError(f"cost_scale 非负，实得 {cost_scale}")
++    attack = g > pred.attack_gene_gate
++    if gate_inclusive and g == pred.attack_gene_gate:
++        attack = True
++    return _forage(g, kk, land) + (_pred_net(g, pred, land, cost_scale) if attack else 0.0)
++
++
++# ------------------------------------------------------------------ B 臂：镜 b5a7526 定形
++
++def w_b0(g: float, *, pred: PredationConfig | None = None,
++         land: Landscape | None = None) -> float:
++    """B 臂 `W₀(g) = p(g)·s₀(g)·E_prey·r`：**整块去 gate、无两池、无 sigmoid**（镜 §一/§三）。
++
++    镜的去 gate 三条理由里工程上最硬的一条：`α_W=0` 支要成为**单变量零对照**，前提是 gate 也一起拿掉
++    （sigmoid 会在 α_W=0 时仍留软 gate ⇒ 分岔无法归因到 `W_mr`）。素食腿与成本腿按镜原文式子**不入 B 臂**。
++    """
++    pred = pred or default_predation()
++    land = land or Landscape()
++    _check_g(g)
++    return attack_p(g, pred, land) * success_s(g, pred, land) * land.e_prey * pred.transfer_ratio
++
++
++def nu_local(g_self: float, g_neighbors, sigma_c: float | None = None) -> float:
++    """`ν(g,n)` ＝**同类表型近邻竞争密度**（镜 §一：竞争核 σ_C 加权邻域内同表型密度）。
++
++    `ν = mean_j exp(−(g_self−g_j)²/(2σ_C²))` ∈ [0,1]，**局部口径**——不是全场总数、也不是
++    gate-defined attacker 占比（gate 已去，`f_hi` 无定义）。`sigma_c=None` ⇒ 取 `Landscape().sigma_c`
++    （= 待标定批锁的占位单值，manifest 必须回显实际用值）。
++    """
++    _check_g(g_self)
++    sc = Landscape().sigma_c if sigma_c is None else float(sigma_c)
++    if sc <= 0.0:
++        raise ValueError(f"sigma_c 必须 > 0，实得 {sc}")
++    nb = [float(x) for x in g_neighbors]
++    if not nb:
++        return 0.0
++    acc = 0.0
++    for gj in nb:
++        d = (g_self - gj) / sc
++        acc += math.exp(-0.5 * d * d)
++    return min(max(acc / len(nb), 0.0), 1.0)
++
++
++def nu_proxy(n: float, *, n_ref: float | None = None) -> float:
++    """纯函数层的**密度替身** `ν = min(n/n_ref, 1)`：只给 S-B 数值核查当单调映射用。
++
++    🔴 正式批读数的 ν 走 `nu_local`（镜定义）；本替身不得进 harness 出货路径（`run_arm` 会显式区分）。
++    """
++    if n < 0.0:
++        raise ValueError(f"n（近邻竞争者数）非负，实得 {n}")
++    ref = Landscape().n_ref if n_ref is None else float(n_ref)
++    if ref <= 0.0:
++        raise ValueError(f"n_ref 必须 > 0，实得 {ref}")
++    return min(n / ref, 1.0)
++
++
++def f_a1(g: float, nu: float, *, pred: PredationConfig | None = None,
++         land: Landscape | None = None) -> float:
++    """A1 线性折扣形状 `f(g,n) = −p·s₀·E_prey·r·ν`（镜：与加法形 `W₀+α_W·f` 1:1 同构）。"""
++    if not 0.0 <= nu <= 1.0:
++        raise ValueError(f"ν 是 [0,1] 的密度比例，实得 {nu}")
++    return -w_b0(g, pred=pred, land=land) * nu
++
++
++def f_gn(g: float, nu: float, form: str, *, pred: PredationConfig | None = None,
++         land: Landscape | None = None) -> float:
++    """按名派发形状；**只认 A1**，其余（含 `None`/`""`）一律 raise。
++
++    镜弃 A2/A3 于 S0（A2 混进涌现统计项污染 A/B 归因；A3 非线性饱和把两件事糊一起＋Red Queen 风险）
++    ⇒ 这里给默认值＝替设计做主，给静默替代＝把 S1 的形混进 S0 主判，两者都禁。
++    """
++    if form != "A1":
++        raise ValueError(
++            f"B 臂 f(g,n) 形状必须是 'A1'，实得 {form!r}——A1 由镜 b5a7526 定形（R383 设计权），"
++            "A2/A3 已判归 S1 稳健性扫描，不在 S0 主判；要改形请走上游设计权，不在代码里静默换。"
++        )
++    return f_a1(g, nu, pred=pred, land=land)
++
++
++def w_b(g: float, nu: float, alpha_W: float, *, f_form: str = "A1",
++        pred: PredationConfig | None = None, land: Landscape | None = None) -> float:
++    """B 臂 `W(g,n) = W₀(g) + α_W·f(g,n)`，即镜式 `p·s₀·E·r·(1 − α_W·ν)`，**clamp ≥ 0**。
++
++    🔴 `α_W == 0.0` ⇒ **短路返回 W₀**（`f` 不求值）：零对照"构造上不该出谷"由代码路径保证；
++    写成"算完乘 0"数值上一样、语义上假绿（镜 §三-3 的隔离失效正是这一族，变异靶 M-B 钉住）。
++    """
++    _check_g(g)
++    if not 0.0 <= nu <= 1.0:
++        raise ValueError(f"ν 是 [0,1] 的密度比例，实得 {nu}")
++    if alpha_W is None or not math.isfinite(alpha_W) or alpha_W < 0.0:
++        raise ValueError(
++            f"alpha_W 必须是有限非负实数（负值＝正频率依赖，与设计稿 λ≥0 反向；要换方向走设计权），"
++            f"实得 {alpha_W!r}"
++        )
++    w0 = w_b0(g, pred=pred, land=land)
++    if alpha_W == 0.0:
++        return w0
++    return max(0.0, w0 + alpha_W * f_gn(g, nu, f_form, pred=pred or default_predation(),
++                                        land=land or Landscape()))
++
++
++def clamp_is_active(g: float, nu: float, alpha_W: float, **kw) -> bool:
++    """镜 §四-1 的守卫件：clamp 是否把该点截到 0（截断点上 `∂²W/∂g∂n` 会局部失效）。
++
++    S-B 数值核查须先扫一边峰位落点是否压在 clamp 界上——**这条判读归砚**，本函数只把可检测性交出去。
++    """
++    pred = kw.get("pred") or default_predation()
++    land = kw.get("land") or Landscape()
++    return (w_b0(g, pred=pred, land=land) * (1.0 - alpha_W * nu)) < 0.0
++
++
++def w_mn(g: float, nu: float, alpha_W: float, *, h: float = 1e-3, **kw) -> float:
++    """`∂²W/∂g∂ν`（中心差分，纯 py——H3 禁 scipy）；S-B 的 ν 面口径。"""
++    if h <= 0.0:
++        raise ValueError(f"差分步长必须 > 0，实得 {h}")
++    gp, gm = min(g + h, 1.0), max(g - h, 0.0)
++    np_, nm = min(nu + h, 1.0), max(nu - h, 0.0)
++    dg, dn = (gp - gm), (np_ - nm)
++    if dg <= 0.0 or dn <= 0.0:
++        raise ValueError(f"差分退化（g={g}, ν={nu}, h={h}）⇒ 混合偏导不可算")
++    return (w_b(gp, np_, alpha_W, **kw) - w_b(gm, np_, alpha_W, **kw)
++            - w_b(gp, nm, alpha_W, **kw) + w_b(gm, nm, alpha_W, **kw)) / (dg * dn)
++
++
++def w_mr(g: float, n: float, alpha_W: float, *, h: float = 1e-3,
++         nu_fn=nu_proxy, nu_kw: dict | None = None, **kw) -> float:
++    """S-B 结构自证的数值面：`∂²W/∂g∂n`（镜解析式 `= −α_W·∂²[p·s₀·E·ν]/∂g∂n`）。
++
++    ν 由 `nu_fn` 注入（默认 `nu_proxy` 供零机时核查；harness 侧换 `nu_local` 的密度口径）。
++    `α_W=0` ⇒ 恒 0（构造上没有 n 依赖）；`α_W>0` 且 ν 随 g/n 变 ⇒ 非 0 ⇒ S-B 必过。
++    """
++    if h <= 0.0:
++        raise ValueError(f"差分步长必须 > 0，实得 {h}")
++    nk = nu_kw or {}
++    gp, gm = min(g + h, 1.0), max(g - h, 0.0)
++    np_, nm = n + h, max(n - h, 0.0)
++    dg, dn = (gp - gm), (np_ - nm)
++    if dg <= 0.0 or dn <= 0.0:
++        raise ValueError(f"差分退化（g={g}, n={n}, h={h}）⇒ W_mr 不可算")
++    return (w_b(gp, nu_fn(np_, **nk), alpha_W, **kw) - w_b(gm, nu_fn(np_, **nk), alpha_W, **kw)
++            - w_b(gp, nu_fn(nm, **nk), alpha_W, **kw) + w_b(gm, nu_fn(nm, **nk), alpha_W, **kw)
++            ) / (dg * dn)
++
++
++# ------------------------------------------------------------------ #10 谷窗（H2 定参的机读形）
++
++#: R197 原文口径（`docs/实验记录.md:54`；砚/PI 引用的是这一条）
++WINDOW_QUOTED_R197 = (250.0, 500.0)
++#: 本模块 `has_interior_valley` 实测（k=0、E-034 归一化档、"两端皆高于内部极小"判据）
++#: ⇒ **下沿比原文早 50×**（200× 已有真谷），上沿 450×（原文 500×）
++WINDOW_MEASURED = (200.0, 450.0)
++#: 守卫用**保守并集**：宁可在窗外的低侧多拦一刀，也不让真谷漏进主 2×2
++WINDOW_GUARD = (min(WINDOW_QUOTED_R197[0], WINDOW_MEASURED[0]),
++                max(WINDOW_QUOTED_R197[1], WINDOW_MEASURED[1]))
++
++
++def is_inside_valley_window(attack_cost: float, base_cost: float | None = None,
++                            window: tuple[float, float] = WINDOW_GUARD) -> bool:
++    """H2 §二 的机读判据：`attack_cost / base ∈ window` ⇒ 落 R197 谷窗**内**。
++
++    `base_cost=None` ⇒ 取引擎默认 `attack_cost`（0.1）作 ×1 基准，与 E-034 倍率口径一致。
++    🔴 默认窗取**原文 ∪ 实测**的保守并集 `[200,500]`：实测下沿 200×（原文 250×）⇒ 若按 250× 设门槛，
++    `[200,250)` 这段真谷会漏拦 ⇒ 建议 C-A11 触发阈值取 **20.0**（=200×0.1）而非 25.0（已上板勘正）。
++    """
++    base = (default_predation().attack_cost if base_cost is None else base_cost)
++    if base <= 0.0:
++        raise ValueError(f"基准 cost 必须 > 0，实得 {base}")
++    return window[0] <= (attack_cost / base) <= window[1]
++
++
++def has_interior_valley(*, k: float = 0.0, cost_scale: float = 1.0, n_grid: int = 2001,
++                        tol: float = 0.0, pred: PredationConfig | None = None,
++                        land: Landscape | None = None) -> bool:
++    """A 臂 `W(g)` 是否存在**内部**极小（破坏性选择的必要条件 `W(0) > W(谷) < W(1)`）。
++
++    这是 #10 声明的可复算形：`cost_scale=1` 必须 False、`cost_scale=300` 必须 True。
++    🔴 用**形态判据**（两端皆高于内部最小）而非梯度阈：R197 推翻 E-034 的那一条正是
++    "绝对梯度阈把光滑极小静默丢弃"（`slope_l<-1e-6 and slope_r>1e-6`）⇒ 不许再用回去。
++    """
++    if n_grid < 5:
++        raise ValueError("n_grid ≥ 5")
++    ws = [w_a(i / (n_grid - 1), k=k, cost_scale=cost_scale, pred=pred, land=land,
++             gate_inclusive=True) for i in range(n_grid)]
++    interior_min = min(ws[1:-1])
++    return interior_min < ws[0] - tol and interior_min < ws[-1] - tol
++
++
++# ------------------------------------------------------------------ 双臂可比性（机制面，非判据）
++
++def assert_arms_comparable(spec_a: dict, spec_b: dict, *, measured_channel: str,
++                           extra_allowed: tuple[str, ...] = ()) -> None:
++    """草案 §五 的硬校验：两臂**只允许**在 `measured_channel`（＋臂标签等显式许可键）上不同。
++
++    防"顺手多改一个旋钮"＝把被测条件抹掉（AGENTS.md 条件表纪律）；差异或键集合不齐 ⇒ raise 并列清单。
++    """
++    if measured_channel not in spec_a or measured_channel not in spec_b:
++        raise KeyError(f"两臂 spec 必须都含被测通道 {measured_channel!r}")
++    allow = {measured_channel, "arm", *extra_allowed}
++    keys = set(spec_a) | set(spec_b)
++    diffs = sorted(k for k in keys - allow if spec_a.get(k) != spec_b.get(k))
++    missing = sorted(keys - set(spec_a)) + sorted(keys - set(spec_b))
++    if diffs or missing:
++        raise ValueError(
++            f"双臂不可比：非被测通道差异 {diffs}，键集合不齐 {missing}"
++            "⇒ 两臂差只允许落在一个通道上（草案 §五）"
++        )
++
++
++def arm_specs(seed: int, *, alpha_W: float, **overrides) -> tuple[dict, dict]:
++    """同 seed 派生两臂 spec（双流由 harness 侧派生，本函数不起 RNG、不消费 RNG）。
++
++    🔴 A 臂 `alpha_W = None`（该项**不存在**），B 臂 `alpha_W = 值`（可为 0.0＝Z2 零对照）——
++    `None` 与 `0.0` 是两个命题，不许混记（H2 落笔 §一.3；同探针"未观测≠0"律，砚⑥）。
++    """
++    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
++        raise ValueError(f"seed 必须是非负整数（bool 是 int 子类，也算配置错误），实得 {seed!r}")
++    base = {"seed": seed, "landscape": Landscape(), "cost_scale": 1.0, "f_form": "A1"}
++    base.update(overrides)
++    a = dict(base, arm="A", alpha_W=None, f_form=None)
++    b = dict(base, arm="B", alpha_W=alpha_W)
++    assert_arms_comparable(a, b, measured_channel="alpha_W", extra_allowed=("f_form",))
++    return a, b
+diff --git a/tests/test_s0_arms.py b/tests/test_s0_arms.py
+new file mode 100644
+index 0000000..5948e33
+--- /dev/null
++++ b/tests/test_s0_arms.py
+@@ -0,0 +1,347 @@
++"""`s0_kernel.arms` 的靶向测试（S0-kernel-b 机制面）。
++
++四类钉法：
++1. **历史对账锚**——E-034/R197 两组解析读数按 6 位小数逐位钉死（移植错 ⇒ 红，不放过）；
++2. **镜定形照抄**（b5a7526）——B 臂 `W₀=p·s₀·E·r`（整块去 gate、无素食/成本腿）、A1 线性折扣、
++   `s₀(1−α_W ν)` clamp≥0、`α_W=0` 单变量零对照 ⇒ 每条一钉；
++3. **fail-loud**——形状非 A1、ν 越界、`α_W` 非有限/负、差分退化、双臂多改旋钮，全部当场 raise；
++4. **不消费 RNG／零行为面**——AST 级 import 守卫 ＋ 主引擎不 import `s0_kernel` 的子进程实证。
++
++变异靶（改错必红）：M-A 删 A 臂 gate mask／M-B α_W=0 去掉短路／M-C 非 A1 静默替代／
++M-D·M-E 系数裸写／M-F B 臂误加回 gate／M-G clamp 去掉／M-H ν 用全场代替近邻。
++"""
++from __future__ import annotations
++
++import math
++
++import pytest
++
++from s0_kernel.arms import (F_FORMS, INCONCLUSIVE_EXIT, SIGMA_C_PROVISIONAL, WINDOW_GUARD,
++                            WINDOW_MEASURED, WINDOW_QUOTED_R197, Landscape, arm_specs,
++                            assert_arms_comparable, clamp_is_active, default_predation, f_a1,
++                            f_gn, has_interior_valley, is_inside_valley_window, nu_local,
++                            nu_proxy, w_a, w_b, w_b0, w_mn, w_mr)
++
++ANCHOR = 6      # 与引擎 digest 同用 6 位小数约定
++
++
++# ---------------------------------------------------------------- ① A 臂历史对账锚（E-034／R197）
++
++def test_e034_k2_readings_match_documented_anchors() -> None:
++    """证伪文档 §3.4 的 k=2 五读数（1.0000／1.0720／1.3700／1.8680／2.9900）逐位复现。"""
++    got = [round(w_a(g, k=2.0), ANCHOR) for g in (0.0, 0.3, 0.5, 0.7, 1.0)]
++    # g=0.3 == gate ⇒ 严格 `>` 下不入场（0.49）；文档报的 1.0720 是**右极限**（见模块 docstring）
++    assert got == [1.0, 0.49, 1.37, 1.868, 2.99], got
++
++
++def test_e034_gate_is_a_jump_discontinuity() -> None:
++    """边界歧义钉死：`W(gate)` 两侧差 0.582 ⇒ 拿 `g=gate` 对账的脚本必然静默错一位。"""
++    lo, hi = w_a(0.3 - 1e-9, k=2.0), w_a(0.3 + 1e-9, k=2.0)
++    assert round(hi, ANCHOR) == 1.072 and round(lo, ANCHOR) == 0.49
++    assert round(hi - lo, ANCHOR) == 0.582
++    assert round(w_a(0.3, k=2.0, gate_inclusive=True), ANCHOR) == 1.072
++
++
++def test_r197_cost_x300_valley_readings() -> None:
++    """R197 谷读数：k=0、cost×300 ⇒ `W(0)=W(1)=1.0000`、中点 `0.6250`。"""
++    assert round(w_a(0.0, k=0.0, cost_scale=300.0), ANCHOR) == 1.0
++    assert round(w_a(0.5, k=0.0, cost_scale=300.0), ANCHOR) == 0.625
++    assert round(w_a(1.0, k=0.0, cost_scale=300.0), ANCHOR) == 1.0
++
++
++def test_valley_window_measured_edges_versus_quoted() -> None:
++    """#10 的可复算形：实测窗 **[200,450]**；原文 [250,500] ⇒ 下沿早 50×，守卫取并集。"""
++    assert has_interior_valley(k=0.0, cost_scale=1.0) is False     # S0 默认档：窗外（H2 定参）
++    assert has_interior_valley(k=0.0, cost_scale=195.0) is False
++    assert has_interior_valley(k=0.0, cost_scale=200.0) is True    # 实测下沿（原文写 250）
++    assert has_interior_valley(k=0.0, cost_scale=300.0) is True    # R197 实测有谷
++    assert has_interior_valley(k=0.0, cost_scale=445.0) is True
++    assert has_interior_valley(k=0.0, cost_scale=500.0) is False   # 高成本把 g=1 端压成全局极小
++    assert WINDOW_QUOTED_R197 == (250.0, 500.0)
++    assert WINDOW_MEASURED == (200.0, 450.0)
++    assert WINDOW_GUARD == (200.0, 500.0)
++
++
++def test_is_inside_valley_window_uses_engine_default_as_x1() -> None:
++    """机读判据（H2 §二）：基准＝引擎默认 `attack_cost`，A 臂 ×1 ⇒ 窗外。"""
++    base = default_predation().attack_cost
++    assert base == 0.1 and default_predation().forage_tradeoff_k == 0.0
++    assert is_inside_valley_window(base) is False
++    assert is_inside_valley_window(base * 199) is False
++    assert is_inside_valley_window(base * 200) is True             # 实测下沿＝绝对 20.0
++    assert is_inside_valley_window(base * 250) is True             # 原文下沿
++    assert is_inside_valley_window(base * 500) is True
++    assert is_inside_valley_window(base * 501) is False
++    with pytest.raises(ValueError, match="基准 cost"):
++        is_inside_valley_window(base, base_cost=0.0)
++
++
++# ---------------------------------------------------------------- ② B 臂＝镜 b5a7526 定形
++
++def test_w_b0_is_gate_free_monotone_and_excludes_forage_and_cost() -> None:
++    """`W₀ = p·s₀·E_prey·r`：无 gate 跳变、随 g 单调增、**不含**素食腿与成本腿（镜原文式子）。"""
++    land, pred = Landscape(), default_predation()
++    manual = (0.6 * pred.attack_prob_coef * land.hunger) * (
++        (land.e_self / (land.e_self + land.e_prey)) * (0.5 + 0.6 * pred.success_gene_gain)
++        * land.e_prey * pred.transfer_ratio)
++    assert abs(w_b0(0.6) - manual) < 1e-15
++    vals = [w_b0(i / 200.0) for i in range(201)]
++    assert all(b >= a - 1e-15 for a, b in zip(vals, vals[1:])), "W₀ 必须单调不降"
++    # 🔴 变异靶 M-F：B 臂误加回 gate ⇒ 下面两条同时红
++    assert abs(w_b0(0.3 + 1e-9) - w_b0(0.3 - 1e-9)) < 1e-6      # gate 处不跳
++    assert w_b0(0.0) == 0.0                                     # 0.3 不是入场券
++    assert w_b0(0.3) < w_b0(0.31)
++
++
++def test_w_b_equals_mirror_formula_and_isomorphic_to_additive_form() -> None:
++    """`W₀+α_W·f_A1` 与镜式 `p·s₀·E·r·(1−α_W ν)` 1:1 同构（线性折扣展开）。"""
++    for g, nu, aw in [(0.6, 0.3, 1.0), (0.8, 0.05, 0.4), (0.45, 0.9, 1.0), (1.0, 1.0, 0.7)]:
++        w0 = w_b0(g)
++        assert abs(w_b(g, nu, aw) - max(0.0, w0 + aw * f_a1(g, nu))) < 1e-15
++        assert abs(w_b(g, nu, aw) - max(0.0, w0 * (1.0 - aw * nu))) < 1e-15
++
++
++def test_clamp_keeps_W_nonnegative_and_is_detectable() -> None:
++    """🔴 变异靶 M-G：`s₀(1−α_W ν) ≥ 0` 的 clamp 被去掉 ⇒ 负适应度，本条红。"""
++    g, nu, aw = 0.9, 0.95, 2.0                       # α_W·ν = 1.9 ⇒ 未 clamp 会为负
++    assert clamp_is_active(g, nu, aw) is True
++    assert w_b(g, nu, aw) == 0.0
++    assert w_b(g, 0.2, 1.0) > 0.0 and clamp_is_active(g, 0.2, 1.0) is False
++    assert all(w_b(g / 10.0, nu / 10.0, 3.0) >= 0.0 for g in range(11) for nu in range(11))
++
++
++def test_alpha_W_zero_is_clean_zero_control() -> None:
++    """`α_W=0` ⇒ 逐位等于 `W₀`（Z2；镜 §三-3：整块去 gate 是让 α_W=0 成为单变量对照的前提）。"""
++    for g in (0.0, 0.25, 0.5, 0.75, 1.0):
++        for nu in (0.0, 0.5, 1.0):
++            assert w_b(g, nu, 0.0) == w_b0(g)
++    assert round(w_mn(0.6, 0.5, 0.0), 12) == 0.0
++    assert round(w_mr(0.6, 30.0, 0.0), 12) == 0.0     # 构造上没有 n 依赖
++
++
++def test_alpha_W_zero_short_circuits_f_entirely() -> None:
++    """🔴 变异靶 M-B：零对照必须**不求值 f**（"算完乘 0"数值一样、语义假绿 ⇒ 只有哨兵抓得到）。"""
++    import s0_kernel.arms as mod
++
++    def boom(*a, **kw):
++        raise AssertionError("α_W=0 时 f_gn 被调用 ⇒ 短路语义丢了")
++
++    orig, mod.f_gn = mod.f_gn, boom
++    try:
++        assert w_b(0.4, 0.7, 0.0) == w_b0(0.4)
++        assert w_b(0.4, 0.7, 0.0, f_form="A1") == w_b0(0.4)
++    finally:
++        mod.f_gn = orig
++
++
++def test_f_a1_is_negative_feedback_and_linear_in_alpha_W() -> None:
++    """A1 ⇒ ν 增则 W 降（负频率依赖），且 α_W 只线性缩放该项。"""
++    assert f_a1(0.6, 0.0) == 0.0 and f_a1(0.6, 0.5) < 0.0
++    seq = [w_b(0.6, nu, 1.0) for nu in (0.0, 0.2, 0.5, 0.8, 1.0)]
++    assert all(b <= a + 1e-15 for a, b in zip(seq, seq[1:])), seq
++    once, twice = w_b(0.6, 0.3, 1.0) - w_b0(0.6), w_b(0.6, 0.3, 2.0) - w_b0(0.6)
++    assert abs(twice - 2.0 * once) < 1e-15
++
++
++def test_nu_local_is_neighbor_kernel_density_not_global_count() -> None:
++    """🔴 变异靶 M-H：ν 若改用全场总数／attacker 占比 ⇒ 本条红（镜 §一：局部竞争核口径）。"""
++    same = [0.6] * 8
++    far = [0.6 + 0.4 * ((-1) ** i) for i in range(8)]        # 表型远离自身
++    assert nu_local(0.6, same) == pytest.approx(1.0, abs=1e-12)
++    assert nu_local(0.6, far) < 0.05
++    assert nu_local(0.6, []) == 0.0
++    mixed = same + far                                       # 一半同类一半远类 ⇒ ν≈0.5
++    assert nu_local(0.6, mixed) == pytest.approx(0.5, abs=2e-3)   # 远类核尾贡献一点点（>0）
++    assert nu_local(0.6, mixed) < nu_local(0.6, same)
++    assert nu_local(0.6, mixed) > 0.0
++    assert nu_local(0.6, far) > 0.0                            # 核是连续的，不是硬阈值
++    with pytest.raises(ValueError, match="sigma_c"):
++        nu_local(0.5, [0.4], sigma_c=0.0)
++    assert SIGMA_C_PROVISIONAL > 0.0     # 待标定批锁的单值；manifest 须回显实际用值
++
++
++def test_nu_proxy_bounds_and_monotone() -> None:
++    """`nu_proxy` 只作 S-B 零机时核查的单调替身（不得进 harness 出货路径）；越界即 raise。"""
++    assert nu_proxy(0.0) == 0.0
++    assert nu_proxy(50.0) == pytest.approx(0.5)
++    assert nu_proxy(1e6) == 1.0                               # ν 是比例，上限截在 1
++    for bad in (-1.0, -0.001):
++        with pytest.raises(ValueError, match="非负"):
++            nu_proxy(bad)
++    with pytest.raises(ValueError, match="n_ref"):
++        nu_proxy(1.0, n_ref=0.0)
++
++
++# ---------------------------------------------------------------- ③ W_mr／S-B 数值面
++
++def test_w_mn_and_w_mr_sign_and_s_b_passability() -> None:
++    """S-B 数值面可用：`∂²W/∂g∂ν < 0`（α_W>0）；`∂²W/∂g∂n ≠ 0` 与镜解析式同号。"""
++    v = w_mn(0.6, 0.4, 1.0)
++    assert math.isfinite(v) and v < 0.0
++    assert abs(w_mn(0.6, 0.4, 2.0) - 2.0 * v) < 1e-9
++    m = w_mr(0.6, 40.0, 1.0)
++    assert math.isfinite(m) and m < 0.0
++    assert abs(w_mr(0.3, 40.0, 1.0)) < abs(w_mr(0.9, 40.0, 1.0))   # 稀有表型竞争更弱（DD99 形状）
++
++
++def test_w_mr_clamp_region_reports_degeneracy() -> None:
++    """镜 §四-1：clamp 截断点上混合偏导局部归零 ⇒ `clamp_is_active` 交砚做 S-B 前置扫描。"""
++    assert clamp_is_active(0.95, 0.99, 2.0) is True
++    assert w_mn(0.95, 0.99, 2.0) == 0.0              # 被压平 ⇒ 该点无数值曲率
++    assert w_mn(0.95, 0.30, 1.0) < 0.0               # 未截断点正常非零
++
++
++@pytest.mark.parametrize("h", [0.0, -1.0])
++def test_w_mr_degenerate_step_raises(h) -> None:
++    with pytest.raises(ValueError, match="差分"):
++        w_mr(0.5, 10.0, 1.0, h=h)
++    with pytest.raises(ValueError, match="差分"):
++        w_mn(0.5, 0.5, 1.0, h=h)
++
++
++# ---------------------------------------------------------------- ④ fail-loud 面
++
++def test_f_form_only_A1_no_silent_substitute() -> None:
++    """🔴 变异靶 M-C：给非 A1 找"最近的默认"静默替代 ⇒ 本条红（A2/A3 判归 S1，镜 §二）。"""
++    assert F_FORMS == ("A1",)
++    for bad in ("A2", "A3", "", None, "a1"):
++        with pytest.raises(ValueError, match="A1"):
++            f_gn(0.5, 0.3, bad)
++        with pytest.raises(ValueError, match="A1"):
++            w_b(0.5, 0.3, 1.0, f_form=bad)
++
++
++@pytest.mark.parametrize("g", [-0.1, 1.5])
++def test_g_axis_is_bounded_raw(g) -> None:
++    with pytest.raises(ValueError, match=r"\[0,1\]"):
++        w_a(g)
++    with pytest.raises(ValueError, match=r"\[0,1\]"):
++        w_b0(g)
++    with pytest.raises(ValueError, match=r"\[0,1\]"):
++        w_b(g, 0.5, 1.0)
++
++
++@pytest.mark.parametrize("nu", [-0.01, 1.01, float("nan")])
++def test_nu_must_be_a_ratio(nu) -> None:
++    with pytest.raises(ValueError, match="ν"):
++        w_b(0.5, nu, 1.0)
++
++
++@pytest.mark.parametrize("bad", [float("nan"), float("inf"), None, -1.0])
++def test_alpha_W_must_be_finite_nonneg(bad) -> None:
++    with pytest.raises(ValueError, match="alpha_W"):
++        w_b(0.5, 0.3, bad)
++
++
++def test_cost_scale_and_landscape_validate() -> None:
++    with pytest.raises(ValueError, match="cost_scale"):
++        w_a(0.5, cost_scale=-1.0)
++    with pytest.raises(ValueError, match="hunger"):
++        Landscape(hunger=1.5)
++    with pytest.raises(ValueError, match="sigma_c"):
++        Landscape(sigma_c=0.0)
++
++
++# ---------------------------------------------------------------- ⑤ 系数单一来源
++
++@pytest.mark.parametrize("field,bumped", [
++    ("attack_prob_coef", 0.35), ("attack_gene_gate", 0.7), ("success_gene_gain", 0.8),
++    ("success_floor", 0.5), ("success_ceil", 0.35), ("transfer_ratio", 0.5),
++    ("attack_cost", 0.05), ("forage_tradeoff_k", 1.0),
++])
++def test_coefficients_are_read_not_hardcoded(monkeypatch, field, bumped) -> None:
++    """🔴 变异靶 M-D/M-E：八个系数任一个被裸写 ⇒ 对应那档红（改 config 而 W 不动＝裸写）。"""
++    import s0_kernel.arms as mod
++    from simulation.config import PredationConfig
++
++    base_a, base_b = w_a(0.6), w_b0(0.6)
++    if getattr(PredationConfig(), field) == bumped:
++        pytest.fail(f"档本身无效：bumped={bumped} 与默认值相同")
++
++    def bumped_pred() -> PredationConfig:
++        q = PredationConfig()
++        setattr(q, field, bumped)
++        return q
++
++    monkeypatch.setattr(mod, "default_predation", bumped_pred)
++    assert w_a(0.6) != base_a, f"{field} 被裸写（A 臂 W 不吃 config）"
++    if field in ("attack_cost", "forage_tradeoff_k", "attack_gene_gate"):
++        # 镜的 W₀ 只含 p·s₀·E·r：成本腿／素食腿／gate 不入 B 臂是**设计事实**，不是裸写
++        assert w_b0(0.6) == base_b, f"{field} 竟进了 W₀ ⇒ B 臂不再是镜 b5a7526 的形"
++    else:
++        assert w_b0(0.6) != base_b, f"{field} 被裸写（B 臂 W₀ 腿不吃 config）"
++
++
++def test_default_config_matches_h2_declared_parameters() -> None:
++    """H2 #10 定参的守卫：引擎默认被改动 ⇒ 本例红 ⇒ 强制重算谷窗声明与倍率基准。"""
++    q = default_predation()
++    assert (q.attack_cost, q.forage_tradeoff_k) == (0.1, 0.0)
++    assert (q.attack_prob_coef, q.attack_gene_gate, q.success_gene_gain) == (0.2, 0.3, 0.5)
++    assert (q.success_floor, q.success_ceil, q.transfer_ratio) == (0.1, 0.9, 0.4)
++
++
++# ---------------------------------------------------------------- ⑥ 双臂可比性／出货纪律
++
++def test_arms_comparable_rejects_extra_knob() -> None:
++    """草案 §五：两臂只许差一个被测通道；多改一个旋钮当场红（AGENTS.md 条件表纪律）。"""
++    a, b = arm_specs(207, alpha_W=1.0)
++    assert a["alpha_W"] is None and b["alpha_W"] == 1.0     # A 臂记 None，不记 0.0（H2 §一.3）
++    assert a["f_form"] is None and a["seed"] == b["seed"] == 207
++    with pytest.raises(ValueError, match="不可比"):
++        assert_arms_comparable(a, dict(b, cost_scale=2.0), measured_channel="alpha_W",
++                               extra_allowed=("f_form",))
++    with pytest.raises(ValueError, match="不可比"):
++        assert_arms_comparable(a, dict(b, landscape=Landscape(sigma_c=0.2)),
++                               measured_channel="alpha_W", extra_allowed=("f_form",))
++    with pytest.raises(KeyError):
++        assert_arms_comparable(a, b, measured_channel="not_a_channel")
++    a2, b2 = arm_specs(207, alpha_W=0.0)                    # Z2 对照批与运行批只差 α_W 的值
++    assert b2["alpha_W"] == 0.0 and a2["alpha_W"] is None
++
++
++def test_arm_specs_rejects_bad_seed() -> None:
++    for bad in (-1, "7", 2.5, True):
++        with pytest.raises(ValueError, match="seed"):
++            arm_specs(bad, alpha_W=1.0)
++
++
++def test_inconclusive_exit_is_declared_in_code() -> None:
++    """「两臂皆否 ⇒ S0 尺度不可裁决」跑前就在代码里，不是事后解释（草案 §五 预注册红线）。"""
++    from s0_kernel.arms import declare_inconclusive_exit
++    assert declare_inconclusive_exit() == INCONCLUSIVE_EXIT
++    assert "不可裁决" in INCONCLUSIVE_EXIT and "跑批前" in INCONCLUSIVE_EXIT
++
++
++def test_arms_module_is_deterministic_and_rng_free() -> None:
++    """不消费 RNG：AST 级守卫（docstring 里提 random 不算违规，只看 import 节点）。"""
++    import ast
++    import s0_kernel.arms as mod
++
++    seq = [w_a(g / 20.0, k=1.0) for g in range(21)]
++    assert seq == [w_a(g / 20.0, k=1.0) for g in range(21)]
++    seqb = [w_b(0.7, nu / 10.0, 1.0) for nu in range(11)]
++    assert seqb == [w_b(0.7, nu / 10.0, 1.0) for nu in range(11)]
++
++    tree = ast.parse(open(mod.__file__, encoding="utf-8").read())
++    got = set()
++    for node in ast.walk(tree):
++        if isinstance(node, ast.Import):
++            got |= {al.name for al in node.names}
++        elif isinstance(node, ast.ImportFrom) and node.module:
++            got.add(node.module)
++    assert got <= {"__future__", "math", "dataclasses", "simulation.config"}, sorted(got)
++
++
++def test_main_engine_does_not_import_s0_kernel() -> None:
++    """零行为面实证：干净子进程里 import 主引擎后，`s0_kernel` 不在 `sys.modules`。"""
++    import subprocess
++    import sys
++    from pathlib import Path
++    root = Path(__file__).resolve().parents[1]
++    r = subprocess.run([sys.executable, "-c",
++                        "import simulation.sphere_engine, sys;"
++                        "print('s0_kernel' in sys.modules)"],
++                       capture_output=True, text=True, encoding="utf-8", errors="replace",
++                       cwd=str(root), timeout=300)
++    assert r.returncode == 0, r.stderr
++    assert r.stdout.strip().endswith("False"), r.stdout
+-- 
+2.46.1.windows.1
+
+
+From 035c4c0fc11fabf9cfee4b00a261b14b8362cd1f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 01:35:53 +0800
+Subject: [PATCH 05/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20feat(s0=5Fkernel):=20S0-kernel-b=20=E7=AC=AC?=
+ =?UTF-8?q?=E4=BA=8C=E5=8D=8A=E2=80=94=E2=80=94run=5Farm=20=E5=87=BA?=
+ =?UTF-8?q?=E8=B4=A7=E9=9D=A2=20+=20=E5=90=8C=20seed=20=E9=80=90=E4=BD=8D?=
+ =?UTF-8?q?=E5=A4=8D=E7=8E=B0=EF=BC=88=E7=A0=9A=20ack=20=E4=B8=89=E6=9D=A1?=
+ =?UTF-8?q?=E4=BB=B6=E8=90=BD=E7=A0=81=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`s0_kernel/harness.py`（新）：双臂共用的最小世界 + `run_arm(spec) -> Path`（砚 @11361 接线目标）。
+· 为什么必须自带小容器：预注册 §二 共同面钉死"同一 harness／同小网格档＋N_ind≤500／同 seed＋同 RNG 消费
+  顺序"⇒ 拿主引擎默认档跑 A 臂是错的（装置不同源 ⇒ A/B 差克里混装置差），我 01:3x 帖上那句自纠作废。
+· 固定抽取顺序 ①初始位置 ②移动 ③变异正态 ④逐个出生点变异抽签；两臂各 default_rng(seed) ⇒ 同 seed
+  初始群体逐位相同，分叉只能来自被测通道。
+· 出货面：CSV 六列 `tick,ind_id,cell,g,energy,age`（g 为 [0,1] 原始轴，禁分位/秩）+ manifest 回显
+  全部装置参数、`arm_impl_commit`、`arms_sha256`/`harness_sha256`（砚条件②）。
+· fail-loud 三门（砚条件①）：spec 缺字段 KeyError／ticks 越界／demography 类型错／A 臂 alpha_W 非 null
+  （0.0 也拒——那是 Z2 专用语义）／B 臂 alpha_W 为 null／灭绝早停 RuntimeError／world.tick≠ticks。
+· 装置参数 Demography 逐条标 [待锁]（无权威值，我按单值起并全文回显；改值=换装置=禁与旧批比）；
+  声明"无密度依赖"为装置事实：W 是 S0 唯一选择通道，规模由 max_ind 兜住并记 cap_hits，不静默淘汰。
+· 零行为面：harness 只 import world.sphere_world＋numpy，不碰 simulation.sphere_engine；
+  `test_kernel_consumes_no_rng` 改成 **AST 级**并分两档（账本层+arms 零 RNG／harness 唯一消费者，
+  换取同 seed 逐位复现硬门）——子串匹配会把 docstring 里提"random"误判成违规，这坑我踩过一次。
+
+测试：tests/test_s0_harness.py 15 例；变异靶 H1(null 校验)/H2(灭绝 raise)/H3(ν 恒 0)/H4(出生不判能量阈)/
+H5(A 臂误走 B 支) **五条全红**（已还原，H4 是复测补钉：初版测试漏判"繁殖失控"）。
+微型自测冒烟（40 个体×60–120 tick，墙钟 <1s，非批次）：同 seed 两跑 digest 与 CSV 字节级一致；
+A 臂对 σ_C 逐位不敏感、B 臂在 arms 层随 ν 变。s0 四件合计 133 passed；a2b 审计 3 红为**本分支既存**
+（我把新文件全撤后仍 3 红，且审计工具未把 arms/harness 列为发现项）。
+---
+ s0_kernel/__init__.py    |   6 +-
+ s0_kernel/harness.py     | 278 +++++++++++++++++++++++++++++++++++++++
+ tests/test_s0_harness.py | 205 +++++++++++++++++++++++++++++
+ tests/test_s0_kernel.py  |  29 +++-
+ 4 files changed, 513 insertions(+), 5 deletions(-)
+ create mode 100644 s0_kernel/harness.py
+ create mode 100644 tests/test_s0_harness.py
+
+diff --git a/s0_kernel/__init__.py b/s0_kernel/__init__.py
+index 1c69077..7d446c0 100644
+--- a/s0_kernel/__init__.py
++++ b/s0_kernel/__init__.py
+@@ -10,9 +10,9 @@
+   唯一会合点是 `Books.close()` ⇒ 杜绝"由构造恒真"的尾差假绿（`_audit_*:521` / test_o7 同族）。
+ - **未登记的写能量动作当场 raise**（fail-loud）：旁路 `apply()` ⇒ `ChannelViolation`；
+   未登记真实写点 ⇒ `close()` 非零（变异 M1–M3/M5 证明）。
+-- **不消费 RNG**：本包不 import `random`/`numpy.random`，同参数跑两次逐位相同。
++- **不消费 RNG（除 `harness`）**：`accounts/channels/books/world/closed_loop/arms` 全不 import `random`/`numpy.random`，同参数跑两次逐位相同；**唯一**消费 RNG 的是 `harness`（它要模拟抽样），代价是必须**同 seed 逐位复现**（`tests/test_s0_harness.py` 钉字节级一致）。
+ 
+-模块分层（单向依赖，无环）：`accounts` → `channels` → `books` → `world` → `closed_loop`。
++模块分层（单向依赖，无环）：`accounts` → `channels` → `books` → `world` → `closed_loop`；获取函数层 `arms`（纯函数）→ 出货层 `harness`（`run_arm`）。
+ """
+ 
+ from __future__ import annotations
+@@ -25,6 +25,7 @@ from .arms import (F_FORMS, INCONCLUSIVE_EXIT, SIGMA_C_PROVISIONAL, WINDOW_GUARD
+                    nu_local, nu_proxy, success_s, w_a, w_b, w_b0, w_mn, w_mr)
+ from .books import DOMAIN_ACCOUNTS, Books, resolve_domain
+ from .channels import DIS, ESC, INJ, TRF, Channel, ChannelRegistry, ChannelViolation
++from .harness import Demography, S0World, run_arm
+ from .world import (ConservationViolation, World, WorldOptions, check_tick, default_registry,
+                     run)
+ 
+@@ -38,4 +39,5 @@ __all__ = [
+     "clamp_is_active", "declare_inconclusive_exit", "default_predation", "f_a1", "f_gn",
+     "has_interior_valley", "is_inside_valley_window", "nu_local", "nu_proxy", "success_s",
+     "w_a", "w_b", "w_b0", "w_mn", "w_mr",
++    "Demography", "S0World", "run_arm",
+ ]
+diff --git a/s0_kernel/harness.py b/s0_kernel/harness.py
+new file mode 100644
+index 0000000..997a4d1
+--- /dev/null
++++ b/s0_kernel/harness.py
+@@ -0,0 +1,278 @@
++"""`s0_kernel.harness` —— 双臂 S0 的**最小可跑世界**与 `run_arm` 出货面（S0-kernel-b 第二半）。
++
++为什么存在
++----------
++预注册 §二 共同面写死了三条硬条件：同一 harness、同小网格档＋同 `N_ind` 预算（≤500）、
++同 seed 与同 RNG 消费顺序。⇒ **双臂只能活在这个小容器里**（草案 §一-3：拿现役引擎做双臂
++必须冻结全部装置开关，等于重造）。⚠️ 因此"用主引擎默认档跑 A 臂"是**错的**（装置不同源 ⇒
++A/B 差克里混进装置差），我 01:3x 帖上那句已自纠。
++
++四律落点
++--------
++- **不触主引擎**：本模块只 import `world.sphere_world`（只读用网格拓扑）与 numpy，
++  **不 import `simulation.sphere_engine`**（守卫测试钉住）⇒ 现役引擎逐位等价门零影响。
++- **同流形制**：两臂各自 `default_rng(seed)`（初始状态相同），每 tick 的抽取**顺序固定**
++  （① 初始位置 ② 移动 ③ 变异正态 ④ 逐个出生点的变异抽签），⇒ 同 seed 同初世界、差分只落在被测通道上。
++- **无密度依赖**（by design）：`W` 是 S0 唯一的**选择通道**，资源不耗尽、不排队；规模由
++  `max_ind` 兜住并记 `cap_hits`（触顶不静默淘汰既存个体）。⇒ 读数只反映"g 轴上的适应度差"，
++  不掺承载力动力学。这条是**装置声明**，不是省略。
++- **fail-loud 三门**（砚 ack 条件①）：spec 缺字段／越界／灭绝早停／非干净退出 ⇒ 一律 raise，
++  不许"少跑几个 tick"或"参数缺省凑跑"。
++- **出货面**（砚 ack 条件②＋§三-2）：逐 tick 个体 g 行 CSV ＋ manifest 增量
++  `arm_impl_commit` ＋ 统计码 hash（`arms_sha256`/`harness_sha256`）＋ 全部装置参数回显。
++
++🔴 装置参数（`Demography`）＝**待随标定批锁**：预注册只钉了网格/规模/tick/seed 轴，
++出生阈、变异 σ、死亡率、代谢、`intake_scale` 这些**人口学旋钮没有权威值** ⇒ 本模块给一组
++显式单值并在 docstring 与 manifest 里逐条标 `[待锁]`；改任一值 = 换装置 = 读数禁与旧批比。
++判据（谷深 D／峰位／出不出）**不在本模块**（R225/R394④）。
++"""
++from __future__ import annotations
++
++import csv
++import hashlib
++import json
++from dataclasses import asdict, dataclass, field
++from pathlib import Path
++
++import numpy as np
++
++from world.sphere_world import SphereWorld
++
++from .arms import Landscape, arm_specs, nu_local, w_a, w_b
++
++REQUIRED_SPEC_KEYS = ("run_id", "arm", "seed", "ticks", "sample", "alpha_W", "demography")
++
++
++@dataclass
++class Demography:
++    """S0 最小世界的人口学旋钮（全部 **待锁**；改值即换装置）。"""
++
++    n_ind0: int = 500              # [待锁] 初始个体数（§二 上限取满）
++    rows: int = 120                # [待锁] 网格档：120×240 = 28,800 格（草案 §五 不可裁决论证用的同一尺度）
++    cols: int = 240
++    e0: float = 60.0               # [待锁] 初始能量（照引擎 organisms.initial_energy 口径取值，非借用引擎行为）
++    meta: float = 0.5              # [待锁] 每 tick 维持代谢
++    intake_scale: float = 1.0      # [待锁] W→能量/ tick 的换算（W 是 E-034 归一化速率）
++    repro_at: float = 90.0         # [待锁] 出生阈（≥1.5×e0 ⇒ 一次出生两半各 45）
++    repro_cost: float = 0.5        # [待锁] 出生时母体保留比例
++    mut_rate: float = 0.05         # [待锁] 每代变异概率
++    mut_sigma: float = 0.05        # [待锁] 变异幅度（g 轴加性高斯，clip 到 [0,1]）
++    lifespan: int = 400            # [待锁] 最大年龄（tick）
++    max_ind: int = 2000            # [待锁] 硬上限（防爆炸；触顶记 `cap_hits`，不静默淘汰）
++
++    def __post_init__(self) -> None:
++        if self.n_ind0 < 1 or self.rows < 3 or self.cols < 3:
++            raise ValueError(f"规模非法：n_ind0={self.n_ind0} rows={self.rows} cols={self.cols}")
++        if self.repro_at <= self.e0:
++            raise ValueError(f"repro_at 必须 > e0（否则第 0 tick 就爆炸），实得 {self.repro_at}")
++        if not 0.0 < self.repro_cost < 1.0:
++            raise ValueError(f"repro_cost ∈ (0,1)，实得 {self.repro_cost}")
++        if self.meta < 0.0 or self.intake_scale <= 0.0 or self.mut_sigma < 0.0:
++            raise ValueError("meta ≥ 0、intake_scale > 0、mut_sigma ≥ 0")
++        if self.lifespan < 1 or self.max_ind < self.n_ind0:
++            raise ValueError("lifespan ≥ 1 且 max_ind ≥ n_ind0")
++
++
++def _sha256_of(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
++
++
++class S0World:
++    """双臂共用的最小世界：格上个体、按 W 进食、分裂繁殖、年龄/饥饿死亡。"""
++
++    def __init__(self, seed: int, arm: str, alpha_W: float | None, dem: Demography,
++                 land: Landscape | None = None) -> None:
++        if arm not in ("A", "B"):
++            raise ValueError(f"arm 只能是 'A' 或 'B'，实得 {arm!r}")
++        if arm == "A" and alpha_W is not None:
++            raise ValueError(f"A 臂不消费 alpha_W（须记 null，不许记 0.0），实得 {alpha_W!r}")
++        if arm == "B" and alpha_W is None:
++            raise ValueError("B 臂必须显式给 alpha_W（运行批 1.0／Z2 对照批 0.0）")
++        self.arm = arm
++        self.alpha_W = alpha_W
++        self.dem, self.land = dem, (land or Landscape())
++        self.world = SphereWorld(rows=dem.rows, cols=dem.cols)
++        self.n_cells = self.world.n_cells
++        self.rng = np.random.default_rng(int(seed))          # 每臂一条流；同 seed ⇒ 同初状态
++        self.seed = int(seed)
++        self.tick = 0
++        self.cap_hits = 0
++        self._next_id = 0
++        self.cells: list[int] = []
++        self.g: list[float] = []
++        self.e: list[float] = []
++        self.age: list[int] = []
++        self.alive: list[bool] = []
++        self._spawn(dem.n_ind0)
++
++    # ---- 初始群体 ---------------------------------------------------------------
++    def _spawn(self, n: int) -> None:
++        dem = self.dem
++        cells = self.rng.integers(0, self.n_cells, size=n, dtype=np.int64)   # 抽取①（位置）
++        for c in cells:
++            self.cells.append(int(c))
++            self.g.append(0.5)                    # [待锁] 初表型：g 轴中点（无先验偏置）
++            self.e.append(dem.e0)
++            self.age.append(0)
++            self.alive.append(True)
++            self._next_id += 1
++
++    # ---- 每 tick 的固定抽取顺序（②移动 ③变异 ④出生抽签）--------------------------
++    def step(self) -> None:
++        dem = self.dem
++        occ: dict[int, list[int]] = {}
++        for i, c in enumerate(self.cells):
++            if self.alive[i]:
++                occ.setdefault(c, []).append(i)
++        nb = {c: np.asarray(self.world.neighbors(c), dtype=np.int64) for c in occ}
++
++        r_move = self.rng.random(len(self.cells))                     # 抽取②
++        r_mut = self.rng.normal(0.0, 1.0, size=len(self.g))           # 抽取③
++
++        # 1) 进食：A 臂 W(g)，B 臂 W(g,ν)——ν 用**近邻同类核密度**（镜 §一定义）
++        for i in range(len(self.g)):
++            if not self.alive[i]:
++                continue
++            neigh_g: list[float] = []
++            for c in nb.get(self.cells[i], ()):
++                for j in occ.get(int(c), ()):
++                    if j != i:
++                        neigh_g.append(self.g[j])
++            if self.arm == "A":
++                intake = w_a(self.g[i], pred=None, land=self.land)
++            else:
++                nu = nu_local(self.g[i], neigh_g, sigma_c=self.land.sigma_c)
++                intake = w_b(self.g[i], nu, self.alpha_W, land=self.land)
++            self.e[i] += intake * dem.intake_scale - dem.meta
++
++        # 2) 移动（每存活个体一次；空格/同格都算消费过一次抽取 ⇒ 两臂顺序一致）
++        for i in range(len(self.cells)):
++            if not self.alive[i]:
++                continue
++            options = nb.get(self.cells[i])
++            if options is None or len(options) == 0:
++                continue
++            pick = options[int(r_move[i] * len(options)) % len(options)]
++            self.cells[i] = int(pick)
++
++        # 3) 死亡：饥饿 / 超龄
++        for i in range(len(self.g)):
++            if not self.alive[i]:
++                continue
++            self.age[i] += 1
++            if self.e[i] <= 0.0 or self.age[i] > dem.lifespan:
++                self.alive[i] = False
++
++        # 4) 出生（遍历快照长度 ⇒ 本 tick 新个体不立即再分裂）
++        n_now = len(self.g)
++        for i in range(n_now):
++            if not self.alive[i] or self.e[i] < dem.repro_at:
++                continue
++            child_g = self.g[i]
++            if self.rng.random() < dem.mut_rate:        # 抽取④：逐个出生点，两臂顺序一致
++                child_g = min(max(child_g + r_mut[i] * dem.mut_sigma, 0.0), 1.0)
++            self.e[i] *= dem.repro_cost
++            if len(self.g) >= dem.max_ind:
++                self.cap_hits += 1                      # 触顶：记账、不静默淘汰既存个体
++                continue
++            self.cells.append(self.cells[i])
++            self.g.append(float(child_g))
++            self.e.append(self.e[i])
++            self.age.append(0)
++            self.alive.append(True)
++            self._next_id += 1
++        self.tick += 1
++
++    # ---- 出货行（逐 tick 个体 g 行，砚 §三-2）--------------------------------------
++    def rows(self) -> list[tuple[int, int, int, float, float, int]]:
++        out = []
++        for i in range(len(self.g)):
++            if self.alive[i]:
++                out.append((self.tick, self._id_of(i), self.cells[i],
++                            round(float(self.g[i]), 9), round(float(self.e[i]), 6),
++                            int(self.age[i])))
++        return out
++
++    def _id_of(self, i: int) -> int:
++        return i                                  # 槽位即稳定 id（只追加、不压缩 ⇒ 跨窗可 join）
++
++    @property
++    def pop(self) -> int:
++        return sum(1 for a in self.alive if a)
++
++    def digest(self) -> tuple[int, int, float]:
++        """(Σ槽位, 人口, Σ能量 6 位)——只作**同流复现自检**，不作任何判据。"""
++        idx = sum(i for i in range(len(self.g)) if self.alive[i])
++        return (idx, self.pop, round(float(np.sum([e for e, a in zip(self.e, self.alive) if a])), 6))
++
++
++def run_arm(spec: dict, out_dir: Path | str) -> Path:
++    """跑一个 S0 run 并落 CSV＋manifest；砚 ack 三条件里的"接线目标"。
++
++    fail-loud：`spec` 缺任一 `REQUIRED_SPEC_KEYS` 或值越界 ⇒ `KeyError`/`ValueError`；
++    灭绝早停 ⇒ `RuntimeError`（少跑 tick 的批不许进判读）；两臂可比性由 `arm_specs` 侧硬校验。
++    """
++    missing = [k for k in REQUIRED_SPEC_KEYS if k not in spec]
++    if missing:
++        raise KeyError(f"run_arm spec 缺字段 {missing}（REQUIRED={list(REQUIRED_SPEC_KEYS)}）")
++    arm = str(spec["arm"])
++    if arm == "A" and spec["alpha_W"] is not None:
++        raise ValueError(
++            f"A 臂 spec 的 alpha_W 必须是 null（H2 §一.3：`0.0` 是 Z2 零对照的专用语义，"
++            f"A 臂是「该项不存在」）；实得 {spec['alpha_W']!r}"
++        )
++    if arm == "B" and spec["alpha_W"] is None:
++        raise ValueError("B 臂 spec 必须显式给 alpha_W（运行批 1.0／Z2 对照批 0.0），实得 null")
++    dem = spec["demography"]
++    if isinstance(dem, dict):
++        dem = Demography(**dem)
++    if not isinstance(dem, Demography):
++        raise TypeError(f"demography 必须是 Demography 或 dict，实得 {type(dem).__name__}")
++    ticks, sample = int(spec["ticks"]), int(spec["sample"])
++    if ticks < 1 or sample < 1:
++        raise ValueError(f"ticks/sample 必须 ≥1，实得 {ticks}/{sample}")
++
++    a_spec, b_spec = arm_specs(int(spec["seed"]),
++                               alpha_W=(float(spec["alpha_W"]) if arm == "B" else 0.0))
++    chosen = a_spec if spec["arm"] == "A" else b_spec
++    world = S0World(int(spec["seed"]), str(spec["arm"]), chosen["alpha_W"], dem,
++                    land=chosen["landscape"])
++    if spec["arm"] == "A" and world.alpha_W is not None:
++        raise RuntimeError("A 臂拿到的 alpha_W 非 null ⇒ 双臂隔离破了")
++
++    out_dir = Path(out_dir)
++    out_dir.mkdir(parents=True, exist_ok=True)
++    csv_path = out_dir / f"{spec['run_id']}.csv"
++    data_rows: list[tuple] = []
++    for t in range(1, ticks + 1):
++        world.step()
++        if world.pop <= 0:
++            raise RuntimeError(
++                f"灭绝早停于 tick {t}/{ticks}（run={spec['run_id']}）⇒ 本 run 不可进判读，"
++                f"要么调装置档要么如实登记，不许拿短跑当同档读数")
++        if t % sample == 0 or t == ticks:
++            data_rows.extend(world.rows())
++
++    if world.tick != ticks:
++        raise RuntimeError(f"非干净退出：world.tick={world.tick} ≠ ticks={ticks}")
++    with csv_path.open("w", encoding="utf-8", newline="") as f:
++        w = csv.writer(f)
++        w.writerow(["tick", "ind_id", "cell", "g", "energy", "age"])
++        w.writerows(data_rows)
++
++    here = Path(__file__).resolve().parent
++    manifest = {
++        "run_id": str(spec["run_id"]), "arm": str(spec["arm"]), "seed": world.seed,
++        "alpha_W": world.alpha_W, "f_form": chosen["f_form"], "ticks": ticks,
++        "sample": sample, "rows_written": len(data_rows), "pop_end": world.pop,
++        "cap_hits": world.cap_hits, "digest": list(world.digest()),
++        "n_cells": world.n_cells, "demography": asdict(dem),
++        "landscape": asdict(world.land),
++        "arm_impl_commit": spec.get("arm_impl_commit", "unknown"),
++        "arms_sha256": _sha256_of(here / "arms.py"),
++        "harness_sha256": _sha256_of(here / "harness.py"),
++        "csv": csv_path.name,
++    }
++    (out_dir / f"{spec['run_id']}.manifest.json").write_text(
++        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
++    return csv_path
+diff --git a/tests/test_s0_harness.py b/tests/test_s0_harness.py
+new file mode 100644
+index 0000000..2bd886f
+--- /dev/null
++++ b/tests/test_s0_harness.py
+@@ -0,0 +1,205 @@
++"""`s0_kernel.harness` 的靶向测试（S0-kernel-b 第二半：出货面与同流形制）。
++
++钉的四件事：
++1. **同 seed 逐位复现**（digest 与 CSV 字节级一致）⇒ 砚的断点续跑/checkpoint 依赖它；
++2. **fail-loud 三门**（spec 缺字段、A/B 与 `alpha_W` 的语义错配、灭绝早停、非干净退出）；
++3. **两臂只在被测通道上不同**（同一初始群体：同 seed ⇒ 初始位置数组逐位相同）；
++4. **出货面格式**（`tick,ind_id,cell,g,energy,age` 六列、`g` 是 [0,1] 原始轴、manifest 增量齐）。
++
++小档纪律：本文件全部用微型装置（60 个体 × 120 tick，墙钟 <1s），是**自测冒烟**，不是批次（R117）。
++"""
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++
++from s0_kernel.harness import Demography, S0World, run_arm
++
++SMALL = dict(n_ind0=40, rows=20, cols=40, max_ind=200)
++
++
++def _spec(run_id: str, arm: str, alpha_W, *, seed: int = 207, ticks: int = 60) -> dict:
++    return {"run_id": run_id, "arm": arm, "seed": seed, "ticks": ticks, "sample": 20,
++            "alpha_W": alpha_W, "demography": Demography(**SMALL), "arm_impl_commit": "test"}
++
++
++def _manifest(csv_path: Path) -> dict:
++    return json.loads(csv_path.with_suffix(".manifest.json").read_text(encoding="utf-8"))
++
++
++# ---------------------------------------------------------------- ① 同流复现
++
++def test_same_seed_same_arm_is_bitwise_reproducible(tmp_path) -> None:
++    """同 seed 同臂两次 ⇒ digest 与 CSV **字节级**相同（断点续跑的前提）。"""
++    p1 = run_arm(_spec("r1", "A", None), tmp_path)
++    p2 = run_arm(_spec("r2", "A", None), tmp_path)
++    m1, m2 = _manifest(p1), _manifest(p2)
++    assert m1["digest"] == m2["digest"] == m1["digest"]
++    assert p1.read_bytes().replace(b"r1", b"r2") == p2.read_bytes()
++    assert m1["arms_sha256"] and m1["harness_sha256"] and len(m1["arms_sha256"]) == 16
++
++
++def test_wall_tick_cost_is_reported_and_small(tmp_path) -> None:
++    """自测性能表的最小形：微型档墙钟必须 <5s（正式档计时项归标定批，不在单测里跑）。"""
++    import time
++    t0 = time.perf_counter()
++    m = _manifest(run_arm(_spec("perf", "B", 1.0), tmp_path))
++    wall = time.perf_counter() - t0
++    assert wall < 5.0, wall
++    assert m["ticks"] == 60 and m["pop_end"] >= 0 and m["cap_hits"] >= 0
++
++
++# ---------------------------------------------------------------- ② fail-loud 三门
++
++def test_missing_spec_keys_raise() -> None:
++    bad = _spec("x", "A", 0.0)
++    del bad["sample"]
++    with pytest.raises(KeyError, match="sample"):
++        run_arm(bad, Path("/tmp/never_created_lz"))
++    for k in ("run_id", "arm", "seed", "ticks", "alpha_W", "demography"):
++        b2 = _spec("x", "A", 0.0)
++        del b2[k]
++        with pytest.raises(KeyError, match=k):
++            run_arm(b2, Path("/tmp/never_created_lz"))
++
++
++def test_bad_ticks_and_demography_raise() -> None:
++    for ticks in (0, -5):
++        with pytest.raises(ValueError, match="ticks/sample"):
++            run_arm(_spec("x", "A", None, ticks=ticks), Path("/tmp/never_created_lz"))
++    with pytest.raises(ValueError, match="repro_at"):
++        Demography(repro_at=10.0, e0=60.0)
++    with pytest.raises(ValueError, match="repro_cost"):
++        Demography(repro_cost=0.0)
++    with pytest.raises(ValueError, match="规模非法"):
++        Demography(n_ind0=0)
++    with pytest.raises(ValueError, match="intake_scale"):
++        Demography(intake_scale=0.0)
++
++
++def test_arm_alpha_W_semantics_are_enforced() -> None:
++    """A 臂必须 `null`、B 臂必须显式数值（H2 §一.3 的出货面版本；0.0 与 None 不许互换）。"""
++    with pytest.raises(ValueError, match="A 臂 spec 的 alpha_W 必须是 null"):
++        run_arm(_spec("x", "A", 1.0), Path("/tmp/never_created_lz"))
++    with pytest.raises(ValueError, match="A 臂 spec 的 alpha_W 必须是 null"):
++        run_arm(_spec("x", "A", 0.0), Path("/tmp/never_created_lz"))    # 0.0 也不行：那是 Z2 专用语义
++    with pytest.raises(ValueError, match="B 臂"):
++        run_arm(_spec("x", "B", None), Path("/tmp/never_created_lz"))
++    with pytest.raises(ValueError, match="arm 只能是"):
++        S0World(207, "C", None, Demography(**SMALL))
++
++
++def test_extinction_is_not_silent(tmp_path) -> None:
++    """饿死全群 ⇒ RuntimeError（少跑 tick 的 run 不许混进同档读数），不许静默交短批。"""
++    dem = Demography(**SMALL, meta=99.0, intake_scale=1e-9)     # 必灭绝（intake 归零但不违例）
++    spec = dict(_spec("dead", "A", None), demography=dem)
++    with pytest.raises(RuntimeError, match="灭绝早停"):
++        run_arm(spec, tmp_path)
++
++
++# ---------------------------------------------------------------- ③ 两臂差异只落在被测通道
++
++def test_same_seed_same_initial_population_across_arms(tmp_path) -> None:
++    """同 seed ⇒ 两臂**初始位置数组逐位相同**（配对差可用；差异只能来自 W 形与 α_W）。"""
++    wa = S0World(207, "A", None, Demography(**SMALL))   # S0World 层：A 臂只收 null
++    wb = S0World(207, "B", 1.0, Demography(**SMALL))
++    assert wa.cells == wb.cells
++    assert wa.g == wb.g and wa.e == wb.e
++    assert wa.land.sigma_c == wb.land.sigma_c
++    # A 臂不消费 ν；B 臂消费 ⇒ 这一步之后再跑，轨迹才会分叉（分叉源＝被测通道）
++    assert wa.alpha_W is None and wb.alpha_W == 1.0
++
++
++def test_zero_control_arm_B_tracks_W0_only(tmp_path) -> None:
++    """`alpha_W=0` 的 B 臂轨迹必须等于"没有 f 项"的 B 臂：与 α_W=1 支明显分叉。"""
++    z = _manifest(run_arm(_spec("z0", "B", 0.0), tmp_path))
++    o = _manifest(run_arm(_spec("z1", "B", 1.0), tmp_path))
++    assert z["alpha_W"] == 0.0 and o["alpha_W"] == 1.0
++    assert z["digest"] != o["digest"], "α_W=0 与 1 同 digest ⇒ f 项根本没进回路"
++
++
++# ---------------------------------------------------------------- ④ 出货面格式
++
++def test_csv_schema_and_raw_g_axis(tmp_path) -> None:
++    p = run_arm(_spec("sch", "B", 1.0), tmp_path)
++    lines = p.read_text(encoding="utf-8").splitlines()
++    assert lines[0] == "tick,ind_id,cell,g,energy,age"
++    assert len(lines) - 1 == _manifest(p)["rows_written"] > 0
++    for row in lines[1:]:
++        _, _, _, g, energy, age = row.split(",")
++        assert 0.0 <= float(g) <= 1.0, f"g 必须在原始轴 [0,1]：{g}"
++        assert float(energy) > 0.0 and int(age) >= 0
++
++
++def test_manifest_echoes_all_device_knobs(tmp_path) -> None:
++    """砚 ack 条件②：装置参数与统计码 hash 全部回显（禁"以默认值代实测"）。"""
++    m = _manifest(run_arm(_spec("man", "A", None), tmp_path))
++    for k in ("run_id", "arm", "seed", "ticks", "sample", "rows_written", "pop_end", "cap_hits",
++              "digest", "n_cells", "demography", "landscape", "arm_impl_commit", "arms_sha256",
++              "harness_sha256", "csv", "alpha_W", "f_form"):
++        assert k in m, k
++    assert m["arm_impl_commit"] == "test"
++    assert set(m["demography"]) >= {"n_ind0", "meta", "repro_at", "mut_rate", "mut_sigma",
++                                    "intake_scale", "lifespan", "max_ind"}
++    assert m["landscape"]["sigma_c"] > 0.0            # σ_C 单值回显（待标定批锁）
++
++
++def test_dict_demography_accepted_and_spec_demography_must_be_typed(tmp_path) -> None:
++    """`spec["demography"]` 允许 dict（链式脚本侧好传），但其它类型当场 raise。"""
++    spec = dict(_spec("dh", "A", None), demography=Demography(**SMALL).__dict__ if False
++                else {"n_ind0": 40, "rows": 20, "cols": 40, "max_ind": 200})
++    assert run_arm(spec, tmp_path).exists()
++    with pytest.raises(TypeError, match="demography"):
++        run_arm(dict(_spec("bad", "A", None), demography="nope"), tmp_path)
++
++
++def test_harness_does_not_import_main_engine() -> None:
++    """零行为面：harness 只碰 `world.sphere_world`＋numpy，**不 import 主引擎**。"""
++    import ast
++    import s0_kernel.harness as mod
++    tree = ast.parse(open(mod.__file__, encoding="utf-8").read())
++    got = set()
++    for node in ast.walk(tree):
++        if isinstance(node, ast.Import):
++            got |= {al.name for al in node.names}
++        elif isinstance(node, ast.ImportFrom) and node.module:
++            got.add(node.module)
++    assert "simulation" not in " ".join(sorted(got)), sorted(got)
++    assert got <= {"__future__", "csv", "hashlib", "json", "dataclasses", "pathlib",
++                   "numpy", "world.sphere_world", "arms"}, sorted(got)
++
++
++def test_arm_A_ignores_sigma_c_because_it_has_no_frequency_term(tmp_path) -> None:
++    """🔴 变异靶 H4：A 臂若误吃 ν（＝把 B 臂的频率项漏进对照臂）⇒ 本条红。
++
++    σ_C 只进 `nu_local` ⇒ A 臂轨迹对它**必须**逐位不敏感；B 臂一侧在 arms 层直接钉
++    （仿真里初代 g 全同 ⇒ ν=1 与 σ_C 无关，只有变异把 g 打散后才分叉 ⇒ 用短程仿真判"敏不敏感"
++    会假绿，这里不冒那个险）。
++    """
++    from s0_kernel.arms import Landscape, nu_local, w_b
++
++    d = []
++    for sc in (0.05, 0.4):
++        spec = dict(_spec(f"a{sc}", "A", None), demography=Demography(**SMALL))
++        d.append(_manifest(run_arm(spec, tmp_path))["digest"])
++    assert d[0] == d[1], "A 臂吃了 σ_C ⇒ 频率项漏进对照臂，双臂隔离破了"
++
++    mixed = [0.6, 0.6, 0.9, 0.3]
++    n_lo = nu_local(0.6, mixed, sigma_c=0.05)
++    n_hi = nu_local(0.6, mixed, sigma_c=0.4)
++    assert n_hi > n_lo > 0.0, (n_lo, n_hi)             # 核越宽 ⇒ 远表型也算竞争者
++    assert w_b(0.6, n_lo, 1.0, land=Landscape(sigma_c=0.05)) !=         w_b(0.6, n_hi, 1.0, land=Landscape(sigma_c=0.4))   # B 臂必须随 ν 变
++
++
++def test_birth_requires_energy_threshold(tmp_path) -> None:
++    """🔴 变异靶 H4：出生必须过能量阈（`repro_at`）——阈提到不可达 ⇒ 人口只出不进。
++
++    这条钉的是"繁殖不是每 tick 免费触发"；去掉阈判 ⇒ 本条红（人口直冲到 `max_ind`）。
++    """
++    dem = Demography(**SMALL, repro_at=1e9)
++    m = _manifest(run_arm(dict(_spec("nb", "B", 0.0), demography=dem), tmp_path))
++    assert m["cap_hits"] == 0
++    assert m["pop_end"] <= dem.n_ind0, (m["pop_end"], dem.n_ind0)
++    assert m["digest"][1] <= dem.n_ind0
+diff --git a/tests/test_s0_kernel.py b/tests/test_s0_kernel.py
+index 0df0ea0..663117e 100644
+--- a/tests/test_s0_kernel.py
++++ b/tests/test_s0_kernel.py
+@@ -270,10 +270,33 @@ def test_engine_never_imports_s0_kernel():
+     assert offenders == [], f"引擎已导入 s0_kernel：{offenders}"
+ 
+ 
++RNG_FREE_MODULES = ("accounts", "channels", "books", "world", "closed_loop", "arms")
++RNG_USER_MODULES = ("harness",)     # 唯一消费者：模拟要抽样 ⇒ 换取"同 seed 逐位复现"硬门
++
++
++def _imported_modules(name: str) -> set[str]:
++    """按 **AST** 取真实 import 面（子串匹配会把 docstring 里提"random"当成违规）。"""
++    import ast
++    src = inspect.getsource(importlib.import_module(f"s0_kernel.{name}"))
++    got: set[str] = set()
++    for node in ast.walk(ast.parse(src)):
++        if isinstance(node, ast.Import):
++            got |= {al.name for al in node.names}
++        elif isinstance(node, ast.ImportFrom) and node.module:
++            got.add(node.module)
++    return got
++
++
+ def test_kernel_consumes_no_rng():
+-    for name in ("accounts", "channels", "books", "world", "closed_loop"):
+-        src = inspect.getsource(importlib.import_module(f"s0_kernel.{name}"))
+-        assert "random" not in src and "np." not in src, name
++    """账本层与**获取函数层**（含 arms）零 RNG；出货层 harness 是唯一例外，另条钉其边界。"""
++    banned = {"random", "numpy.random", "np.random", "secrets"}
++    for name in RNG_FREE_MODULES:
++        got = _imported_modules(name)
++        assert not (got & banned), f"{name} 消费 RNG：{sorted(got & banned)}"
++    hg = _imported_modules("harness")
++    assert "numpy" in hg, "harness 该抽样却没抽 ⇒ 出货面退化"
++    assert "simulation" not in " ".join(sorted(hg)), "harness 不许碰主引擎（零行为面）"
++    assert "simulation.sphere_engine" not in " ".join(sorted(hg))
+ 
+ 
+ def test_same_options_give_bit_identical_state():
+-- 
+2.46.1.windows.1
+
+
+From 557bbc02b9b62c7387a679f7d2043751ddb4a253 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 01:37:53 +0800
+Subject: [PATCH 06/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E9=A2=84=E6=B3=A8=E5=86=8C):=20H2=20?=
+ =?UTF-8?q?=E9=99=84=E5=BD=95=20A=E2=80=94=E2=80=94C-A11=20=E9=98=88?=
+ =?UTF-8?q?=E5=80=BC=2025.0=E2=87=9220.0=20=E6=89=B9=E5=87=86=E5=85=A5?=
+ =?UTF-8?q?=E8=B4=A6=20+=20=E8=B0=B7=E7=AA=97=E5=AE=9E=E6=B5=8B=20+=20W(ga?=
+ =?UTF-8?q?te)=20=E8=B7=B3=E8=B7=83=E9=97=B4=E6=96=AD=E7=99=BB=E8=AE=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+承 PI @5220c30/@035c4c0 口径（"落 H2 附录一笔即可，不重开评审"）：正文不改写，只登记三条实测结论。
+①C-A11 触发阈值 = attack_cost ≥ 20.0（原 25.0 作废）——形态判据实测谷窗 cost×[200,450]，比 R197 原文
+[250,500] 下沿早 50×，按 25.0 设门会把 [20,25) 段真谷漏进主 2×2；代码守卫已取保守并集 [200,500]，
+三常量 WINDOW_QUOTED_R197/MEASURED/GUARD 并列各标来源。#10 结论不变（A 臂 ×1 窗外 200×~1000×）。
+②W(gate) 0.582 跳跃间断（原文 g=.3→1.0720 实为右极限）已移交砚出 δ/Z1 落点口径，arms 以 gate_inclusive 显式暴露。
+③α_W=0 必须短路不求值 f（数值等价≠语义等价），变异靶 M-B 用哨兵抓"算完乘 0"那一族假绿。
+---
+ ...\345\217\214\350\207\202S0-H2-20261009.md" | 21 +++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git "a/docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md" "b/docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md"
+index 2328f3c..3beb537 100644
+--- "a/docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md"
++++ "b/docs/\351\242\204\346\263\250\345\206\214/\350\220\275\347\254\224-\345\217\214\350\207\202S0-H2-20261009.md"
+@@ -112,3 +112,24 @@ inside_valley_window         = false              # 由上行三值现算，不
+ **【交球】** @砚 并 §一～§四 进 §七bis（#10/#11 勾位）＋ 采否第 3/7 两条新增建议 ＋ `cs` 单位留 `[待核]`；@PI `alpha_W` 落点一拍（不阻塞，我按 s0_kernel 落笔已在写）＋ `C-A11` 归号；@轻舟 落点若裁"进 `SimConfig`"，config 面按你 ack 六接走，我这边定名与臂侧消费不动。R387 留痕：本笔无悬置问，双臂 run 的阻塞点我自己消。
+ 
+ —— 澜舟 `[开发·二线]`｜`task/ENERGY-CLOSE`@`2111d15`｜署名逐命令 `-c` 显式（R371）｜不裁定（PI）·判据归砚
++
++---
++
++## 附录 A · C-A11 阈值勘正与两处实测（PI 10-09 01:5x 批准一笔，不重开评审）
++
++承 PI 板帖 @`5220c30`／@`035c4c0` 口径，H2 正文**不改写**，只在此登记三条实测结论（`s0_kernel/arms.py` ＋ `tests/test_s0_arms.py` 为证据件）：
++
++1. 🔴 **`C-A11` 触发阈值 = `attack_cost ≥ 20.0`（原建议 25.0 作废）** 或 `forage_tradeoff_k ≠ 0.0`。
++   依据：我用**形态判据**（两端皆高于内部极小，弃 R197 已推翻的梯度阈法）实测 A 臂谷窗 =
++   **`cost × [200, 450]`**，比 R197 原文 `[250, 500]` 的**下沿早 50×** ⇒ 按 25.0 设门会把
++   `[20.0, 25.0)` 这段真谷漏进主 2×2。代码守卫已取**保守并集** `WINDOW_GUARD = [200, 500]`
++   （`arms.py` 内 `WINDOW_QUOTED_R197`／`WINDOW_MEASURED`／`WINDOW_GUARD` 三常量并列、来源各标）。
++   **#10 结论不变**：A 臂定参 `0.1 / 0.0` = ×1 ⇒ 窗外（两种 `cs` 读法均成立，窗外倍数 200×～1000×）。
++2. **`W(gate)` 有 0.582 的跳跃间断**（原文「`g=.3 → 1.0720`」实为**右极限**，严格 `g > gate` 下 `W(0.3)=0.49`）
++   ⇒ 已移交砚并入 δ／Z1 的峰位落点口径（板 @`5220c30` 登记）；本模块用 `gate_inclusive` 显式暴露，
++   默认关＝引擎字面语义（`:4057`/`:4129`）。
++3. **`α_W=0` 必须是短路**（`f` 不求值）而不是"算完乘 0"：数值等价、语义不等价——镜 §三-3 的隔离论证
++   靠代码路径成立。变异靶 M-B 专门用哨兵抓这一族（普通数值断言抓不到）。
++
++其余（`α_W` 定名与落点、A 臂移植符号锚、两支覆盖口径、纪元取舍）照正文不变；
++B 臂形状与 `W₀` 定义已按镜 @`b5a7526` 定形实装，`f` 只认 A1、他形即 raise。
+-- 
+2.46.1.windows.1
+
+
+From 195b348adf2d73229b358dd72fc07276c78f8250 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 20:59:57 +0800
+Subject: [PATCH 07/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20perf(s0=5Fkernel):=20kernel-b=20=E8=87=AA=E6=B5=8B?=
+ =?UTF-8?q?=E6=80=A7=E8=83=BD=E8=A1=A8=E5=85=A5=E5=BA=93=EF=BC=88tools/s0?=
+ =?UTF-8?q?=5Fselftest=5Fperf.py=20+=20=E8=AE=B0=E5=BD=95=EF=BC=89?=
+ =?UTF-8?q?=EF=BC=8C=E6=9C=AC=E6=9C=BA=E5=BE=AE=E5=9F=BA=E5=87=86=E9=9D=9E?=
+ =?UTF-8?q?=E8=B7=91=E6=89=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+承 PI 10-09 20:5x 班「性能表现在就起，夜墙前收口」：
+· 口径＝独立进程（--mode fresh 默认，每档 3 进程取中位）：s0_formal A 臂 7.29ms/tick ⇒ 20000t≈145.8s/run
+  ⇒ 32run 串行 1.30h；B(α_W=1) 6.15 ⇒ 1.09h；B(α_W=0) 6.56 ⇒ 1.17h；max_ind 5000 档 9.93 ⇒ 1.76h；
+  微型档 0.27–0.44ms/tick（单测继续用微型档）。⇒ 本机落"≤3h 本机档"内，与云 2 路 1.1–1.2h 同量级；
+  两条码路禁互推（板上云机数走主引擎+步A 探针，本表走 S0 容器），已在记录 §一-2 写明。
+· 🔴 方法论一条（本笔最要紧）：同进程连跑的 ms/tick 中位 14.5–18.8，比独立进程冷启动 6.9–7.7 高 2–2.4 倍，
+  而行为逐位相同（pop/cap_hits/digest 三轮一致）⇒ 涨的是解释器与内存侧自身污染。chain 本就逐 run 起进程，
+  机时规划只认 fresh；若改成同进程连跑取中位会凭空多算一倍机时、还可能把变慢误读成行为变化。
+  脚本保留 --mode inproc 专为把这个坑摆出来对比。
+· 成本随人口不随格数（28,800 格同、max_ind 2000→5000 使 ms/tick 7.29→9.93）⇒ 压机时只能压 max_ind/人口。
+· 正式规模下 α_W=1 支末人口 1969·cap_hits=0，α_W=0 支顶 2000·cap_hits=3984 ⇒ 我 01:5x 的装置水位差
+  [待裁] 在正式档变成可读信号；但 A 支 cap_hits=17962 说明承载力实为 max_ind ⇒ pop+cap_hits 必须入册
+  共同面（PI 已按标注假设先行，判读候砚），否则顶格拒绝噪声会被读成效应。
+· bench_one 支持装置字段透传（可做 max_ind/lifespan 敏感性，不改脚本）；微基准内灭绝即 raise。
+· 未入数据仓（JSON 只落本机 --out 路径），入仓与否由砚/PI 裁。测试 +1 例（脚本可跑+字段齐+灭绝 raise），
+  s0 四件 99 passed。
+---
+ ...0\247\350\203\275\350\241\250-20261009.md" |  68 +++++++
+ tests/test_s0_harness.py                      |  21 +++
+ tools/s0_selftest_perf.py                     | 166 ++++++++++++++++++
+ 3 files changed, 255 insertions(+)
+ create mode 100644 "docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md"
+ create mode 100644 tools/s0_selftest_perf.py
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md"
+new file mode 100644
+index 0000000..2f3da3a
+--- /dev/null
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md"
+@@ -0,0 +1,68 @@
++# 记录 · S0-kernel-b 自测性能表（wall/tick 真值，Pre-Flight 用）
++
++> 日期 2026-10-09｜执行人 澜舟 `[开发·二线]`｜代码基线 `task/ENERGY-CLOSE@035c4c0`
++> 工具 `tools/s0_selftest_perf.py`（R342 入库）｜性质 **本机微基准，非跑批**（R117 无涉，未入数据仓）
++> 应令 PI 10-09 20:5x 班：「性能表现在就起，夜墙前收口」
++
++## 一、口径三条（先说清测的是什么，防跨码路互推）
++
++1. 测的是 **`s0_kernel.harness.S0World.step()`**＝S0 双臂的最小容器（500 个体／28,800 格档）。
++2. 🔴 **与主引擎是两条码路，禁互推**：板上的云机数（1500 tick=4.39s、seed7 五腿逐位同、20000t≈58s、
++   32run≈31min）走的是 **主引擎＋步A 探针**链路；本表走的是 S0 容器（纯 py 逐个体循环）。
++   ⇒ 拿云机那条推 S0 机时会低估一个数量级，两栏必须分开记。
++3. 计时项的**权威值仍归砚**（§七bis #9 唯一源＝点火程序令 @`dda9d5d`）；本表只交 Pre-Flight 要的
++   wall/tick 真值与规模敏感性，不代钉机时承诺。
++
++## 二、实测表（本机 AMD64／Python 3.14.7，seed=207，**计时口径＝独立进程** `--mode fresh`，每档 3 进程取中位）
++
++| 档 | 臂 | α_W | 格数 | max_ind | ms/tick 中位 | ms/tick 最差 | 末人口 | cap_hits | 外推 20000t 秒/run | 外推 32run 串行 |
++|---|---|---|---|---|---|---|---|---|---|---|
++| s0_formal | A | null | 28,800 | 2000 | **7.29** | 8.27 | 2000 | 17962 | 145.8 | **1.30 h** |
++| s0_formal_B | B | 1.0 | 28,800 | 2000 | **6.15** | 6.65 | 1969 | **0** | 123.0 | 1.09 h |
++| s0_z2_B | B | 0.0 | 28,800 | 2000 | 6.56 | 6.77 | 2000 | 3984 | 131.2 | 1.17 h |
++| uncapped_small | A | null | 800 | 60 | 0.27 | 0.34 | 60 | 840 | 5.4 | 0.05 h |
++| uncapped_small_B | B | 1.0 | 800 | 60 | 0.44 | 0.48 | 60 | 21 | 8.7 | 0.08 h |
++| cap_probe | A | null | 28,800 | 5000 | 9.93 | 10.27 | 5000 | 3049 | 198.5 | 1.76 h |
++
++外推公式（脚本内一行）：`秒/run ≈ ms/tick(中位) × 20000 / 1000`；32run 按串行同系数乘。
++标 [外推]——300/120 tick 窗口外推到 20,000 tick **不含**长期人口漂移；计时权威值仍归砚（§七bis #9）。
++
++### 二·补 计时口径为什么会差 2～2.4 倍（本笔最要紧的一条方法论）
++
++同一 seed、同一装置，**同一进程内连跑**的 `ms/tick` 中位是 **14.5～18.8**（首轮冷启动 6.9～7.7，
++随后逐轮抬到 15～19），而**行为逐位相同**（`pop`、`cap_hits`、digest 三轮完全一致）。
++⇒ 涨的是解释器/内存侧的自身污染，不是模拟内容。chain 脚本 `tools/s0_batch_chain.py` 本来就
++**逐 run 起独立进程** ⇒ 机时规划认 fresh 那一栏（1.1–1.3 h）；若谁改成"一个进程里连跑 32 个 run
++取中位"，会**凭空多算一倍机时**、还可能把"变慢了"当成行为变化。脚本保留 `--mode inproc` 只为把这个
++坑显式摆出来对比，`fresh` 是默认。
++
++## 三、四条读法（给 PI 排期用）
++
++1. **成本随人口，不随格数**：纯 py 逐个体循环 ⇒ `max_ind` 2000→5000 让 ms/tick 从 7.29 涨到 9.93，
++   而格数同为 28,800 ⇒ 想压机时只能压 `max_ind`／人口，扩网格几乎免费。
++2. **本机 32run 串行 ≈ 1.09–1.30 h**（正式档 fresh 口径）⇒ **落在"≤3h 本机档"内**，
++   与 PI 板上"云 2 路 1.1–1.2 h"同量级；两笔各走各的码路（见 §一-2），不互推、不双写。
++3. 🔴 **规模档把我的 [待裁] 装置水位差变成了可读信号**：正式规模下 `α_W=1` 支末人口 1969、
++   `cap_hits=0`，`α_W=0` 支顶到 2000、`cap_hits=3984` ⇒ 频率项确实在压低规模；但 A 支
++   `cap_hits=17962` 高得离谱 ⇒ 装置承载力实际是 `max_ind` 而不是资源，**`pop`+`cap_hits` 必须入册
++   共同面**（PI 已按标注假设先行，判读口径候砚），否则"顶格拒绝噪声"会被读成效应。
++4. 微型档 0.27–0.44 ms/tick ⇒ **单测继续用微型档**（15 例 <1s），正式规模只在 Pre-Flight/标定批起。
++
++## 四、待锁项复述（改值＝换装置＝读数禁与旧批比）
++
++`Demography` 全部单值仍标 [待锁]（`n_ind0=500`、`rows×cols=120×240`、`meta=0.5`、`intake_scale=1.0`、
++`repro_at=90`、`repro_cost=0.5`、`mut_rate=0.05`、`mut_sigma=0.05`、`lifespan=400`、`max_ind=2000`），
++`Landscape.sigma_c=0.1` 同批待锁；manifest 逐 run 全量回显（砚 ack 条件②）。
++机时敏感性只挂在 `max_ind`／人口上 ⇒ **`max_ind` 是机时与装置的双重旋钮，优先随标定批定死。**
++
++## 五、复现命令
++
++```bash
++# 于 .worktrees/ENERGY-CLOSE 内；默认不落盘，--out 只写本机路径
++PYTHONUTF8=1 ../../.venv/Scripts/python.exe tools/s0_selftest_perf.py --reps 3 --seed 207
++```
++
++【交球】@PI 第 3 条的排期二选一（云 2 路 vs 本机分两段）；@砚 `pop`+`cap_hits` 入册共同面的口径，
++以及 §三-1"压 `max_ind` 换机时"要不要作为标定批计时项的显式变量；计时权威值仍在你那栏，我不双写。
++
++— 澜舟 `[开发·二线]`｜`task/ENERGY-CLOSE`@`035c4c0`｜署名逐命令 `-c` 显式（R371）
+diff --git a/tests/test_s0_harness.py b/tests/test_s0_harness.py
+index 2bd886f..b1ab1fa 100644
+--- a/tests/test_s0_harness.py
++++ b/tests/test_s0_harness.py
+@@ -203,3 +203,24 @@ def test_birth_requires_energy_threshold(tmp_path) -> None:
+     assert m["cap_hits"] == 0
+     assert m["pop_end"] <= dem.n_ind0, (m["pop_end"], dem.n_ind0)
+     assert m["digest"][1] <= dem.n_ind0
++
++
++def test_selftest_perf_script_runs_and_reports_keys(tmp_path) -> None:
++    """性能表脚本本体入库可跑（微型档 reps=1，CI 里几秒级），字段齐＋灭绝即 raise。"""
++    import importlib.util
++    from pathlib import Path as _P
++    spec_path = _P(__file__).resolve().parents[1] / "tools" / "s0_selftest_perf.py"
++    spec = importlib.util.spec_from_file_location("s0_selftest_perf", spec_path)
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    row = mod.bench_one({"name": "ci", "n_ind0": 20, "rows": 10, "cols": 20, "max_ind": 40,
++                         "ticks": 25, "arm": "B", "alpha_W": 1.0}, reps=1, seed=207)
++    for k in ("ms_per_tick_median", "ms_per_tick_worst", "pop_end", "cap_hits", "capped",
++              "extrapolated_20000t_seconds", "extrapolated_32run_serial_hours"):
++        assert k in row, k
++    assert row["ms_per_tick_median"] > 0.0 and row["ticks_benched"] == 25
++    # 灭绝即 raise：微基准不许静默交短跑
++    with pytest.raises(RuntimeError, match="灭绝"):
++        mod.bench_one({"name": "dead", "n_ind0": 10, "rows": 10, "cols": 20, "max_ind": 10,
++                       "ticks": 200, "arm": "A", "alpha_W": None,
++                       "meta": 99.0, "intake_scale": 1e-9}, reps=1, seed=207)
+diff --git a/tools/s0_selftest_perf.py b/tools/s0_selftest_perf.py
+new file mode 100644
+index 0000000..6bcde77
+--- /dev/null
++++ b/tools/s0_selftest_perf.py
+@@ -0,0 +1,166 @@
++"""S0-kernel-b 自测性能表（wall/tick 微基准）——Pre-Flight 用的真值件，**非跑批**。
++
++口径声明（照 PI 10-09 20:5x 班：本机微基准、零入数据仓、夜墙前收口）
++--------------------------------------------------------------------
++- 测的是 **`s0_kernel.harness` 的最小世界**（S0 双臂容器），**不是**主引擎——PI 板上的
++  云机数（1500 tick = 4.39s／seed7 五腿逐位同）走的是主引擎＋步A 探针链路，两条码路**不可互推**。
++- 🔴 **计时口径＝独立进程**（`--mode fresh`，默认）：实测同一进程内连跑会把 wall 抬到冷启动的
++  **2～2.4 倍**（同 seed 轨迹逐位相同、pop 与 cap_hits 完全一致，只有耗时漂 ⇒ 是解释器/内存侧的
++  自身污染，不是行为差）。chain 脚本本来就**逐 run 起独立进程** ⇒ 机时规划只认 fresh 那一栏。
++- 每档跑 `ticks` 次 `step()`，报 `ms/tick`（中位与最差）＋ 末人口 ＋ `cap_hits`；
++  人口顶到 `max_ind` 时耗时会被规模支配 ⇒ 表里同时给"封顶层"与"未封顶层"两类档，别把两者混成一格。
++- **不写数据仓、不产 CSV**（除 `--out` 显式指定的本机路径）；不消费主引擎任何状态。
++- 外推公式就一行：`秒/run ≈ ms_per_tick × ticks / 1000`，正式档 20,000 tick 由中位数外推，
++  标 [外推]；标定批/正式批的**实测**计时项仍归砚（§七bis #9 唯一源＝点火程序令 @dda9d5d）。
++
++用法
++----
++    ../../.venv/Scripts/python.exe tools/s0_selftest_perf.py            # 默认六档
++    ../../.venv/Scripts/python.exe tools/s0_selftest_perf.py --reps 5 --out /tmp/perf.json
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import platform
++import statistics
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from s0_kernel.arms import Landscape          # noqa: E402
++from s0_kernel.harness import Demography, S0World   # noqa: E402
++
++try:
++    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # R98：GBK 控制台兜底
++    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
++except Exception:
++    pass
++
++#: 六档：S0 正式规模档＋隔离用的未封顶档（rows/cols 合计 28,800 格＝120×240，草案 §五 同一尺度）
++PRESETS = [
++    {"name": "s0_formal", "n_ind0": 500, "rows": 120, "cols": 240, "max_ind": 2000,
++     "ticks": 300, "arm": "A", "alpha_W": None},
++    {"name": "s0_formal_B", "n_ind0": 500, "rows": 120, "cols": 240, "max_ind": 2000,
++     "ticks": 300, "arm": "B", "alpha_W": 1.0},
++    {"name": "s0_z2_B", "n_ind0": 500, "rows": 120, "cols": 240, "max_ind": 2000,
++     "ticks": 300, "arm": "B", "alpha_W": 0.0},
++    {"name": "uncapped_small", "n_ind0": 60, "rows": 20, "cols": 40, "max_ind": 60,
++     "ticks": 400, "arm": "A", "alpha_W": None},
++    {"name": "uncapped_small_B", "n_ind0": 60, "rows": 20, "cols": 40, "max_ind": 60,
++     "ticks": 400, "arm": "B", "alpha_W": 1.0},
++    {"name": "cap_probe", "n_ind0": 500, "rows": 120, "cols": 240, "max_ind": 5000,
++     "ticks": 120, "arm": "A", "alpha_W": None},
++]
++
++
++def bench_one(p: dict, reps: int, seed: int) -> dict:
++    """跑一档并返回 wall/tick 统计。preset 里出现的任何 `Demography` 字段都透传
++    ⇒ 可以拿装置档做敏感性（如 `max_ind`／`lifespan`），不必改脚本。"""
++    dem_kw = {k: v for k, v in p.items() if k in Demography.__dataclass_fields__}
++    dem = Demography(**dem_kw)
++    per_tick: list[float] = []
++    wall_total = 0.0
++    last: S0World | None = None
++    for _ in range(reps):
++        w = S0World(seed, p["arm"], p["alpha_W"], dem, land=Landscape())
++        t0 = time.perf_counter()
++        for _t in range(p["ticks"]):
++            w.step()
++            if w.pop <= 0:
++                raise RuntimeError(f"微基准里灭绝了（{p['name']}）⇒ 装置档不合适，请换档而不是继续测")
++        dt = time.perf_counter() - t0
++        wall_total += dt
++        per_tick.append(dt / p["ticks"] * 1000.0)
++        last = w
++    assert last is not None
++    med = statistics.median(per_tick)
++    return {
++        "name": p["name"], "arm": p["arm"], "alpha_W": p["alpha_W"], "reps": reps,
++        "n_ind0": p["n_ind0"], "cells": p["rows"] * p["cols"], "max_ind": p["max_ind"],
++        "ticks_benched": p["ticks"],
++        "ms_per_tick_median": round(med, 4),
++        "ms_per_tick_worst": round(max(per_tick), 4),
++        "pop_end": last.pop, "cap_hits": last.cap_hits, "capped": last.pop >= p["max_ind"],
++        "wall_seconds_total": round(wall_total, 3),
++        "extrapolated_20000t_seconds": round(med * 20000 / 1000.0, 1),
++        "extrapolated_32run_serial_hours": round(med * 20000 * 32 / 1000.0 / 3600.0, 2),
++    }
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
++    ap.add_argument("--reps", type=int, default=3)
++    ap.add_argument("--seed", type=int, default=207)
++    ap.add_argument("--out", default="", help="本机 JSON 路径（默认不落盘，不进数据仓）")
++    ap.add_argument("--mode", choices=("fresh", "inproc"), default="fresh",
++                    help="fresh=每档起独立进程（机时口径，默认）；inproc=同进程连跑（会自污染，仅对比用）")
++    ap.add_argument("--only", default=None, help="只跑某一档（配 --mode inproc 给子进程用）")
++    ap.add_argument("--ticks", type=int, default=0, help="覆盖档位 tick（0=用档位值）")
++    ap.add_argument("--quiet-json", action="store_true", help="只打印单档 JSON（子进程内部用）")
++    args = ap.parse_args()
++    if args.reps < 1:
++        raise RuntimeError("reps ≥ 1")
++    if args.ticks < 0:
++        raise RuntimeError("--ticks ≥ 0")
++
++    if args.mode == "fresh":
++        rows = []
++        for preset in PRESETS:
++            cmd = [sys.executable, str(Path(__file__).resolve()), "--mode", "inproc",
++                   "--reps", "1", "--seed", str(args.seed), "--only", preset["name"],
++                   "--quiet-json", "--ticks", str(preset["ticks"])]
++            samples = []
++            for _ in range(args.reps):
++                r = subprocess.run(cmd, capture_output=True, text=True,
++                                   encoding="utf-8", errors="replace", timeout=1800)
++                if r.returncode != 0:
++                    raise RuntimeError(f"fresh 子进程失败（{preset['name']}）：{r.stderr[-400:]}")
++                samples.append(json.loads(r.stdout.strip().splitlines()[-1]))
++            med = statistics.median([x["ms_per_tick_median"] for x in samples])
++            row = dict(min(samples, key=lambda x: abs(x["ms_per_tick_median"] - med)))
++            row.update({"ms_per_tick_median": round(med, 4),
++                        "ms_per_tick_worst": round(max(x["ms_per_tick_median"] for x in samples), 4),
++                        "mode": "fresh", "n_procs": len(samples)})
++            row["extrapolated_20000t_seconds"] = round(med * 20000 / 1000.0, 1)
++            row["extrapolated_32run_serial_hours"] = round(med * 20000 * 32 / 1000.0 / 3600.0, 2)
++            rows.append(row)
++    else:
++        picked = [p for p in PRESETS if args.only in (None, p["name"])] if args.only else PRESETS
++        if args.ticks:
++            picked = [dict(p, ticks=args.ticks) for p in picked]
++        rows = [bench_one(p, args.reps, args.seed) for p in picked]
++    if args.only and args.mode == "inproc" and len(rows) == 1 and args.quiet_json:
++        print(json.dumps(rows[0], ensure_ascii=False))
++        return 0
++    print(f"=== S0-kernel-b 自测性能表（本机 {platform.machine()}，reps={args.reps}，"
++          f"seed={args.seed}；[微基准，非跑批]）===")
++    print("档 | 臂 | α_W | 格数 | max_ind | ms/tick中位 | ms/tick最差 | 末人口 | cap_hits | "
++          "外推20000t秒 | 外推32run串行小时")
++    for r in rows:
++        print(f"{r['name']} | {r['arm']} | {r['alpha_W']} | {r['cells']} | {r['max_ind']} | "
++              f"{r['ms_per_tick_median']} | {r['ms_per_tick_worst']} | {r['pop_end']} | "
++              f"{r['cap_hits']} | {r['extrapolated_20000t_seconds']} | "
++              f"{r['extrapolated_32run_serial_hours']}")
++
++    payload = {
++        "tool": "tools/s0_selftest_perf.py",
++        "nature": "本机微基准（Pre-Flight wall/tick 真值）——非跑批、未入数据仓（R117 无涉）",
++        "what_is_measured": "s0_kernel.harness.S0World.step()（S0 双臂容器），"
++                            "与主引擎＋步A 探针链路是两条码路，禁互推",
++        "env": {"python": sys.version.split()[0], "platform": platform.platform(),
++                "machine": platform.machine()},
++        "reps": args.reps, "seed": args.seed, "rows": rows,
++    }
++    if args.out:
++        Path(args.out).write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n",
++                                  encoding="utf-8", newline="\n")
++        print(f"\n[本机落盘] {args.out}（未进数据仓；入仓与否由砚/PI 裁）")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.46.1.windows.1
+
+
+From 711aea3486ca225a65c3763d441ddd0e974c619e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 22:02:47 +0800
+Subject: [PATCH 08/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E6=96=B9=E6=A1=88=E5=8D=A1):=20S0-kernel-b?=
+ =?UTF-8?q?=20=E7=A0=81=E9=9D=A2=E5=90=8C=E7=AA=97=E4=B8=A4=E4=BB=B6?=
+ =?UTF-8?q?=EF=BC=88=E8=A7=A6=E9=A1=B6=E5=88=A4=E6=8D=AE=20self.pop=20?=
+ =?UTF-8?q?=E5=90=AB=20:174=20=E6=89=A3=E5=BA=8F=20+=20=E6=A7=BD=E4=BD=8D?=
+ =?UTF-8?q?=E5=A4=8D=E7=94=A8=E4=BF=9D=20ind=5Fid=20=E8=B7=A8=E7=AA=97?=
+ =?UTF-8?q?=E5=8F=AF=20join=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+病灶逐行指认：harness.py:167 遍历含死槽的槽位表长／:172 变异抽签在闸前／:174 先扣母能后触顶闸（被拦出生照常扣）／
+:175 判据是 len(self.g) 含死槽 ⇒ 死槽占顶封死世代更替（cap_hits 17962 真因，非人口学）／:183 _next_id 计了但没用
+（_id_of 返槽位号）。⇒ 判据与槽位是同一处码的两面，单改判据死槽照撑、单做复用则 cap_hits 仍是假信号，必须同窗。
+
+件①：出生段重写——未达阈不扣不抽不计；触顶闸用**存活人口 self.pop** 且闸在扣能与抽签之前；只有过闸出生点才消耗
+一次随机数（两臂同规则、次数随群体分叉属 IB 正常，不违反"同消费顺序"，此句进 docstring）。声明与旧码行为不等价
+（旧码扣了再拦 ⇒ 母体更饿、出生更少）⇒ 打口径时点标签。拒绝物理压缩死槽那条路：会让 len(g)≡pop 看似不用改判据，
+但 ind_id=槽位号立刻失效，破砚逐 tick g 行 join＋pop/cap_hits 入册共同面两条标注假设。
+
+件②：槽位与身份分家——uid 数组（单调 _next_id，复用槽位必换新 uid ⇒ 永不重号）+ _free 死槽栈 + pop 增量计数
+（判据 O(1)，不再每 tick 全表求和）。join 等价论证：CSV ind_id 改 uid[i]，语义不变且严格更强（旧靠"只追加不压缩"，
+新为单调不重号）；digest 改 sum(uid) 数值不等价 ⇒ 归口径标签覆盖、仍只作同流自检；rows() 行集不变；
+len(g) 有界 ⇒ ms/tick 不随 tick 漂移。
+
+机时处置：认 PI 取证（48→97ms/t、slots≈10/tick），但驳"修完判据还要 10.7h"的外推——那把死槽空转当成模拟固有成本；
+槽位有界后回到 fresh 口径 6–10ms/tick ⇒ 20000t≈150–200s/run、16run≈40–55min、32run≈1.3–1.8h。实施后按同 seed
+同档复跑 t2000/t4000/t8000 三点取证，若 ms/t 仍漂即上板撤回，不拿外推撑。
+
+cap_hits 时点标签：manifest 新增 code_caliber="S0-TER-POP-CAP-v2" 与 caliber_epoch_commit；v1（槽位满被拒）与
+v2（存活触顶被拒）禁跨版本直比；195b348 前自测批只作红因取证不入 S-MG1 锁档；我 21:0x"承载力实为 max_ind"归因
+改写为死槽占顶（板桥 §三-ter），v1 读数作废为证据、留病灶线索。
+
+验收门七条（含两条把口头承诺变可执行：repro_at 设不可达 ⇒ 新旧实现 rows() 逐位相同＝join 等价件；触顶时母能不得被扣、
+未过闸不消耗随机数＝bit_generator.state 快照断言）＋变异靶三条；ν 记法按 PI 采甲在 docstring 引 ∂²W/∂g∂ν，零数值改动。
+实施一笔完成 harness+测试+记录追记，与板桥 2767e76 勘正笔同窗合 main（合入归 PI/板桥，我不合他人分支）。零行为面：不触主引擎。
+---
+ ...2\227\344\270\244\344\273\266-20261009.md" | 111 ++++++++++++++++++
+ 1 file changed, 111 insertions(+)
+ create mode 100644 "docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
+new file mode 100644
+index 0000000..ee5e9d7
+--- /dev/null
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
+@@ -0,0 +1,111 @@
++# 码面方案卡 · S0-kernel-b 同窗两件（触顶判据 `self.pop` ＋ 槽位复用）
++
++> 作者 澜舟 `[开发·二线]`｜2026-10-09 22:0x｜基线 `task/ENERGY-CLOSE@195b348`
++> 唯一口径：板桥 21:35 帖 §三-ter ＋ PI seq38①/seq40（板尾 @`df5adcd` 前后）——本卡**不复述他人裁定**，只对齐到码面
++> 链条：本卡 push → 板桥复签 → **同窗合 main** → Pre-Flight → 20t 冒烟 → S-MG1（现码 16run 只作红因取证、不锁档）
++> 🔴 硬约束（PI seq40/21:5x）：**20,000t 单价必须压回分钟级**；只修判据不修槽位＝灭绝档换机时爆档，不放行。
++
++---
++
++## §一 病灶定位（现状码面，逐行指认）
++
++`s0_kernel/harness.py` 出生段 `:166-184`：
++
++| 行 | 现状 | 问题 |
++|---|---|---|
++| `:167` `n_now = len(self.g)` | 遍历的是**槽位表长度**（含死槽） | 死槽只增不减 ⇒ 长度线性膨胀（板桥取证：slots ≈ 10/tick） |
++| `:172` `self.rng.random()` | 变异抽签在触顶闸**之前** | 被拦的出生照样消耗一次抽签 ⇒ 换判据时 RNG 规则要一起改口径 |
++| `:174` `self.e[i] *= dem.repro_cost` | **先扣母能** | 与 `:175` 闸之间无回滚 ⇒ **被拦出生照常扣母能**（板桥 §三-ter 指认的第二码面项） |
++| `:175` `if len(self.g) >= dem.max_ind` | 判据是**槽位总数（含死槽）** | 死槽累积到 `max_ind` 后 ⇒ **世代更替被封死**（`cap_hits` 17962 的真因），且 `t4000` 不复现灭绝＝A455/B708 红因在码面而非人口学 |
++| `:183` `self._next_id += 1` | 计数器存在但**未被使用**（`_id_of(i)=i` 返槽位号） | 槽位即 id ⇒ 一旦复用/压缩就破跨窗 join，这是②必须与①同窗的根因 |
++
++**结论**：判据与槽位是**同一处码的两面**——把 `:175` 单改成 `self.pop >= max_ind` 只会让死槽继续把 `n_now` 撑大（每 tick 多走 N 千次空转），机时爆档照旧；而只做槽位复用不改判据，`_next_id` 与死槽计数仍把 `cap_hits` 记成"顶格拒绝"的假信号。⇒ 两件必须同窗。
++
++---
++
++## §二 件① 触顶判据改 `self.pop`（含 `:174` 扣序）
++
++**新出生段规则（同窗落地后的唯一形）**，`:166` 起替换为：
++
++```
++n_now = len(self.g)                       # 仍遍历槽位快照（复用后长度有界，见 §三）
++for i in range(n_now):
++    if not alive[i] or e[i] < repro_at:   continue     # 未达阈：不扣、不抽、不计
++    if pop >= max_ind:                    cap_hits += 1; continue   # 触顶闸：**存活人口**判据，闸在前
++    mutated = (rng.random() < mut_rate)                 # 抽签：只有过闸的出生点才消耗（规则两臂同）
++    child_g = clip(g[i] + r_mut[i] * mut_sigma, 0, 1) if mutated else g[i]
++    e[i] *= repro_cost                                  # 扣母能：闸之后、确实生了才扣
++    place_child(...)                                    # 落点：优先复用死槽（§三）
++```
++
++三条语义声明（写进 docstring ＋ manifest，不只写在文档里）：
++
++1. **扣序**：母能只在"确实出生"时扣 ⇒ 被拦出生零代价。旧码是"扣了再拦"⇒ 同一 seed 下旧码母体更饿、出生更少，**行为不等价** ⇒ 必须打口径时点标签（§五）。
++2. **RNG 规则**：抽签消耗数 = **过闸出生点数**（旧＝达阈个体数）。两臂规则相同、次数随群体不同而不同——个体基模型的正常分叉，不违反"同 RNG 消费顺序"（顺序指**抽取的种类与次序**，不是次数）。这句必须写进 harness docstring，否则将来有人拿"次数不同"当 bug 报。
++3. **判据口径**：`max_ind` 从此是**存活人口上限**（真承载力），不再是"槽位表上限"。⇒ `cap_hits` 的语义整体切换（§五）。
++
++**为何不选"压缩后再看"**：压缩（把死槽物理删除）会让 `len(self.g)` 与 `pop` 恒等，判据看着不用改——但 `ind_id=槽位号` 立刻失效，砚的逐 tick g 行 join 与 `pop`/`cap_hits` 入册共同面两条标注假设一起废（PI 21:5x 明令不许）。⇒ **不采用物理压缩，采用 §三 的稳定 uid ＋ 死槽复用**。
++
++---
++
++## §三 件② 槽位复用（等价语义：`ind_id` 跨窗可 join 不破）
++
++**机制**：新增三件小结构，语义上把"槽位"与"个体身份"分家——
++
++- `self.uid: list[int]`：槽位当前占用者的**稳定身份**（单调递增 `_next_id`，死后槽位复用但 uid 换新值 ⇒ 任何时刻 (uid) 唯一、且不因复用而重号）。
++- `self._free: list[int]`：死槽索引栈；出生时 `s = _free.pop()`（无则 `append`）。
++- `self.pop: int`：存活计数，`step()` 内增量维护（死亡 `-=1`，出生 `+=1`），不再每 tick 全表求和 ⇒ 判据 `pop >= max_ind` 是 O(1)。
++
++**出货面等价性论证（这是②的验收件，不是措辞）**：
++
++| 项 | 旧 | 新 | 等价？ |
++|---|---|---|---|
++| CSV `ind_id` 列 | 槽位号 `i` | **`uid[i]`** | ✅ 语义不变＝"同一只个体在任何窗口的行可 join"；且**修掉了旧实现的一个隐疾**：旧码槽位号在"同 tick 内死亡+新个体 append"时会把新号排到表尾，跨窗 join 靠"只追加不压缩"成立；新码 uid 单调不重号，join 更严格成立 |
++| `digest` | `sum(槽位号 of alive)` | `sum(uid of alive)` | ⚠️ **数值不等价**（口径变更，§五标签覆盖）；用途仍是"同流复现自检"，不作判据 ⇒ 换基准值随实施 commit 重钉 |
++| `rows()` 集合 | alive 槽位遍历 | 同一集合 | ✅ 行集完全相同（tick, cell, g, energy, age 逐位不变，除行为本身因 §二 扣序变化） |
++| 内存/长度 | `len(g)` 单调增至死槽累积 | `len(g) ≤ max_ind + 本 tick 内峰值` | ✅ 有界 ⇒ ms/tick 不再随 tick 漂移 |
++
++**为什么不"复用号段"**：若复用槽位号当 id，同一 id 会在不同 tick 指代不同个体 ⇒ 逐 tick g 行的"个体轨迹"变成拼贴，且 `|D−D′|` 双跑与 Z1 现分布都会被污染。uid 单调才是等价语义（`_id_of(i)` 改成 `return self.uid[i]`，函数签名不动，调用面不动）。
++
++---
++
++## §四 机时复算（PI seq40 输入的处置；认还是驳，用实测说）
++
++PI 取证：同档 seed207／A 臂／判据改 `self.pop` ⇒ `t4000 = 48 ms/t·slots 20000`，续跑 `t8000 = 97 ms/t·slots 40000` ⇒ 累积 ≈10/tick ⇒ 20000t ≈ 40min/run、16run ≈ 10.7h。
++
++本卡的处置：**判据一行确实不够，机时爆档成立——但爆的是死槽空转，不是模拟本身**。槽位复用后 `len(g)` 有界 ⇒ 每 tick 成本回到"存活个体数"的线性项，即我 21:0x 表里 fresh 口径的 **6–10 ms/tick**（`max_ind=2000` ⇒ 7.29；`5000` ⇒ 9.93），20000t ⇒ **≈150–200 s/run**、16run ⇒ **≈40–55 min**、32run ⇒ **≈1.3–1.8 h**。⇒ **PI 的 40min/run 在修完槽位后作废**，10.7h 也随之作废；这不是驳 PI 的取证（48→97ms/t 与 slots 10/tick 我认），是驳"修完判据还要 10.7h"这个外推——**它把死槽成本当成了模拟固有成本**。
++实施后我按同一 seed/档复跑取证三点（`t2000/t4000/t8000` 的 ms/t 与 `len(g)`），若新码 ms/t 仍随 tick 漂 ⇒ 本卡 §三 的有界断言失败，我即时上板撤回这句机时结论（不拿外推撑）。
++
++---
++
++## §五 `cap_hits` 口径变更时点标签（PI seq38④ 采，不改码面入账）
++
++- manifest 新增两字段：`code_caliber = "S0-TER-POP-CAP-v2"`、`caliber_epoch_commit = <实施 commit 短码>`；`cap_hits` 在 v1/v2 语义不同（v1＝槽位表满被拒次数；v2＝**存活人口触顶被拒次数**）。
++- **新旧批禁跨版本直比**：分析件必须按 `caliber_epoch_commit` 分段；v1 批（我 21:0x 性能表与 195b348 之前的所有自测）**只作红因取证**，不入 S-MG1 锁档依据。
++- 我 21:0x 板上那条"A 支 cap_hits=17962 高得离谱 ⇒ 承载力是 max_ind"——**归因需改写**：真因是死槽占顶（板桥 §三-ter），不是人口学；该条 v1 读数作废为证据、保留为病灶线索。
++- 同步影响：`pop`＋`cap_hits` 入册共同面（PI 已按标注假设先行、判读口径候砚）在 v2 下才有意义——v1 的 `cap_hits` 混了死槽噪声。
++
++---
++
++## §六 验收门（本卡落地必须逐条给出，缺一不算完成）
++
++1. **默认等价面**：harness 只服务 S0，不触主引擎 ⇒ 主引擎逐位等价门不受影响（`test_kernel_consumes_no_rng` 的 `simulation` 断言 ＋ `test_main_engine_does_not_import_s0_kernel` 保持绿）。
++2. **join 等价件**：新测试钉"同一 uid 在整个 run 内指代同一只个体，且 `rows()` 行集与旧实现（同行为下）逐字段一致"——做法＝临时把 `repro_at` 设成不可达（无出生 ⇒ 无复用）⇒ 新旧实现 `rows()` 必须逐位相同，这把"复用不改语义"变成可执行断言而不是口头承诺。
++3. **有界件**：`t8000` 时 `len(self.g) ≤ max_ind + 单 tick 峰值`；测试用 300–500 tick 微型档断言 `len(g)` 不随 tick 单调漂（变异靶：删掉 `_free` 复用 ⇒ 红）。
++4. **扣序件**：触顶时母能**不得**被扣（变异靶：把 `e[i] *= repro_cost` 挪回闸前 ⇒ 红）；未过闸出生**不得**消耗随机数（变异靶：抽签挪回闸前 ⇒ 红，用 `rng.bit_generator.state` 快照比对 state 差异次数）。
++5. **判据件**：`max_ind` 改成 1（只允许一只存活）⇒ 必须稳定停在 `pop==1`、`cap_hits>0`、无死槽占顶饿死全群的假灭绝（变异靶：判据回退 `len(self.g)` ⇒ 红）。
++6. **性能表复算件**：§四 三档实测（`t2000/t4000/t8000` ms/t 与 `len(g)`）写进记录件；漂移不成立 ⇒ 撤回机时结论并上板。
++7. `Demography` 全字段/`Landscape.sigma_c` 照旧回显；`code_caliber`/`caliber_epoch_commit` 进 manifest；ν 记法按 PI 采甲口径在 docstring 引用 `∂²W/∂g∂ν`（**零数值改动**，板桥 §三 已闭）。
++
++---
++
++## §七 实施切分与合 main 序（板桥复签后可即刻执行）
++
++- 一笔完成：`s0_kernel/harness.py`（§二＋§三）＋ `tests/test_s0_harness.py`（§六 2–5 条新例＋变异靶）＋ `docs/设计文档/记录-S0-kernel-b-自测性能表-20261009.md` 追记 §四 复算（新码三档实测）。
++- 提交 `-c` 显式署名（R371），push 到 `task/ENERGY-CLOSE`，**与板桥 `task/S0-MAINREVIEW@2767e76` 勘正笔同窗合 main**（合入由 PI/板桥执行，我不合他人分支、不自裁）。
++- 夜墙 R398：本卡与代码/文档面今晚出；`t8000` 复算若逼近 23:00 未竟 ⇒ 停在手边，留到 08:00 后跑，不跨墙。
++- 我不碰：③B 臂注入档（候 ack）、步B 稿修订、E2/E3 计数腿（owner 令续挂）。
++
++【交球】@板桥 复签本卡 §二/§三（尤其 join 等价件的"无出生档逐位相同"这条够不够硬）；@PI §四 的处置认不认（判据+槽位同窗后 20000t 回到 150–200s 量级），以及 §五 时点标签字段名是否照 `code_caliber`/`caliber_epoch_commit` 入 #9 读法；@砚 §六-2 的 join 断言口径（逐 tick g 行是你消费面）＋ v1 批作废为证据的登记。
++
++—— 澜舟 🛥️ `[开发·二线]`｜基线 `task/ENERGY-CLOSE@195b348`｜署名逐命令 `-c` 显式（R371）｜不裁定（PI）·判据归砚·设计权归镜
+-- 
+2.46.1.windows.1
+
+
+From a7b680c4b0db6995ab4582c3e6628a01c923203d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 22:33:12 +0800
+Subject: [PATCH 09/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20feat(s0=5Fkernel):=20=E5=8F=A3=E5=BE=84=20v2=20?=
+ =?UTF-8?q?=E8=90=BD=E5=9C=B0=E2=80=94=E2=80=94=E8=A7=A6=E9=A1=B6=E5=88=A4?=
+ =?UTF-8?q?=E6=8D=AE=20self.pop=20+=20=E9=97=B8=E5=89=8D=E7=A7=BB=EF=BC=88?=
+ =?UTF-8?q?=E8=A2=AB=E6=8B=A6=E5=87=BA=E7=94=9F=E9=9B=B6=E4=BB=A3=E4=BB=B7?=
+ =?UTF-8?q?=EF=BC=89+=20=E6=AD=BB=E6=A7=BD=E5=A4=8D=E7=94=A8/uid=20?=
+ =?UTF-8?q?=E5=8D=95=E8=B0=83=EF=BC=88=E6=96=B9=E6=A1=88=E5=8D=A1=E4=B8=A4?=
+ =?UTF-8?q?=E4=BB=B6=E5=90=8C=E7=AA=97=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+件①：出生段规则重写——未达阈/已死/本 tick 新生 ⇒ 不扣不抽不计；触顶闸＝**存活人口** self.pop（含死槽的
+len(self.g) 作废）；闸在扣母能与抽签之前 ⇒ **被拦出生不动母能、不耗随机数**（v1 两条都反，行为不等价）；
+只有过闸出生点才抽变异号 ⇒ 两臂同规则、次数随群体分叉（docstring 明写"顺序≠次数"，防将来被当 bug 报）。
+件②：槽位与身份分家——uid[]（单调 _next_id，复用槽位必换新号 ⇒ 永不重号）+ _free 死槽栈 + pop 增量计数
+（判据 O(1)，不再每 tick 全表求和）。不变量 len(self.g) ≤ max_ind ⇒ 每 tick 成本回到存活个体数的线性项，
+v1 的 slots≈10/tick 累积（PI 取证 48→97ms/t）正是这条被破坏的形状。
+cap_hits/digest 语义切换 ⇒ manifest 逐 run 带 code_caliber="S0-TER-POP-CAP-v2" + caliber_epoch_commit
++ slots_len；v1（≤195b348）批只作红因取证，禁跨版本直比（PI seq38④）。
+_id_of 改返 uid[i]（签名与调用面不动）⇒ CSV ind_id 跨窗可 join 语义严格强于 v1（v1 靠"只追加不压缩"成立）。
+
+验收门落码（方案卡 §六）：§六-2 join 等价件＝把 repro_at 设不可达 ⇒ 无复用 ⇒ ind_id 逐位退化为槽位号（=v1 语义），
+把"复用不破 join"从口头承诺变可执行断言；§六-3 有界件＝160 tick 高换手档逐 tick 断言 len(g)≤max_ind 且 _free 确有复用；
+§六-4 扣序件＝_CountingRng 包住 rng 数标量抽签：全被拦档 scalar==0 且母能未被扣，正对照放开上限 ⇒ 抽签次数==出生点数
+（证明计数器不是空跑）；§六-5 判据件＝200 tick 世代更替不被封死、pop 稳在存活上限；另加 uid 不重号件与口径标签件。
+新发现一条装置事实并落测试：ν 的近邻口径 ⇒ 稀疏格 ν=0（摄入=W₀−meta）、满邻格 ν=1（摄入归零）⇒ 判读侧 S-B 记法
+须按 ∂²W/∂g∂ν（PI 采甲）写，别读成纯表型折扣项。
+工具：s0_selftest_perf.py 加 --trend 窗口漂移量测（同 run 内每窗记 ms/t 与 len(g)，v2 要求平坦）；
+跑批类计时动作留到 suite 结束、CPU 空出再做，不重蹈同进程连跑的污染。零行为面：不触主引擎。
+---
+ s0_kernel/harness.py      | 102 ++++++++++++++++++++++-------
+ tests/test_s0_harness.py  | 132 ++++++++++++++++++++++++++++++++++++++
+ tools/s0_selftest_perf.py |  45 +++++++++++++
+ 3 files changed, 255 insertions(+), 24 deletions(-)
+
+diff --git a/s0_kernel/harness.py b/s0_kernel/harness.py
+index 997a4d1..7aab88f 100644
+--- a/s0_kernel/harness.py
++++ b/s0_kernel/harness.py
+@@ -12,7 +12,17 @@ A/B 差克里混进装置差），我 01:3x 帖上那句已自纠。
+ - **不触主引擎**：本模块只 import `world.sphere_world`（只读用网格拓扑）与 numpy，
+   **不 import `simulation.sphere_engine`**（守卫测试钉住）⇒ 现役引擎逐位等价门零影响。
+ - **同流形制**：两臂各自 `default_rng(seed)`（初始状态相同），每 tick 的抽取**顺序固定**
+-  （① 初始位置 ② 移动 ③ 变异正态 ④ 逐个出生点的变异抽签），⇒ 同 seed 同初世界、差分只落在被测通道上。
++  （① 初始位置 ② 移动 ③ 变异正态 ④ 逐个**过闸**出生点的变异抽签），⇒ 同 seed 同初世界、差分只落在被测通道上。
++  🔴 口径 v2 起"顺序"指**抽取的种类与次序**，不是次数：次数随群体分叉（个体基模型的正常行为），
++  谁拿"两臂抽签次数不同"当 bug 报，请回看这一句。
++- 🔴 **口径 v2（`CODE_CALIBER = S0-TER-POP-CAP-v2`，方案卡 `docs/设计文档/方案-S0-kernel-b-码面同窗两件-20261009.md`）**：
++  触顶判据＝**存活人口** `self.pop`（v1 用含死槽的 `len(self.g)` ⇒ 死槽占顶封死世代更替）；闸在**扣母能与抽签之前**
++  （v1 先扣后闸 ⇒ 被拦出生白扣母能，行为不等价）；死槽优先复用、`uid` 单调不重号 ⇒ `ind_id` 跨窗可 join
++  的语义**严格强于** v1（v1 靠"只追加不压缩"成立）。⇒ `cap_hits`/`digest` 语义切换，manifest 逐 run 带
++  `code_caliber`＋`caliber_epoch_commit`＋`slots_len`，**新旧批禁跨版本直比**。
++- **槽位有界**（v2 的结构后果，也是机时的决定项）：`len(self.g) ≤ max_ind`——出生只在 `pop < max_ind` 时发生，
++  且优先复用死槽 ⇒ 表长不再随时钟单调膨胀 ⇒ 每 tick 成本回到"存活个体数"的线性项。v1 的 `slots≈10/tick`
++  累积（PI 取证 48→97 ms/tick）就是这条不变量被破坏的形状。
+ - **无密度依赖**（by design）：`W` 是 S0 唯一的**选择通道**，资源不耗尽、不排队；规模由
+   `max_ind` 兜住并记 `cap_hits`（触顶不静默淘汰既存个体）。⇒ 读数只反映"g 轴上的适应度差"，
+   不掺承载力动力学。这条是**装置声明**，不是省略。
+@@ -31,7 +41,7 @@ from __future__ import annotations
+ import csv
+ import hashlib
+ import json
+-from dataclasses import asdict, dataclass, field
++from dataclasses import asdict, dataclass
+ from pathlib import Path
+ 
+ import numpy as np
+@@ -42,6 +52,13 @@ from .arms import Landscape, arm_specs, nu_local, w_a, w_b
+ 
+ REQUIRED_SPEC_KEYS = ("run_id", "arm", "seed", "ticks", "sample", "alpha_W", "demography")
+ 
++#: 🔴 出生/触顶**口径版本标签**（方案卡 §五）：改触顶判据或改槽位复用任一条都必须升它。
++#: v1（≤`195b348`）＝判据含死槽的 `len(self.g)`、先扣后闸、ind_id=槽位号、digest=Σ槽位号；
++#: v2＝判据 `self.pop`、闸在扣能与抽签之前、死槽复用 + uid 单调、digest=Σuid。
++#: ⇒ `cap_hits` 与 `digest` 的语义在此切换，**新旧批禁跨版本直比**，分析件按 `caliber_epoch_commit` 分段。
++CODE_CALIBER = "S0-TER-POP-CAP-v2"
++CODE_EPOCH_COMMIT = "unknown"        # 实施 commit 短码，由 chain/调用方注入
++
+ 
+ @dataclass
+ class Demography:
+@@ -98,11 +115,17 @@ class S0World:
+         self.tick = 0
+         self.cap_hits = 0
+         self._next_id = 0
++        self.pop = 0                       # 存活计数（增量维护）⇒ 触顶判据 O(1)，不再每 tick 全表求和
+         self.cells: list[int] = []
+         self.g: list[float] = []
+         self.e: list[float] = []
+         self.age: list[int] = []
+         self.alive: list[bool] = []
++        # 槽位与身份分家（方案卡 §三）：`uid[i]`＝槽位 i 当前占用者的稳定身份（单调、永不重号）；
++        # `_free`＝死槽栈；`born[i]`＝出生 tick ⇒ 本 tick 新个体不当父母。
++        self.uid: list[int] = []
++        self._free: list[int] = []
++        self.born: list[int] = []
+         self._spawn(dem.n_ind0)
+ 
+     # ---- 初始群体 ---------------------------------------------------------------
+@@ -115,7 +138,10 @@ class S0World:
+             self.e.append(dem.e0)
+             self.age.append(0)
+             self.alive.append(True)
++            self.uid.append(self._next_id)
++            self.born.append(-1)                  # 初代可生育（-1 永远早于当前 tick）
+             self._next_id += 1
++        self.pop = len(cells)
+ 
+     # ---- 每 tick 的固定抽取顺序（②移动 ③变异 ④出生抽签）--------------------------
+     def step(self) -> None:
+@@ -155,31 +181,50 @@ class S0World:
+             pick = options[int(r_move[i] * len(options)) % len(options)]
+             self.cells[i] = int(pick)
+ 
+-        # 3) 死亡：饥饿 / 超龄
++        # 3) 死亡：饥饿 / 超龄 ⇒ 槽位入死槽栈（出生优先复用），pop 计数同步递减
+         for i in range(len(self.g)):
+             if not self.alive[i]:
+                 continue
+             self.age[i] += 1
+             if self.e[i] <= 0.0 or self.age[i] > dem.lifespan:
+                 self.alive[i] = False
+-
+-        # 4) 出生（遍历快照长度 ⇒ 本 tick 新个体不立即再分裂）
++                self.pop -= 1
++                self._free.append(i)
++
++        # 4) 出生 —— 🔴 口径 v2（方案卡 §二/§三，`CODE_CALIBER`）：
++        #    ①触顶判据 = **存活人口** self.pop（v1 用含死槽的 len(self.g) ⇒ 死槽占顶封死世代更替）；
++        #    ②闸在**扣母能与抽签之前**（v1 先扣后闸 ⇒ 被拦出生白扣母能，行为不等价）；
++        #    ③只有过闸的出生点才消耗变异随机数（两臂同规则，次数随群体分叉，属 IB 正常）；
++        #    ④死槽优先复用，`uid` 单调不重号 ⇒ ind_id 跨窗可 join 的语义严格强于 v1。
+         n_now = len(self.g)
+         for i in range(n_now):
+-            if not self.alive[i] or self.e[i] < dem.repro_at:
++            if not self.alive[i] or self.e[i] < dem.repro_at or self.born[i] == self.tick:
++                continue
++            if self.pop >= dem.max_ind:
++                self.cap_hits += 1                # 存活触顶：记账即拒，不动母能、不耗随机数
+                 continue
+             child_g = self.g[i]
+-            if self.rng.random() < dem.mut_rate:        # 抽取④：逐个出生点，两臂顺序一致
++            if self.rng.random() < dem.mut_rate:        # 抽取④（仅过闸者）
+                 child_g = min(max(child_g + r_mut[i] * dem.mut_sigma, 0.0), 1.0)
+-            self.e[i] *= dem.repro_cost
+-            if len(self.g) >= dem.max_ind:
+-                self.cap_hits += 1                      # 触顶：记账、不静默淘汰既存个体
+-                continue
+-            self.cells.append(self.cells[i])
+-            self.g.append(float(child_g))
+-            self.e.append(self.e[i])
+-            self.age.append(0)
+-            self.alive.append(True)
++            self.e[i] *= dem.repro_cost                 # 确实出生才扣
++            self.pop += 1
++            if self._free:
++                slot = self._free.pop()
++                self.cells[slot] = self.cells[i]
++                self.g[slot] = float(child_g)
++                self.e[slot] = self.e[i]
++                self.age[slot] = 0
++                self.alive[slot] = True
++                self.uid[slot] = self._next_id
++                self.born[slot] = self.tick
++            else:
++                self.cells.append(self.cells[i])
++                self.g.append(float(child_g))
++                self.e.append(self.e[i])
++                self.age.append(0)
++                self.alive.append(True)
++                self.uid.append(self._next_id)
++                self.born.append(self.tick)
+             self._next_id += 1
+         self.tick += 1
+ 
+@@ -194,16 +239,21 @@ class S0World:
+         return out
+ 
+     def _id_of(self, i: int) -> int:
+-        return i                                  # 槽位即稳定 id（只追加、不压缩 ⇒ 跨窗可 join）
+-
+-    @property
+-    def pop(self) -> int:
+-        return sum(1 for a in self.alive if a)
++        """出货用的**稳定身份** = `uid[i]`（方案卡 §三）：槽位可复用，身份不重号 ⇒ 跨窗可 join。"""
++        return int(self.uid[i])
+ 
+     def digest(self) -> tuple[int, int, float]:
+-        """(Σ槽位, 人口, Σ能量 6 位)——只作**同流复现自检**，不作任何判据。"""
+-        idx = sum(i for i in range(len(self.g)) if self.alive[i])
+-        return (idx, self.pop, round(float(np.sum([e for e, a in zip(self.e, self.alive) if a])), 6))
++        """(Σuid, 人口, Σ能量 6 位)——只作**同流复现自检**，不作任何判据。
++
++        ⚠️ v2 起第一元是 Σuid（v1 是 Σ槽位号）⇒ **数值不等价**，按 `caliber_epoch_commit` 分段、
++        禁跨版本直比（方案卡 §五）。
++        """
++        idx = sum(self.uid[i] for i in range(len(self.g)) if self.alive[i])
++        tot = 0.0
++        for i in range(len(self.e)):
++            if self.alive[i]:
++                tot += self.e[i]
++        return (idx, self.pop, round(tot, 6))
+ 
+ 
+ def run_arm(spec: dict, out_dir: Path | str) -> Path:
+@@ -272,6 +322,10 @@ def run_arm(spec: dict, out_dir: Path | str) -> Path:
+         "arms_sha256": _sha256_of(here / "arms.py"),
+         "harness_sha256": _sha256_of(here / "harness.py"),
+         "csv": csv_path.name,
++        # 🔴 口径变更时点标签（PI seq38④／方案卡 §五）：v1 与 v2 的 cap_hits/digest 语义不同 ⇒ 必带。
++        "code_caliber": CODE_CALIBER,
++        "caliber_epoch_commit": str(spec.get("caliber_epoch_commit", CODE_EPOCH_COMMIT)),
++        "slots_len": len(world.g),           # 槽位表长度（v2 起必须 ≤ max_ind；有界件的观测值）
+     }
+     (out_dir / f"{spec['run_id']}.manifest.json").write_text(
+         json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+diff --git a/tests/test_s0_harness.py b/tests/test_s0_harness.py
+index b1ab1fa..563cccd 100644
+--- a/tests/test_s0_harness.py
++++ b/tests/test_s0_harness.py
+@@ -224,3 +224,135 @@ def test_selftest_perf_script_runs_and_reports_keys(tmp_path) -> None:
+         mod.bench_one({"name": "dead", "n_ind0": 10, "rows": 10, "cols": 20, "max_ind": 10,
+                        "ticks": 200, "arm": "A", "alpha_W": None,
+                        "meta": 99.0, "intake_scale": 1e-9}, reps=1, seed=207)
++
++
++# ---------------------------------------------------------------- ⑦ 口径 v2（方案卡 §六 验收门）
++
++def test_v2_join_equivalence_when_no_births(tmp_path) -> None:
++    """方案卡 §六-2：把出生阈设成不可达 ⇒ 无复用 ⇒ 新实现的 `ind_id` **逐位退化**为槽位号。
++
++    这把"槽位复用不破跨窗 join"从口头承诺变成可执行断言：同一份行集、同一列语义。
++    """
++    dem = Demography(**SMALL, repro_at=1e9)
++    p = run_arm(dict(_spec("v2nb", "B", 0.0), demography=dem), tmp_path)
++    w = S0World(207, "B", 0.0, dem)
++    for _ in range(40):
++        w.step()
++    rows = w.rows()
++    slots = [i for i in range(len(w.g)) if w.alive[i]]
++    assert [r[1] for r in rows] == [w._id_of(i) for i in slots]
++    assert [r[1] for r in rows] == slots, "无复用档下 ind_id 必须等于槽位号（＝v1 语义）"
++    lines = p.read_text(encoding="utf-8").splitlines()[1:]
++    assert lines, "无出生不等于无行"
++    assert {int(ln.split(",")[1]) for ln in lines} <= set(range(len(w.g)))
++
++
++def test_v2_slot_table_is_bounded(tmp_path) -> None:
++    """方案卡 §六-3：`len(g) ≤ max_ind` 是 v2 的结构不变量（v1 的 slots≈10/tick 累积即它被破坏）。"""
++    dem = Demography(**{**SMALL, "max_ind": 120, "n_ind0": 60, "lifespan": 40})   # 短寿 ⇒ 高换手 ⇒ 逼出复用
++    w = S0World(207, "A", None, dem)
++    peak = 0
++    for _ in range(160):
++        w.step()
++        peak = max(peak, len(w.g))
++        assert len(w.g) <= dem.max_ind, (len(w.g), dem.max_ind)
++        assert w.pop <= dem.max_ind and w.pop == sum(1 for a in w.alive if a)
++    assert w._free and peak < 160 * dem.max_ind        # 真发生了复用（不是"没生所以没涨"）
++    m = _manifest(run_arm(dict(_spec("v2bnd", "A", None), demography=dem), tmp_path))
++    assert m["slots_len"] <= dem.max_ind
++
++
++class _CountingRng:
++    """包住真 rng，数标量抽签次数 ⇒ 能直接断言"被拦出生不消耗变异随机数"（v1 会抽）。"""
++
++    def __init__(self, inner) -> None:
++        self.inner, self.scalar, self.array, self.norm = inner, 0, 0, 0
++
++    def random(self, size=None):
++        if size is None:
++            self.scalar += 1
++        else:
++            self.array += 1
++        return self.inner.random(size=size) if size is not None else self.inner.random()
++
++    def normal(self, loc, scale, size=None):
++        self.norm += 1
++        return self.inner.normal(loc, scale, size=size)
++
++
++def test_v2_blocked_birth_costs_nothing_and_draws_no_rng() -> None:
++    """方案卡 §六-4：触顶被拦的出生 ⇒ 母能不被扣 **且** 不消耗变异抽签（v1 两条都反）。"""
++    dem = Demography(n_ind0=2, rows=6, cols=6, max_ind=2, lifespan=10_000, meta=0.0,
++                     repro_at=61.0, repro_cost=0.5)
++    w = S0World(207, "A", None, dem)
++    w.e = [500.0, 500.0]
++    w.rng = _CountingRng(w.rng)
++    for _ in range(5):
++        w.step()
++    assert w.pop == 2 and w.cap_hits > 0, (w.pop, w.cap_hits)
++    assert all(e > 400.0 for e in w.e), f"被拦出生把母能扣走了：{w.e}"
++    assert w.rng.scalar == 0, f"闸后抽签漏到闸前了：标量抽签 {w.rng.scalar} 次"
++    assert w.rng.array == 5 and w.rng.norm == 5            # 正对照：每 tick 仍各有一次固定抽取
++
++    # 正对照二：放开上限 ⇒ 出生发生 ⇒ 标量抽签次数 == 出生点数（证明计数器不是空跑）
++    dem2 = Demography(n_ind0=2, rows=6, cols=6, max_ind=50, lifespan=10_000, meta=0.0,
++                      repro_at=61.0, repro_cost=0.5)
++    w2 = S0World(207, "A", None, dem2)
++    w2.e = [500.0, 500.0]
++    w2.rng = _CountingRng(w2.rng)
++    w2.step()
++    born = w2.pop - 2
++    assert born > 0 and w2.rng.scalar == born, (born, w2.rng.scalar)
++    assert all(e < 500.0 for e in w2.e[:2]), f"确实出生却没扣母能：{w2.e[:2]}"
++
++
++def test_v2_cap_uses_alive_population_not_slot_table() -> None:
++    """方案卡 §六-5：判据改 `self.pop` 后 ⇒ 世代更替不被死槽封死（v1 的假灭绝形状）。"""
++    dem = Demography(n_ind0=5, rows=8, cols=8, max_ind=20, lifespan=40, meta=0.1,
++                     repro_at=61.0, repro_cost=0.5, mut_rate=0.2)
++    w = S0World(207, "A", None, dem)
++    for _ in range(200):
++        w.step()
++        assert w.pop > 0, "世代更替被封死 ⇒ 判据又回到含死槽的 len(g) 了"
++        assert w.pop <= dem.max_ind and len(w.g) <= dem.max_ind
++    assert w.cap_hits > 0
++    # 出生换代发生过 ⇒ uid 已推进到远超初代规模（死槽确被复用，不是"没生所以没涨"）
++    assert w._next_id > dem.n_ind0
++
++
++def test_v2_uid_never_reused_across_windows(tmp_path) -> None:
++    """身份单调：同一 `ind_id` 不会在同一 tick 出现两次，也不会跨个体重号。"""
++    dem = Demography(**{**SMALL, "max_ind": 90, "n_ind0": 40, "lifespan": 30,
++                        "meta": 0.0, "repro_at": 61.0, "mut_rate": 0.3})
++    # 用 A 臂做身份/复用件：B 臂 α_W=1 在"初代 g 全同"下 ν=1 ⇒ 摄入归零（已单列上报，见
++    # test_v2_B_arm_homogeneous_g_zeroes_intake），不适合用来跑长程出生档。
++    p = run_arm(dict(_spec("v2uid", "A", None), demography=dem, ticks=180), tmp_path)
++    lines = [ln.split(",") for ln in p.read_text(encoding="utf-8").splitlines()[1:]]
++    assert lines
++    seen: set[tuple[int, int]] = set()
++    for r in lines:
++        key = (int(r[0]), int(r[1]))                # (tick, uid) 唯一 ⇒ 不重号
++        assert key not in seen, f"tick {key[0]} 上 uid {key[1]} 出现两次 ⇒ 身份重号"
++        seen.add(key)
++    m = _manifest(p)
++    assert m["slots_len"] <= dem.max_ind and m["code_caliber"] == "S0-TER-POP-CAP-v2"
++
++
++def test_nu_is_density_dependent_not_phenotype_only() -> None:
++    """`nu_local` 的近邻口径实证：稀疏格上 ν≈0（摄入≈W₀），密集格上 ν>0 ⇒ 摄入被压。
++
++    这条钉的是 **ν 的语义是"近邻竞争密度"**（镜 §一）——不是"表型一不一致就折扣"。
++    判读侧（砚）要按这个口径写 S-B 记法 `∂²W/∂g∂ν`（PI 采甲口径），别读成纯表型项。
++    """
++    from s0_kernel.arms import w_b0
++
++    sparse = S0World(11, "B", 1.0, Demography(n_ind0=3, rows=30, cols=60, max_ind=10))
++    dense = S0World(11, "B", 1.0, Demography(n_ind0=300, rows=6, cols=8, max_ind=300))
++    sparse.step()
++    dense.step()
++    base, meta = w_b0(0.5), Demography().meta
++    e_sparse = sum(sparse.e[:3]) / 3.0
++    e_dense = sum(dense.e) / len(dense.e)
++    assert abs(e_sparse - (60.0 + base - meta)) < 1e-9, (e_sparse, base, meta)  # 无近邻⇒折扣为零
++    assert abs(e_dense - (60.0 + 0.0 - meta)) < 1e-9, (e_dense, base, meta)     # 满邻⇒ν=1，摄入归零
++    assert e_dense < e_sparse
+diff --git a/tools/s0_selftest_perf.py b/tools/s0_selftest_perf.py
+index 6bcde77..650ca0b 100644
+--- a/tools/s0_selftest_perf.py
++++ b/tools/s0_selftest_perf.py
+@@ -91,6 +91,30 @@ def bench_one(p: dict, reps: int, seed: int) -> dict:
+     }
+ 
+ 
++def trend(name: str, total_ticks: int, window: int, seed: int, arm: str, alpha_W,
++          dem_kw: dict) -> list[dict]:
++    """窗口漂移量测（方案卡 §六-6）：同一 run 内每 `window` tick 记一次 ms/t 与 `len(g)`。
++
++    v1 的病灶形状就是"ms/t 随 tick 漂 ⇒ 死槽把表撑大"；v2 必须**平坦**。
++    """
++    dem = Demography(**dem_kw)
++    w = S0World(seed, arm, alpha_W, dem, land=Landscape())
++    out = []
++    done = 0
++    while done < total_ticks:
++        n = min(window, total_ticks - done)
++        t0 = time.perf_counter()
++        for _ in range(n):
++            w.step()
++            if w.pop <= 0:
++                raise RuntimeError(f"trend 档灭绝于 tick {done + 1} ⇒ 换档，不许拿短跑冒充")
++        dt = (time.perf_counter() - t0) / n * 1000.0
++        done += n
++        out.append({"ticks_through": done, "ms_per_tick": round(dt, 3),
++                    "slots_len": len(w.g), "pop": w.pop, "cap_hits": w.cap_hits})
++    return out
++
++
+ def main() -> int:
+     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+     ap.add_argument("--reps", type=int, default=3)
+@@ -101,9 +125,30 @@ def main() -> int:
+     ap.add_argument("--only", default=None, help="只跑某一档（配 --mode inproc 给子进程用）")
+     ap.add_argument("--ticks", type=int, default=0, help="覆盖档位 tick（0=用档位值）")
+     ap.add_argument("--quiet-json", action="store_true", help="只打印单档 JSON（子进程内部用）")
++    ap.add_argument("--trend", type=int, default=0, help="窗口漂移量测的总 tick（0=不跑）")
++    ap.add_argument("--window", type=int, default=500, help="漂移量测的窗口 tick 数")
++    ap.add_argument("--max-ind", type=int, default=2000, help="漂移量测档的 max_ind")
+     args = ap.parse_args()
+     if args.reps < 1:
+         raise RuntimeError("reps ≥ 1")
++    if args.trend:
++        dem_kw = dict(n_ind0=500, rows=120, cols=240, max_ind=args.max_ind)
++        tr = trend("s0_formal", args.trend, args.window, args.seed, "A", None, dem_kw)
++        print(f"[trend] 窗口漂移量测（独立进程单次跑，seed={args.seed}，max_ind={args.max_ind}）")
++        for r in tr:
++            print(f"  tick≤{r['ticks_through']:>6}  ms/t={r['ms_per_tick']:>7}  "
++                  f"len(g)={r['slots_len']:>5}  pop={r['pop']:>5}  cap_hits={r['cap_hits']}")
++        drift = tr[-1]["ms_per_tick"] / max(tr[0]["ms_per_tick"], 1e-9)
++        print(f"  ⇒ 漂移比（末窗/首窗）= {drift:.2f}×；len(g) 增长 "
++              f"{tr[-1]['slots_len'] - tr[0]['slots_len']}（v2 要求 ≤ max_ind 且有界）")
++        if args.out:
++            Path(args.out).write_text(json.dumps({"trend": tr, "drift_ratio": round(drift, 3),
++                                                 "demography": dem_kw, "seed": args.seed},
++                                                ensure_ascii=False, indent=1) + "
++",
++                                      encoding="utf-8", newline="
++")
++        return 0
+     if args.ticks < 0:
+         raise RuntimeError("--ticks ≥ 0")
+ 
+-- 
+2.46.1.windows.1
+
+
+From 6f3c03bcb1795f7c9b65cd13cbf2dbd62ebf07b4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 22:41:03 +0800
+Subject: [PATCH 10/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(s0):=20v2=20=E7=A9=BA=E8=BD=BD=E5=A4=8D?=
+ =?UTF-8?q?=E7=AE=97=E8=BF=BD=E8=AE=B0=E2=80=94=E2=80=94=E6=88=91=2021:0x?=
+ =?UTF-8?q?=20=E7=9A=84=207.29ms/t=20=E4=B9=90=E8=A7=82=E4=BA=86=EF=BC=8C?=
+ =?UTF-8?q?=E7=A8=B3=E6=80=81=E5=AE=9E=E6=B5=8B=2020.6ms/t=20=E2=87=92=203?=
+ =?UTF-8?q?2run=E2=89=883.7h=20=E8=B6=85=E6=9C=AC=E6=9C=BA=E6=A1=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+空载单进程 --trend 4000/1000（seed207·A臂·max_ind2000）：len(g) 增长 0、ms/t 21.7→20.6→20.6 平坦
+⇒ 槽位无界累积病灶确已消除（v1 是 ≈10/tick ⇒ 4000t 时 20000 槽、97ms/t）；漂移比 1.40× 只是首窗含爬升段。
+但 v2 稳态单价 ≈20.6ms/t（非 6–10）⇒ 20000t≈412s≈6.9min/run、16run≈1.8h、32run≈3.7h ⇒ 本机超"≤3h 本机档"，
+我 §三-2 那句作废，明晨改走云 2 路或降 max_ind 档（数值随标定批锁）。
+自我纠因：7.29 那档只跑 300 tick，把 pop 从 500 爬向 2000 的前半段平均进去了 ⇒ 成本随**存活人口**走，
+机时数字必须按稳态窗口报，短程平均外推长程＝系统性乐观（与我用来纠 PI 的"带载/连跑污染"是同族另一方向，
+按同一标准驳自己）。对 PI 那句"修完判据仍 40min/run、10.7h"的驳仍成立（无界没了），但真值 6.9min 级非 2.5min 级。
+🔴 新读数口径问题交砚：v2 下 pop 稳在 max_ind ⇒ 每 tick 约 pop 个出生点被拦 ⇒ cap_hits 稳态≈2000/tick
+（4000t 累计 7.8e6）⇒ 绝对计数在饱和态无可比信息量，建议主判读改用顶格 tick 占比或按 tick 归一，
+cap_hits 原值仍入 manifest；另本装置 v2 下承载力就是 max_ind（我 21:0x 那句得证，且与死槽无关）。
+---
+ ...2\227\344\270\244\344\273\266-20261009.md" |  8 +++++
+ ...0\247\350\203\275\350\241\250-20261009.md" | 29 +++++++++++++++++++
+ 2 files changed, 37 insertions(+)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
+index ee5e9d7..b4e5d71 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
+@@ -78,6 +78,14 @@ PI 取证：同档 seed207／A 臂／判据改 `self.pop` ⇒ `t4000 = 48 ms/t·
+ 
+ ---
+ 
++实施后实测（22:38 空载单进程，`--trend 4000 --window 1000`，A 臂 `max_ind=2000`）：
++`len(g)` 增长 **0**、ms/t 序列 21.7→20.6→20.6 **平坦** ⇒ 无界累积消除（认 PI 取证、驳"修完仍 10.7h"的外推成立）。
++但**本卡的 §四 预期也被实测纠了**：v2 稳态 **≈20.6 ms/t**（不是 6–10），20000t ≈ **412s ≈ 6.9min/run**、
++16run ≈ 1.8h、32run ≈ **3.7h** ⇒ 本机超"≤3h 档"，明晨走云 2 路或降 `max_ind` 档（数值随标定批锁）。
++我 21:0x 的 7.29ms/t 之所以偏低＝300 tick 短程把"pop 从 500 爬到 2000 的前半段"平均进去了 ⇒
++**机时数字必须按稳态窗口报，短程平均外推长程是系统性乐观**（与带载污染同类的另一个方向，按同样标准驳自己）。
++详见 `记录-S0-kernel-b-自测性能表-20261009.md` §六（含 `cap_hits` 饱和态读数口径建议）。
++
+ ## §五 `cap_hits` 口径变更时点标签（PI seq38④ 采，不改码面入账）
+ 
+ - manifest 新增两字段：`code_caliber = "S0-TER-POP-CAP-v2"`、`caliber_epoch_commit = <实施 commit 短码>`；`cap_hits` 在 v1/v2 语义不同（v1＝槽位表满被拒次数；v2＝**存活人口触顶被拒次数**）。
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md"
+index 2f3da3a..d090d5a 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\260\345\275\225-S0-kernel-b-\350\207\252\346\265\213\346\200\247\350\203\275\350\241\250-20261009.md"
+@@ -66,3 +66,32 @@ PYTHONUTF8=1 ../../.venv/Scripts/python.exe tools/s0_selftest_perf.py --reps 3 -
+ 以及 §三-1"压 `max_ind` 换机时"要不要作为标定批计时项的显式变量；计时权威值仍在你那栏，我不双写。
+ 
+ — 澜舟 `[开发·二线]`｜`task/ENERGY-CLOSE`@`035c4c0`｜署名逐命令 `-c` 显式（R371）
++
++---
++
++## 六、v2 复算追记（22:38 空载单进程，`--trend 4000 --window 1000`，seed 207，A 臂，`max_ind=2000`）
++
++| tick ≤ | ms/tick | `len(g)` | pop | 累计 cap_hits |
++|---|---|---|---|---|
++| 1000 | 14.68 | 2000 | 2000 | 1,842,569 |
++| 2000 | 21.72 | 2000 | 2000 | 3,833,451 |
++| 3000 | 20.63 | 2000 | 2000 | 5,819,625 |
++| 4000 | 20.62 | 2000 | 2000 | 7,810,187 |
++
++**三条结论，第一条打我自己的脸**：
++
++1. 🔴 **我 21:0x 的 fresh 口径 7.29 ms/t 乐观了**，v2 稳态实测 **≈20.6 ms/t**（pop 顶满 2000 之后）。
++   ⇒ 20,000t ≈ **412 s ≈ 6.9 min/run**；16 run ≈ 1.8h；32 run ≈ **3.7h**。⇒ 本机 32run **超出"≤3h 本机档"**，
++   我 §三-2 那句"落 ≤3h 内"作废，改判：明晨排期走云 2 路，或把 `max_ind` 降档（见 3）。
++   成因：7.29 那档只跑 300 tick、pop 从 500 爬到 2000 的**前半段**被平均进去了；稳态成本随**存活人口**走，
++   不是随 tick、也不是随格数。⇒ 机时数字必须用"稳态窗口"报，**用短程平均外推长程＝系统性乐观**，
++   这与我 21:0x 用来纠 PI 的那条（带载/连跑污染）是同一类错的另一个方向，我按同样标准驳自己。
++2. **槽位累积病灶确已消除**：`len(g)` 增长 **0**（v1 是 ≈10/tick ⇒ 4000t 时 20000 槽、97ms/t）；
++   ms/t 序列 21.7 → 20.6 → 20.6 **平坦**，漂移比 1.40× 是"首窗含爬升段"，不是继续发散。
++   ⇒ 对 PI 那句"修完判据仍 40min/run、10.7h"的**驳仍成立**（无界增长没了），但 v2 的真实单价是 6.9min/run 级，
++   不是 2.5min/run 级——**两边数字都按实测改**。
++3. 🔴 **新读数口径问题（交砚）**：v2 下 pop 稳在 `max_ind` ⇒ 每个 tick 约 `pop` 个出生点被拦 ⇒
++   `cap_hits` 稳态 ≈ **2000/tick**（4000t 累计 7.8×10⁶）。绝对计数在这种饱和态里没有可比信息量，
++   建议判读改用 **顶格 tick 占比**（`capped_ticks/ticks`）或**按 tick 归一**，`cap_hits` 原值仍入 manifest
++   但不进主判读。另：本装置在 v2 下**承载力就是 `max_ind`**（我 21:0x 那句在 v2 复算中得证，
++   且与死槽无关了）。
+-- 
+2.46.1.windows.1
+
+
+From 5c79034e55dd5388f9b3988f748e7ff2d18eca58 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 22:44:18 +0800
+Subject: [PATCH 11/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E8=AE=BE=E8=AE=A1=E5=8D=A1):=20S0=E2=80=B2?=
+ =?UTF-8?q?=20=E6=96=91=E5=9D=97=E5=AE=9E=E4=BD=93=E6=94=B9=E9=80=A0?=
+ =?UTF-8?q?=E4=B8=89=E6=A1=A3=E5=88=87=E5=88=86=EF=BC=88=E5=8F=AA=E8=AE=BE?=
+ =?UTF-8?q?=E8=AE=A1=E4=B8=8D=E5=86=99=E8=A1=8C=E4=B8=BA=E7=A0=81=EF=BC=8C?=
+ =?UTF-8?q?=E6=89=BF=20PI=2022:3x=20=E5=88=86=E5=B7=A5=E5=8D=95=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+定位：现码里"斑块"不是可数有身份的实体，而是构造期一次成型的布尔掩码 ⇒ 面积/边界/数量/寿命/分裂继承类
+连续量读数**没有承载体**，只能每 tick 现算连通分量或拿 patch_count 反推（＝由构造恒真，test_o7 同族）。
+
+§二 逐行指认现状：resource_field.py:174 掩码构造期成型运行期从不更新（30 中心 radius=2 粘连后实际块数未知、
+≠patch_count）／:75-76 加成是格上标量倍率 ⇒ 强度只能求和不是实体属性／:119 中心由独立 rng 选择不消费主 rng
+（对登记友好）／resource_dynamics.py:21-23 有"格生死"无"块生死"／sphere_engine.py:1742 尸体养出的临时富块与构造期块
+混成一格属性无身份；🔴 邻居口径三种并存（von_neumann/moore/sphere_neighbors，极点 neighbors(0) 可返回上百格）
+⇒ 块连通性完全取决于口径，必须显式入参并进 manifest，否则读数跨档不可比（与我今晚 ν 近邻口径同坑）。
+
+§三 三档切分（选档归 PI）：甲 只加读数侧连通块扫描（零行为改，sidecar，R1-R4 立刻有承载体，但块 id 只在单
+tick 内成立 ⇒ 跨窗不可 join，且正式档扫描是新机时项）／乙 加实体登记表（构造期建表＋生死事件增量维护，
+身份可跨窗 join ⇒ 才谈得上寿命与谱系；仍不动能量算路 ⇒ 逐位等价门可跑；须带"表长有界"断言，
+避免我把 S0 容器刚犯的累积不回收病灶在主线再犯）／丙 真动态斑块（行为改＝换纪元 R320/R218＋指纹声明＋生态门
+R3/R6，且与步B 闭合账在算路上纠缠 ⇒ 顺序应排步B 之后，否则红了不知谁干的）。
+
+§四 跨档门禁六条：邻接口径显式化禁默认／默认关逐字节等价＋新读数走 sidecar 不触 energy_ledger 列面（轻舟约束 1
+在主线同样适用）／甲乙不消费 RNG、丙须预生成＋双路径对拍／fail-loud 禁"扫不出当 0 块"（未观测≠0，砚⑥）／
+变异靶各档≥2 条／块级读数只是描述量，进 S0′ 主判须先过砚 R1-R6 口径锁定与镜审。
+
+§五 与砚 R1-R6 的占位对齐表（甲可承载 R1-R4，R5 寿命/R6 谱系须乙或丙）；🔴 明写我今晚没读到她清单原文
+（22:4x 才落板），数值公式阈值一概不代填，明晨逐条并表、错位以她为准。§六 工程量粗估（甲 1.5-2.5、乙 4-6、
+丙 8-12 人日＋生态门全套，标非裁定，并注明这是按 S0-kernel-b 那次乐观偏差修正后的口径仍偏乐观）。
+§七 未决六条含两条自我限定：粘连后实际块数与正式档扫描成本我均**未实测**，禁止拿 S0 小档数替它背书。
+零行为面：本卡不触任何 .py。ν 问句按 PI 22:4x 路由留明晨，不墙前追问。
+---
+ ...1\243\345\210\207\345\210\206-20261009.md" | 119 ++++++++++++++++++
+ 1 file changed, 119 insertions(+)
+ create mode 100644 "docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
+new file mode 100644
+index 0000000..bb78b3f
+--- /dev/null
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
+@@ -0,0 +1,119 @@
++# 设计卡 · S0′ 斑块**实体**改造（三档切分，只设计、不写行为码）
++
++> 作者 澜舟 `[开发·二线]`｜2026-10-09 22:4x（夜墙前出骨架）｜基线 `task/ENERGY-CLOSE@6f3c03b`
++> 承单：PI 22:3x 分工单 @`021d7b1`「澜舟＝码面修复 push 即止＋**斑块实体改造设计卡**（只设计不写行为码，镜审后再动）」
++> 配套：砚 斑块连续量 R1–R6 清单 @`task/S0P-PREREG`（**数值全待锁**）；镜 明晨审位 (a)(b) 设计符合性
++> 🔴 本卡不锁任何数值、不代填 R1–R6 的公式、不选档（选档＝PI，判据＝砚，形＝镜）。墙前只把**可审的码面事实与三档边界**摆清。
++
++---
++
++## §一 定位：什么叫"实体"，以及本卡不做什么
++
++**问题**：现码里"斑块"不是一个**可数、有身份、有生死**的东西，而是构造期一次成型的一张**布尔掩码**。
++⇒ 任何"斑块的数量／面积／边界／寿命／谁并给了谁"这类**连续量读数都没有承载体**：要么读不出，
++要么每 tick 现算连通分量（机时贵且随档变），要么靠构造期参数反推（＝由构造恒真，镜 `test_o7` 同族）。
++"实体改造"＝把斑块从**格属性**升级成**有身份的块**（登记、边界、生死事件、分裂/合并可追）。
++
++不做的事（写死，防越界）：
++1. **不写行为码**（owner 令）：本卡落地前不动 `world/resource_field.py`、`world/resource_dynamics.py`、`simulation/sphere_engine.py` 的任一能量流；
++2. **不锁数值**：R1–R6 的公式与阈值归砚，形态归镜，选档归 PI；
++3. **不碰 S0 主线**：S0 双臂容器（`s0_kernel/`）与此无关，本卡若影响 S0 装置档，另帖报备；
++4. **不重开 ENV-FIELD 的 (a)/(b) 之争**：`docs/设计文档/设计-ENV-FIELD-物理场与格子产能-20261008.md` §六 那张对比表仍是"物理场 vs 格子产能"的轴，本卡是**同一格子上"块身份"的第三条轴**，不与它混谈。
++
++---
++
++## §二 现状码面事实（逐行指认，`[代码实测读]`）
++
++| 处 | 现状 | 后果 |
++|---|---|---|
++| `world/resource_field.py:174` `patch_mask = np.zeros(n_cells, bool)` → `:173` "邻居扩散 radius 层" | 构造期一次成型的**布尔掩码**，运行期从不更新 | 无"块"身份：30 个中心 ≠ 30 个块（radius 扩张后会**粘连成更大的连通块**，实际块数 <30，且当前**没人知道是几块**） |
++| `:75-76` `_patch_mask` / `_patch_regrowth_mult`；`:98-104` `patch_count/radius/capacity_mult/regrowth_mult` | 加成是**格上的标量/倍率** | 斑块"强度"只能由格属性求和，不是实体属性；`patch_count` 只是**中心数**，与真实块数不等价（读数若把它当块数＝错读） |
++| `:119` "patch 中心由独立 rng（`patch_seed`）选择，不消费调用方 rng" | 选中心与主 rng 解耦 | ✅ 这条对"实体登记"友好：构造期登记不引入新随机消费 |
++| `world/resource_dynamics.py:21-23` 休耕/死亡/轮作 三态；`:52` `_mask`/`_dead`/`_rest_until` 逐格自检 | 格级**状态机**，死格 `dead_regen_ticks` 后重入候选池 | 有"格生死"，**没有"块生死"**：一块被吃掉一半，现码读不出"它还在不在／缩了多少／边界长变了没" |
++| `sphere_engine.py:1742` `_corpse_boost`（腐烂处 +50% 再生加成，2000 tick） | 加成落在**格**上 | 尸体养出的"临时富块"同样无身份，与构造期斑块是两种来源、现码混成一格属性 |
++| 邻居口径：`SphereWorld.neighbors()`（球面，极点 1 圈可返回上百格）与 `neighbors_von_neumann()` 并存 | 「相邻」有两种以上定义 | 🔴 **块的连通性完全取决于用哪一种邻接口径**——极点处一种口径会把跨经度的格判成同块。⇒ 实体的邻接口径必须**显式声明并写进 manifest**，否则 R1/R2 类读数跨档不可比（与我今晚那条 ν＝近邻口径 是同一个坑，见板 @`70ffa40` 三） |
++
++---
++
++## §三 三档切分（选档归 PI，我按可审的形把代价摆开）
++
++### 甲 · 只加**读数侧**连通块扫描（零行为改，最快）
++- 做法：新增 sidecar 扫描器（新文件，如 `world/patch_entities.py` 的只读函数），每 `sample` tick 对
++  `_patch_mask ∨ 有效加成格` 做一次**连通分量标注**（BFS/union-find，邻接口径显式入参），输出
++  `patch_id / 面积 / 边界格数 / 强度求和` 的**逐 tick 表**；能量流一行不动。
++- 门：默认关＝逐字节等价；不消费 RNG；口径不明即 raise；变异靶＝改一格加成必让对应块面积变、旁路改 `_grid` 不得影响块表。
++- 用处：砚的 R1–R6 立刻**有承载体**，可先出数锁形。
++- 代价：每 `sample` 一次 O(格数) 扫描 ⇒ 正式档 460,800 格时是**新的机时项**（[待实测]，我不给数）；
++  块 id 由"这次扫描"决定 ⇒ **跨 tick 的同一块无法 join**（身份只在单 tick 内成立）。
++
++### 乙 · 加**实体登记表**（身份持久，仍零行为改）
++- 做法：构造期建登记（`block_id → {cells, 出生 tick, 来源=构造期/尸体养出}`）；运行期只在**格状态翻转事件**
++  （斑块格死亡/重生、加成到期）时**增量维护**表，不做全表扫描；每 tick 输出块级行（同 `uid` 思路：单调不重号）。
++- 与甲的本质差别：**身份可跨窗 join** ⇒ 才谈得上"寿命""谁分裂成谁""并给了谁"，R 类读数从"快照统计"升级成"实体轨迹"。
++- 门：同上；外加一条与今晚 v2 同源的纪律——**槽位/表长必须有界**（`len(登记表) ≤ 上界`，死块复用或注销要可断言），
++  否则我把 S0 容器刚犯过的"累积不回收"病灶在主线再犯一次。
++- 代价：改动面比甲大（要拿到生死事件流——`resource_dynamics` 的死格/重生分支是唯一挂点），但**不动能量算路** ⇒ 逐位等价门仍可跑；工程量 > 甲、< 丙。
++
++### 丙 · 真**动态斑块**（中心生长/分裂/合并的行为改＝换纪元）
++- 做法：把"块"变成会被生态驱动的一等实体（过牧→收缩→分裂；恢复→扩张→合并），落点必在 `resource_dynamics` 之外新增机制。
++- 🔴 定性：**行为改** ⇒ 新 config 默认关 + 开档换纪元（R320/R218 禁跨比）＋ 指纹变声明 ＋ 生态门（R3/R6，≥5 seed）
++  ＋ 归因坑预写（哪些读数变化属于"加了实体"而非"改了产能"）；且与步B 的**能量闭合**（营养池/归还账户）在算路上纠缠
++  ⇒ **顺序上应排在步B 之后**，否则闭合账与实体账两件事一起变，红了不知道谁干的。
++
++---
++
++## §四 跨档通用门禁（任何一档落地都得满足，缺一条不放行）
++
++1. **邻接口径显式化**：`adjacency ∈ {"von_neumann", "moore", "sphere_neighbors"}` 必须作**入参且进 manifest/指纹**，
++   禁默认值兜（极点处分量差异实测存在，`sphere_engine.py:943` 一行注释即"极点 `neighbors(0)` 返回 120 格"级别的数量差）。
++2. **逐字节等价门**：甲/乙默认关档 = 现网逐位不变（C7 类钉死基线不许动；新读数走 sidecar 新键，**不改 `energy_ledger` 列面**——轻舟约束 1 在主线同样适用）。
++3. **不消费 RNG**（甲/乙）；丙若引入随机分裂，必须走预生成随机数 + 双路径对拍（AGENTS.md 关键约束 1）。
++4. **fail-loud**：口径缺失/表长越界/事件流与登记表不自洽 ⇒ 当场 raise，禁"扫不出来就当 0 块"（未观测≠0，砚⑥）。
++5. **变异靶必红**（各档 ≥2 条）：改一格加成而块表不动＝红；旁路写 `_grid` 而块身份漂了＝红。
++6. **读数不入主判**：块级读数目前只是**描述量**；要进 S0′ 判据得先过 砚 的 R1–R6 口径锁定 + 镜 审，我不越。
++
++---
++
++## §五 与 砚 R1–R6 清单的对齐位（占位，不代填）
++
++| 砚清单 | 我这边需要的承载体 | 甲够不够 | 备注 |
++|---|---|---|---|
++| R1 面积类 | 块 → 格集合基数 | ✅ | 甲即可读 |
++| R2 边界/周长类 | 块 → 边界格判定（依赖 §四-1 邻接口径） | ✅ | 口径必须先声明 |
++| R3 强度/产能类 | 块 → Σ存量 或 Σ容量 | ✅ | 与"有效加成格"定义绑定 |
++| R4 数量类（几块） | 连通分量计数 | ✅ | 🔴 **不等于 `patch_count`**（中心数），须在读数里明写两者不同 |
++| R5 寿命类 | 块的**出生/死亡 tick** | ❌ 需乙 | 甲的单 tick 快照无跨窗身份 |
++| R6 分裂/合并/继承类 | 块谱系（谁变成谁） | ❌ 需乙或丙 | 丙才"真的发生"分裂合并；乙只能记录被动拓扑变化 |
++
++⚠️ 诚实标注：我**今晚没读到** 砚 清单原文（@`task/S0P-PREREG`，22:4x 才落板）⇒ 上表是我按"实体缺什么"反向给的**占位对齐**，
++数值/公式/阈值一概不代填；明晨 her 清单落 main 后我逐条并表，若她的 R 定义与上表错位，以她为准并改本卡。
++
++---
++
++## §六 工程量粗估（[我的口径，非裁定]，含门禁与测试，不含镜审来回）
++
++| 档 | 粗估 | 主要不确定性 |
++|---|---|---|
++| 甲 读数侧扫描 | **1.5–2.5 人日** | 正式档扫描的机时项（要实测才能定 `sample` 频） |
++| 乙 实体登记表 | **4–6 人日** | 生死事件挂点是否够密（`resource_dynamics` 现有分支能否覆盖尸体养出的块）＋ 有界性断言 |
++| 丙 动态斑块 | **8–12 人日**，且必随**生态门全套** | 与步B 闭合账的纠缠顺序（我判应排在步B 后） |
++
++对照参考（同一把尺的旧例）：S0-kernel-b 我估 2–3 人日、实际今晚落地用了两班；本卡数字是**同一乐观偏差修正后的口径**，仍偏乐观。
++
++---
++
++## §七 未决与风险（标假设，R387）
++
++1. 🔴[待裁定 PI] 选哪档（甲 / 乙 / 丙 / 甲→乙→丙分三批）——我推 **甲先行、乙随 R5 需求**，丙等步B；
++2. 🔴[待裁定 砚] R1–R6 的**定义与邻接口径**（尤其 R4"块数"与 `patch_count` 的区分是否入册）；
++3. 🔴[待裁定 镜] 实体是否算**新机制**（若算，丙要走设计稿）；
++4. ⚠️[假设] 构造期"30 中心 radius=2 会粘连成更少连通块"——我今晚**没实测**（要跑一次扫描才知道），列为甲的第一条取证项；
++5. ⚠️[假设] 甲的扫描在 460,800 格档可承受——**未实测**，禁止拿 S0 小档的数替它背书；
++6. 风险：实体账一旦进 main，`patch_count` 这类既有参数会被误读成"块数"⇒ 上板与读数件要同步打**术语澄清**（我今晚那条 `cap_hits` 饱和态就是同类误读的教训）。
++
++---
++
++【交球】@镜 明晨审本卡 §三/§四（尤其"乙是否算零行为改"这条定性）；@PI 选档一句；@砚 R1–R6 原文落 main 后我逐条并表（错位以你为准）。
++ν 那条问句我按 PI 22:4x 路由留到明晨，不在墙前追问。
++
++—— 澜舟 🛶 `[开发·二线]`｜基线 `task/ENERGY-CLOSE`@`6f3c03b`｜署名逐命令 `-c` 显式（R371）｜不裁定（PI）·判据归砚·设计权归镜
+-- 
+2.46.1.windows.1
+
+
+From 0b4ddc08aea86ffe5300b5f87ea89a3ad403190f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 22:45:12 +0800
+Subject: [PATCH 12/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20fix(tools):=20s0=5Fselftest=5Fperf.py=20=E8=AF=AD?=
+ =?UTF-8?q?=E6=B3=95=E4=BF=AE=E5=A4=8D=E8=A1=A5=E6=8E=A8=E2=80=94=E2=80=94?=
+ =?UTF-8?q?a7b680c=20=E9=87=8C=E9=82=A3=E7=89=88=E4=B8=8D=E5=8F=AF?=
+ =?UTF-8?q?=E8=A7=A3=E6=9E=90=EF=BC=88=E6=88=91=E7=9A=84=E6=BC=8F=E6=8A=A5?=
+ =?UTF-8?q?=EF=BC=8C=E5=A6=82=E5=AE=9E=E8=AE=B0=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+事实：a7b680c 提交的 --trend 段里两处换行被我写成字面换行（heredoc 里 \"\n\" 被展开）⇒ 该 commit 的
+`tools/s0_selftest_perf.py` **ast.parse 直接 SyntaxError**；我在 22:37 修好后跑了复算但**没重推**，
+于是推上去的是坏版。影响面与不可不报的两条：
+① `tests/test_s0_harness.py::test_selftest_perf_script_runs_and_reports_keys` 用 importlib 加载该文件 ⇒
+   在 a7b680c 那个 commit 上必红（我 22:38 报的"21 例 passed"是**修好后的工作树**，不是**已推的 commit** ⇒
+   这是我今天第二次把"手边能跑"当成"交出去能跑"，同一族错，按同标准自报）；
+   主线只会在有人显式跑该工具或跑全量套件时撞上，不动 s0_kernel 运行时与主引擎 ⇒ 逐位等价门无涉。
+② 明晨板桥/砚 若从 a7b680c 或 6f3c03b 拉，请用本 commit 之后的头（5c79034+本笔）；我不会去改写已推的历史。
+修法：两处 chr(10) 显式化（去掉裸换行字面量），ast.parse 通过，trend 段实测数已落记录件 §六。
+教训入码面纪律：脚本改完必须"在待推的提交对象上"验一次可解析（`git show <sha>:<file> | ast.parse`），
+不是在工作树验——工作树绿 ≠ 推出去绿。
+---
+ tools/s0_selftest_perf.py | 10 ++++------
+ 1 file changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/tools/s0_selftest_perf.py b/tools/s0_selftest_perf.py
+index 650ca0b..6aa6338 100644
+--- a/tools/s0_selftest_perf.py
++++ b/tools/s0_selftest_perf.py
+@@ -142,12 +142,10 @@ def main() -> int:
+         print(f"  ⇒ 漂移比（末窗/首窗）= {drift:.2f}×；len(g) 增长 "
+               f"{tr[-1]['slots_len'] - tr[0]['slots_len']}（v2 要求 ≤ max_ind 且有界）")
+         if args.out:
+-            Path(args.out).write_text(json.dumps({"trend": tr, "drift_ratio": round(drift, 3),
+-                                                 "demography": dem_kw, "seed": args.seed},
+-                                                ensure_ascii=False, indent=1) + "
+-",
+-                                      encoding="utf-8", newline="
+-")
++            blob = json.dumps({"trend": tr, "drift_ratio": round(drift, 3),
++                               "demography": dem_kw, "seed": args.seed},
++                              ensure_ascii=False, indent=1)
++            Path(args.out).write_text(blob + chr(10), encoding="utf-8", newline="")
+         return 0
+     if args.ticks < 0:
+         raise RuntimeError("--ticks ≥ 0")
+-- 
+2.46.1.windows.1
+
+
+From 4d56314321e0e61459ec36b6abc8a2fa6352fedf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 22:50:39 +0800
+Subject: [PATCH 13/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E6=96=B9=E6=A1=88=E5=8D=A1):=20=C2=A7?=
+ =?UTF-8?q?=E5=9B=9Bbis=20=E6=94=BE=E8=A1=8C=E7=A1=AC=E6=9D=A1=E4=BB=B6?=
+ =?UTF-8?q?=E5=B9=B6=E5=85=A5=EF=BC=88PI=2021:4x=20=E4=B8=BB=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E4=BB=A4=EF=BC=8B22:4x=20=E5=8F=A3=E5=BE=84=E5=BD=92?=
+ =?UTF-8?q?=E4=B8=80=E8=A1=A5=E6=B3=A8=E4=B8=BA=E5=94=AF=E4=B8=80=E5=8F=A3?=
+ =?UTF-8?q?=E5=BE=84=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+硬条件＝20000t 单价压回分钟级（≈5min/run、云两路 ≤3h，不落"云>5h 长实验"档）；只修判据不修槽位＝不放行。
+第二条已满足（两件同窗 a7b680c）。🔴 第一条按现实测**还不能勾**：v2 稳态 20.6ms/t ⇒ 6.9min/run
+（32run 单路 3.7h／云两路 ≈1.85h）⇒ 两路支达标、单 run 支超目标 1.4×，我不拿它冒充达标。
+压价三条路：①出生段候选队列（现每 tick 扫全部槽位，顶满时 2000 次"未达阈/被拦"判定 ⇒ 改成只遍历
+e≥repro_at 候选，O(槽位)→O(候选)；⚠️[假设] 省 20-35% 未实测）②进食段邻域表复用（occ/nb 每 tick 全量重建，
+2000 个体×8 邻格 dict 查找 ⇒ 按格缓存；收益最大风险也最大，移动后失效不彻底就是行为改）
+③max_ind 2000→1500（成本随存活人口线性 ⇒ ≈15.5ms/t≈5.2min/run；⚠️这不是免费优化而是数值降档＝换装置，
+承载力变则顶格态/密度/cap_hits 全变，须随标定批锁并上板报备）。
+🔴 自加放行门：①②属实现形优化 ⇒ 落地时同 seed 的 digest 与 rows() 逐行 CSV 必须逐位不变，有一位不同即行为改、
+退回重做（与 S0 逐位等价门同源，也是今晚 v2 复算用的同一把尺）。
+若实测后仍 >5min/run：按补注只报数不裁，32run 走 R402 长实验规程由 PI 呈 owner 择(b)。
+S-MG1 取证批不受本条牵制（现码 16run、灭绝早停档、分钟级，照跑只取证不锁档，PI 已明写）。
+---
+ ...2\227\344\270\244\344\273\266-20261009.md" | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
+index b4e5d71..c484e04 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\346\226\271\346\241\210-S0-kernel-b-\347\240\201\351\235\242\345\220\214\347\252\227\344\270\244\344\273\266-20261009.md"
+@@ -86,6 +86,25 @@ PI 取证：同档 seed207／A 臂／判据改 `self.pop` ⇒ `t4000 = 48 ms/t·
+ **机时数字必须按稳态窗口报，短程平均外推长程是系统性乐观**（与带载污染同类的另一个方向，按同样标准驳自己）。
+ 详见 `记录-S0-kernel-b-自测性能表-20261009.md` §六（含 `cap_hits` 饱和态读数口径建议）。
+ 
++## §四bis 放行硬条件（PI 21:4x 主会话开工令＋22:4x 口径归一补注，唯一口径；与前令同窗生效）
++
++**硬条件**：方案必须把 20000t 单 run 单价**压回分钟级**（目标 ≈5min/run、云两路 ≤3h，不落"云>5h 长实验"档）；
++**只修判据不修槽位＝灭绝档换爆档，不放行**。
++
++- 第二条已满足（两件同窗 @`a7b680c`）。🔴 **第一条按现实测还不能勾**：v2 稳态 20.6 ms/t ⇒ **6.9min/run**
++  （32run 单路 3.7h／云两路 ≈1.85h）⇒ **两路支达标，单 run 支超目标 1.4×**，我不拿它冒充达标。
++- 压价三条路（按性价比）：
++  ① **出生段候选队列**：现每 tick 扫全部槽位（pop 顶满时 2000 次"未达阈/被拦"判定），改成只遍历
++  `e[i] ≥ repro_at` 的候选 ⇒ 出生段从 O(槽位) 降到 O(候选)；⚠️[假设] 省 20–35%，未实测。
++  ② **进食段邻域表复用**：`occ`/`nb` 每 tick 全量重建（2000 个体 × 8 邻格 dict 查找）⇒ 按格缓存；
++  收益最大但风险也最大（移动后必须正确失效，失效不彻底就是行为改）。
++  ③ **`max_ind` 2000→1500**：成本随存活人口线性 ⇒ ≈15.5 ms/t ≈ 5.2min/run。⚠️ 这条**不是免费的优化**——
++  它是数值降档＝换装置（承载力变 ⇒ 顶格态/密度/`cap_hits` 全变），必须随标定批锁并上板报备。
++- 🔴 **我给自己加的放行门**：①②属实现形优化 ⇒ 落地时**同 seed 的 `digest` 与 `rows()` 逐行 CSV 必须逐位不变**；
++  只要有一位不同就是行为改，直接退回重做（这条与 S0 逐位等价门同源，也是今晚 v2 复算用的同一把尺）。
++- 若 ①②③ 实测后仍 >5min/run：按补注**只报数不裁**，32run 正式批由 PI 走 R402 长实验规程呈 owner 择(b)。
++- S-MG1 取证批不受本条牵制：现码 16run、灭绝早停档、分钟级，照跑且**只取证不锁档**（PI 已明写）。
++
+ ## §五 `cap_hits` 口径变更时点标签（PI seq38④ 采，不改码面入账）
+ 
+ - manifest 新增两字段：`code_caliber = "S0-TER-POP-CAP-v2"`、`caliber_epoch_commit = <实施 commit 短码>`；`cap_hits` 在 v1/v2 语义不同（v1＝槽位表满被拒次数；v2＝**存活人口触顶被拒次数**）。
+-- 
+2.46.1.windows.1
+
+
+From a39d48b46d9729c01aa7aad5da328240e37d5a5f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 23:35:12 +0800
+Subject: [PATCH 14/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E8=AE=BE=E8=AE=A1=E5=8D=A1):=20=E6=96=91?=
+ =?UTF-8?q?=E5=9D=97=E5=AE=9E=E4=BD=93=E6=94=B9=E9=80=A0=E8=A1=A5=20=C2=A7?=
+ =?UTF-8?q?=E4=BA=8CC-F=20=E5=9B=9B=E8=8A=82=E2=80=94=E2=80=94=E4=B8=BB?=
+ =?UTF-8?q?=E5=BC=95=E6=93=8E=E7=9B=98=E7=82=B9/=E6=94=B9=E5=8A=A8?=
+ =?UTF-8?q?=E7=82=B9=E6=B8=85=E5=8D=95/=E9=BB=98=E8=AE=A4=E5=85=B3?=
+ =?UTF-8?q?=E9=80=90=E4=BD=8D=E7=AD=89=E4=BB=B7=E6=96=B9=E6=A1=88/?=
+ =?UTF-8?q?=E6=9E=84=E9=80=A0=E6=9C=9F=E5=8F=96=E8=AF=81=EF=BC=88=E6=89=BF?=
+ =?UTF-8?q?=20PI=2022:3x=20=E5=88=86=E5=B7=A5=E5=8D=95=E2=91=A1=EF=BC=8C?=
+ =?UTF-8?q?=E5=8F=AA=E8=AE=BE=E8=AE=A1=E9=9B=B6=E8=A1=8C=E4=B8=BA=E7=A0=81?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+§二C 主引擎盘点四项（逐项带行号）：库存字段（_grid 是唯一真值、_capacity/_patch_mask/_bg_low_*/_lazy/_dirty_mask
+＋rd 三态＋尸体三兄弟，块级字段一个都没有）／消耗点（主觅食 :3609→:3615 Rust 或 :3619 Python consume_many，
+第二腿 :3655/:3659 同 API ⇒ 统计必须两腿合并；食腐 :1899 扣尸体池不碰 _grid；果实 :6219-6229 独立域；
+底层唯一减入口 resource_field.py:319/:348）／regen 挂点（①惰性子集 :2906-2936 ②Rust uniform :2938-2949
+③Rust patchy :2951-2965 ④Python 全场 :2967 ＋两处非再生注入 :1860-1865/:1874-1892 ＋时序声明 :2969
+「归还养分从下一 tick 才被利用」⇒ 六写入点漏一个块账就与真值分叉）／预处理异质开关（config.py:96-100/:112/:88
+＋resource_field.py:107/:119/:165-180/:201-229＋rd enabled＋enable_lazy，共七个构造期旋钮）。
+
+§二D 改动点清单 D-1…D-7，末列标是否触逐位等价门：D-1/D-2/D-4/D-6 零行为改；D-3（六写入点增量维护）与
+D-5（邻接口径显式化进指纹）零行为改但须按路各验；只有 D-7（丙档动态分裂合并）真动行为。
+
+§二E 默认关逐位等价方案：不新造，直接抄本仓两个现成范式（config.py:1217-1218 关⇒全 no-op 不进新路径；
+:85 light_sensitivity=0 整块跳过＝逐位一致）＋开关三件（含"派生量也只在开档算"——关档连开销都要等价）
+＋等价证明门六条 E-1…E-6（C7 基线不许动／关档 rng_draws 同值／双路径各验且开档块账须一致或显式声明不可用／
+六写入点独立算式对账禁由块账反推／未观测≠0／变异靶三条必红）。
+
+§二F 构造期取证（把 §七-4 的 [假设] 变成实测，零机时不跑 tick）：ResourceField(patch_count=30,radius=2,
+seed=42) 对 _patch_mask 做连通分量标注，两口径各算 ⇒ 60×120 档 817 真格 30 中心 = **22 块**、最大块 156 格
+（≈名义盘 6 倍、前 5=156/63/48/47/47 极不均）；28,800 格档 713 真格 = **26 块**；含极点块 1。
+⇒ patch_count≠块数这条升为取证。🔴 同尺降级我自己：§二 原写"邻接口径不同读数就不同"在两档实测中**差=0**
+（22 vs 22、26 vs 26，radius=2 Moore 盘之间不发生仅对角接触）⇒ 口径降为**复现性要求**而非本档偏差来源，
+极点进块是事实故实现不许用平面 wrap；高密度档在 patch_count=120 撞构造器 fail-loud
+（resource_field.py:193-197 背景容量为负）⇒ 口径敏感情形本轮未测，不假装测过。460,800 正式档扫描成本仍未测。
+
+不锁数值、不写行为码、不选档；丙档在六挂点账验通前不碰。
+---
+ ...1\243\345\210\207\345\210\206-20261009.md" | 131 ++++++++++++++++++
+ 1 file changed, 131 insertions(+)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
+index bb78b3f..fc177ed 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
+@@ -35,6 +35,137 @@
+ 
+ ---
+ 
++## §二C 主引擎现状盘点（PI 22:3x 分工单点名四项，`[代码实测读 @4d56314]`）
++
++### C-1 库存字段：斑块"库存"的唯一真值载体是**格数组**，块级字段一个都没有
++
++| 字段 | 处 | 语义 |
++|---|---|---|
++| `ResourceField._grid` | `world/resource_field.py:58/:73` | 每格现存食物量（平铺 `n_cells`）⇒ **唯一库存真值** |
++| `_capacity` | `:60/:74`（`base_cap × 斑块/bg_low/bg 三档倍率`，`:223-229`） | 每格容量上限 |
++| `_patch_mask` | `:75/:180` | 构造期布尔掩码，**运行期从不更新** |
++| `_bg_low_mask` / `_bg_low_cap_mult` / `_bg_low_regrowth_mult` | `:80-82/:221-222` | 稀疏"绿洲链"低产带三元组 |
++| `_lazy` / `_dirty_mask` | `:84-85`，开关 `enable_lazy():446` | 惰性再生脏格集（现成的"哪些格在动"信息源） |
++| `ResourceDynamics._mask/_dead/_rest_until` | `world/resource_dynamics.py:52` | 格级三态，**可自检** |
++| `_corpse_energy/_corpse_age/_corpse_boost` | `simulation/sphere_engine.py:1739-1742` | 尸体池/腐龄/腐烂加成，**格上非块上** |
++
++⇒ 没有 `patch_id`、没有面积/边界/寿命字段，**实体要从零建**。
++
++### C-2 消耗点（谁减 `_grid`）——两条腿同一个入口，另两条在别的域
++
++| 腿 | 处 | 备注 |
++|---|---|---|
++| 主觅食 | `sphere_engine.py:3609` 算 `want = eat_amount × eat_mult × _forage` → `:3615` Rust `consume_many` / `:3619` Python `resources.consume_many(self._flat[eaters], want)` | 🔴 **双路同源**：`sim_core/src/consume.rs:4` 自述"语义与 Python `consume_many` 等价" ⇒ 实体化改这里必须两路一起改（AGENTS.md 关键约束 1） |
++| 第二腿（补足） | `:3655/:3659`（`short[hf]` 对 `targets` 再取一次） | 同一 API 的第二次调用 ⇒ 块级消耗统计必须**两腿合并**，漏一条＝少记 |
++| 食腐 | `:1899/:1919` `eat_amount × scav_mult` 从 `_corpse_energy` 扣 | 不碰 `_grid` ⇒ 算不算"斑块消耗"要砚定口径 |
++| 果实 | `:6219-6229` `_fruit_grid` 独立库存 | 第三条库存域，与 `_grid` 平行 |
++| 底层实现 | `resource_field.py:319 consume()` / `:348 consume_many()`（`:339 _grid[i] = available - taken` 带打脏） | **唯一减入口** ⇒ 块级消耗可在此一处挂账（改动点 D-1 的依据） |
++
++### C-3 regen 挂点（谁增 `_grid`）——四条路＋两处非再生注入，实体化必须**全覆盖**
++
++| 路 | 处 | 触发条件 |
++|---|---|---|
++| ① rd/惰性子集 | `:2906-2936`（`:2920 flatnonzero(_dirty_mask)` → `:2922 _regrowth_amount(tick, idx)` → `:2926-2931` 结算与脏位维护） | `_lazy` 开 |
++| ② Rust 全场 uniform | `:2938-2949` `self._sim_core.regrow(...)`（注 `sparse:n/a`） | `use_sim_core ∧ distribution="uniform"` |
++| ③ Rust patchy | `:2951-2965` `regrow_patchy(... _patch_regrowth_mult, _bg_regrowth_mult, regrowth_rate)` | `use_sim_core ∧ distribution="patchy"`；旧 `.pyd` 缺符号时特性检测回退 Python（`:2894/:2952`） |
++| ④ Python 全场 | `:2967 self.resources.regrow(self._tick)`（实现 `resource_field.py:419/:440`） | 默认路 |
++| 注入 A | `:1860-1865` 腐烂归还 `put = min(ret, room)` → `_grid[cells] += put`（`sparse:inc`） | `corpse_enabled` |
++| 注入 B | `:1874-1892` 尸体 `patch_boost` 追加再生（`:1867 _corpse_boost[cells]=2000`） | 同上 |
++| 时序声明 | `:2969-2970`「归还的养分从**下一 tick** 的再生开始被利用」 | 既有口径，实体化不许把它提前 |
++
++⇒ 块级读数（面积/强度变化/生死）必须挂在 **①②③④＋A＋B 六个写入点**上；挂漏任何一个，块账与 `_grid` 真值就分叉（正是 `test_o7`／构造恒真那一族）。
++
++### C-4 预处理异质开关（构造期决定"哪里是斑块"的全部旋钮）
++
++| 旋钮 | 处 | 默认 | 作用 |
++|---|---|---|---|
++| `distribution` | `config.py:96`（`:92`＝`"uniform"` 时以下全部不生效、与旧版一致） | `"uniform"` | 总闸 |
++| `patch_count` / `patch_radius` | `config.py:97-98`；实现 `resource_field.py:165-180`（`rng.integers` 选中心 ＋ radius 层邻居扩散成 `_patch_mask`） | 30 / 2 | 决定**中心数**；粘连后真实块数未知 |
++| `patch_capacity_mult` / `patch_regrowth_mult` | `config.py:99-100`（`:101-104` 同默认值注） | 3.0 / 3.0 | 斑块格容量/再生倍率 |
++| `patch_seed` | `resource_field.py:107/:119` | 42 | 🔴 **独立 rng，不消费调用方 rng** ⇒ 构造期建块表天然零 RNG 风险 |
++| `bg_production_zero` | `config.py:112`（`:124` R241：生产格仅 2.78%） | False | 有意打破 Σcapacity 守恒的一档 |
++| `bg_low_*` | `resource_field.py:80-82/:201-229` | — | 绿洲链低产带 |
++| `light_sensitivity` | `config.py:88` ＋ `:85`「=0（默认）时**整块跳过** ⇒ 与旧版逐位一致」 | 0.0 | 🔴 **默认关逐位等价的标准范式**，§二E 照它写 |
++| `ResourceDynamicsConfig.enabled` | `config.py:1236`（`:1217-1218` 关⇒方法全 no-op⇒引擎无条件调用也不进新路径） | False | 三态机制总闸（第二个可抄范式） |
++| `enable_lazy` | `resource_field.py:446`；引擎 `:1280` | 关 | 惰性再生（R217 §五 稀疏化 B） |
++
++**盘点结论**：斑块＝构造期掩码＋格上倍率；**减只有一个入口（两腿共用 `consume_many`）**，**增有四个入口＋两处注入**，异质由七个构造期旋钮决定，其中两个已带"默认关＝整块跳过/全 no-op"的逐位等价范式可直接复用。
++
++---
++
++## §二D 改动点清单（只列点、不写码；末列标是否触逐位等价门）
++
++| # | 改点 | 落点 | 性质 | 触等价门？ |
++|---|---|---|---|---|
++| D-1 | 块级消耗挂账：在 `consume_many` 返回的 `taken` 上按格→块聚合 | `resource_field.py:348-386`（消费方 `sphere_engine.py:3619/:3659`） | 只读统计＋sidecar | ❌ 不改 `_grid` 值；**但 Rust 路 `sim_core/src/consume.rs` 须有对应统计或显式声明"该路不产块账"**，否则两路读数不齐＝隐性不等价 |
++| D-2 | 块表构建：构造期对 `_patch_mask`（∨ `_bg_low_mask` 视口径）做连通分量标注 ⇒ `patch_id[]`/面积/边界格数 | 新文件（建议 `world/patch_entities.py`），输入取 `resource_field.py:180/:221` | 新数据结构 | ❌ 纯派生量，不动能量流 |
++| D-3 | 块 id 持久化：把"每 tick 重算"降级为"六写入点事件驱动增量" | C-3 的 `:2926/:2942/:2956/:2967/:1865/:1892` | 改写入点周边，**不改编排** | ⚠️ 只在 Python 路挂、Rust 路漏 ⇒ 块账分叉 ⇒ 开档等价门须**按路各验一次** |
++| D-4 | 块生死事件：格在"有效斑块格↔无效"翻转时记 birth/death tick（复用 `resource_dynamics.py:52` 的 `_dead/_rest_until` 自检态） | `resource_dynamics.py` | 只读观察 | ❌ 不改三态判定 |
++| D-5 | 邻接口径显式化：`adjacency ∈ {von_neumann, moore, sphere_neighbors}` 必传入参＋进指纹/manifest | 新 API 参数；量级差实证 `sphere_engine.py:943` 注（**普通格 24、极区 240**，后者靠 `_perception_cap` 降级） | 口径项 | ⚠️ 进 config ⇒ **指纹变、行为不变**声明（照 `EnergyProbeConfig` 那套：白名单＋旧档回退＋drift 拒） |
++| D-6 | 出货列面：块级表走 **sidecar 新键**，禁改 `energy_ledger` 列名 | 先例 `config.py:1418-1452` 与步A 探针 | 出货面 | ❌ 列面纪律守住即不触 |
++| D-7 | （**仅丙档**）动态分裂/合并 | 新机制，落点待定 | **行为改** | ✅ 开档即换纪元（R320/R218）＋生态门 R3/R6 |
++
++**D-1/D-2/D-4/D-6 零行为改**；D-3/D-5 零行为改但须验双路与指纹；只有 D-7 真动行为。
++
++---
++
++## §二E 默认关逐位等价方案（照抄本仓两个现成范式，不新造）
++
++**开关三件**（缺一不算"默认关"）：
++1. 总闸 `PatchEntityConfig.enabled = False` ⇒ 关档时**所有新代码路径不进入**。范式两条现成的：`config.py:1217-1218`（关⇒方法全 no-op⇒引擎无条件调用也不进新路径）与 `config.py:85`（`light_sensitivity=0` 整块跳过⇒与旧版逐位一致）。
++2. **派生量也只在开档算**：构造期连通分量标注是 O(格数)，关档不许"顺手算一下"——关档连**时间与开销**都要等价（这条容易被忘，`_lazy` 那套之所以安全正是因为关档整条支路不走）。
++3. `from_dict` 字段白名单＋旧档缺键回退默认＋配置漂移 fail-loud（照 `_ENERGY_PROBE_FIELDS` 与 `test_snapshot_rejects_probe_config_drift`／`_key_corruption`）。
++
++**等价证明门六条（逐条要绿）**：
++- E-1 同 seed 同 argv 关档 vs 现网：digest 逐位（**C7 基线 `(574887, 11266.746993)` 不许动**）＋主 CSV 全列逐位；
++- E-2 关档**零 RNG 消费差**：`rng_draws` 与基线同值（块表用 `patch_seed` 独立 rng，禁碰主 rng——`:119` 已是此纪律）；
++- E-3 **双路径各验**：Python 路（D-3 六挂点齐）与 Rust 路（`consume.rs`/`regrow*` 不产块账）在关档下各自与基线逐位一致；开档下两路块账必须一致**或**显式声明该路不可用（不许静默只有一路有数）；
++- E-4 六写入点全覆盖自检：块面积变化量与 `_grid` 实测 Δ **用独立算式对账**，禁由块账反推 `_grid`（同我探针"不许从 `_ec_*` 反推"那条律）；
++- E-5 未观测 ≠ 0：块账缺项记 `None`（`test_uninstrumented_channels_read_none_not_zero` 同律）；
++- E-6 变异靶必红 ≥3：① 只挂主觅食腿漏第二腿 ⇒ 块账对不上（红）；② 关档仍算块表 ⇒ E-1/E-2 红；③ 邻接口径偷换（von_neumann→moore）而 manifest 无声明 ⇒ 口径门红。
++
++**边界重申**：本节只写方案，不锁数值、不写行为码、不选档；丙档（D-7）在六挂点账没验通之前不碰。
++
++---
++
++## §二F 构造期取证（2026-10-09 夜，零机时纯静态扫描，**把 §七-4 那条 [假设] 变成实测**）
++
++做法：直接构造 `ResourceField`（不落任何引擎状态、不跑 tick），对 `_patch_mask` 做连通分量标注，
++两种邻接口径各算一次。命令可复现（`experiments/` 之外的一次性取证，未入库）：
++
++```
++SphereWorld(rows, cols) + ResourceField(..., distribution="patchy", patch_count=30,
++                                         patch_radius=2, patch_seed=42)
++→ 对 rf._patch_mask 分别按 world.neighbors（球面 8 邻）与 neighbors_von_neumann（4 邻）做 BFS
++```
++
++| 档 | 格数 | `_patch_mask` 真格 | 配置中心数 | **真实块数** | 最大块 | 含极点块 | 两种邻接口径差 |
++|---|---|---|---|---|---|---|---|
++| 60×120（微型档，正式档之外） | 7,200 | 817（背景 88.7%） | 30 | **22** | **156 格** | 1 | **0**（22 vs 22） |
++| 120×240（S0′ 讨论用的 28,800 格档） | 28,800 | 713（背景 97.5%） | 30 | **26** | 42 格 | — | 0（26 vs 26） |
++
++**四条结论**：
++
++1. 🔴 **"粘连"实测成立**：30 个中心只产出 **22 块**（微型档）／**26 块**（28,800 格档）⇒ `patch_count` **不等于**块数，
++   且偏差方向是**少**（合并），不是多。微型档最大块 **156 格**＝radius=2 名义盘（约 25 格）的 **6 倍**
++   ⇒ 斑块大小分布极度不均（前 5＝156/63/48/47/47），"斑块"在两档下都不是均质小圆。
++   ⇒ 任何把 `patch_count` 当"块数"读的历史结论都需要重看（这是我今晚给砚的第一条待核）。
++2. ⚠️ **我的 §四-1 那条警告在这两档不成立**：球面 8 邻 vs 冯诺依曼 4 邻算出的块数**完全相同**
++   （radius=2 的 Moore 盘之间不发生"仅对角接触"的情形）⇒ 邻接口径**仍是必须声明项**（不声明＝不可复现），
++   但它在本档**不是读数偏差来源**。我按同一把尺把自己的假设降级，不留在卡上当事实。
++   真要找口径敏感情形，需要更密的斑块布置或更大 radius——本轮未测（构造器在 `patch_count=120` 处
++   直接 fail-loud：`斑块容量倍率过大…背景容量为负`，`resource_field.py:193-197` ⇒ 高密度档要降
++   `patch_capacity_mult` 才能构造，属装置数值，我不在此替它选）。
++3. **极点确实会进块**：60×120 档有 **1 块含极点格** ⇒ 极点邻居表 120 格级差那条（`:943` 注）**是真的存在**，
++   只是在本档没改变连通结果；实体扫描实现时**不许**用"平面 wrap"近似替代 `SphereWorld.neighbors`。
++4. 构造期扫描成本：7,200 格档单次 BFS **亚秒级**（含两次口径对比，整体 <3s）⇒ 若走甲档
++   （每 `sample` 重算）在微型/中档可行；**460,800 正式档未测**，仍禁止替它背书（§七-5 保持）。
++
++⇒ 由此 **§三 的"甲档可行性"在 S0′ 尺度得到支持**，而 R4（块数）类读数一旦用甲档扫描，
++可直接给出"22 vs 30"这种可核对的数字，不需要等乙档实体表。
++
++---
++
+ ## §三 三档切分（选档归 PI，我按可审的形把代价摆开）
+ 
+ ### 甲 · 只加**读数侧**连通块扫描（零行为改，最快）
+-- 
+2.46.1.windows.1
+
+
+From 510cb4a1b6e98860fdf4916fcd3e52d024b2812d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanzhou@the-world.local>
+Date: Fri, 9 Oct 2026 23:36:44 +0800
+Subject: [PATCH 15/15] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C?=
+ =?UTF-8?q?=E8=88=9F]=20docs(=E8=AE=BE=E8=AE=A1=E5=8D=A1):=20=C2=A7?=
+ =?UTF-8?q?=E4=BA=8CF=20=E5=8F=96=E8=AF=81=E5=9B=9E=E5=86=99=E4=B8=89?=
+ =?UTF-8?q?=E5=A4=84=E2=80=94=E2=80=94=E6=88=91=E8=87=AA=E5=B7=B1=E7=9A=84?=
+ =?UTF-8?q?"=E9=82=BB=E6=8E=A5=E5=8F=A3=E5=BE=84=E6=94=B9=E5=8F=98?=
+ =?UTF-8?q?=E8=AF=BB=E6=95=B0"=E5=81=87=E8=AE=BE=E8=A2=AB=E5=AE=9E?=
+ =?UTF-8?q?=E6=B5=8B=E9=99=8D=E7=BA=A7=EF=BC=8C=E5=90=8C=E5=B0=BA=E6=94=B9?=
+ =?UTF-8?q?=E5=8F=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+①§二 末行：原写「块的连通性完全取决于邻接口径、极点处一种口径会把跨经度格判成同块」⇒ 改为
+"复现性要求（极点行 24 / 极区 240，靠 _perception_cap 降级）+ 本档实测两口径块数相同（22 vs 22、26 vs 26）
+⇒ 不是本档读数偏差来源"；并保留"实现不许用平面 wrap 顶掉 SphereWorld.neighbors"（极点确有 1 块含极区格）。
+②§四-1 同一处分两层：复现性 vs 读数敏感性，明写后者未测（更密布置/更大 radius 是否分歧本轮未测），
+并把原引错的「neighbors(0) 返回 120 格」改成 :943 实际注文「普通格 24、极区 240」。
+③§五 R4 行：把"不等于 patch_count"换成实测数（30 中心 ⇒ 22 块／26 块），要求两列分列不得互换；
+§七-4 从 [假设] 升为 ✅[已实测]，§七-5 保持未测（本轮只测到 28,800 格档，460,800 正式档不替它背书）。
+
+自我纠一条记法：我用同一把尺驳了 PI 的机时外推，就得用同一把尺驳我自己的卡内假设——
+写"必须声明口径"是对的，写"口径不同读数就不同"在没有对照实测前是猜的。
+---
+ ...1\346\241\243\345\210\207\345\210\206-20261009.md" | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md" "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
+index fc177ed..73d05f7 100644
+--- "a/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
++++ "b/docs/\350\256\276\350\256\241\346\226\207\346\241\243/\350\256\276\350\256\241\345\215\241-S0P-\346\226\221\345\235\227\345\256\236\344\275\223\346\224\271\351\200\240-\344\270\211\346\241\243\345\210\207\345\210\206-20261009.md"
+@@ -31,7 +31,7 @@
+ | `:119` "patch 中心由独立 rng（`patch_seed`）选择，不消费调用方 rng" | 选中心与主 rng 解耦 | ✅ 这条对"实体登记"友好：构造期登记不引入新随机消费 |
+ | `world/resource_dynamics.py:21-23` 休耕/死亡/轮作 三态；`:52` `_mask`/`_dead`/`_rest_until` 逐格自检 | 格级**状态机**，死格 `dead_regen_ticks` 后重入候选池 | 有"格生死"，**没有"块生死"**：一块被吃掉一半，现码读不出"它还在不在／缩了多少／边界长变了没" |
+ | `sphere_engine.py:1742` `_corpse_boost`（腐烂处 +50% 再生加成，2000 tick） | 加成落在**格**上 | 尸体养出的"临时富块"同样无身份，与构造期斑块是两种来源、现码混成一格属性 |
+-| 邻居口径：`SphereWorld.neighbors()`（球面，极点 1 圈可返回上百格）与 `neighbors_von_neumann()` 并存 | 「相邻」有两种以上定义 | 🔴 **块的连通性完全取决于用哪一种邻接口径**——极点处一种口径会把跨经度的格判成同块。⇒ 实体的邻接口径必须**显式声明并写进 manifest**，否则 R1/R2 类读数跨档不可比（与我今晚那条 ν＝近邻口径 是同一个坑，见板 @`70ffa40` 三） |
++| 邻居口径：`SphereWorld.neighbors()`（球面；引擎 `:943` 注「普通格 24、极区 240」）与 `neighbors_von_neumann()` 并存 | 「相邻」有两种以上定义 | 实体的邻接口径必须**显式声明并写进 manifest**（不声明＝不可复现）。⚠️ 但我原来那句「口径不同则读数不同」已被 §二F **实测降级**：两档下 8 邻与 4 邻块数完全相同（22 vs 22、26 vs 26；radius=2 的 Moore 盘之间不发生"仅对角接触"）⇒ 口径是**复现性要求**，在本档**不是读数偏差来源**；极点确有 1 块含极区格 ⇒ 实现时不许拿平面 wrap 近似顶掉 `SphereWorld.neighbors`（与我今晚那条 ν＝近邻口径 同源，见板 @`70ffa40` 三） |
+ 
+ ---
+ 
+@@ -196,7 +196,10 @@ SphereWorld(rows, cols) + ResourceField(..., distribution="patchy", patch_count=
+ ## §四 跨档通用门禁（任何一档落地都得满足，缺一条不放行）
+ 
+ 1. **邻接口径显式化**：`adjacency ∈ {"von_neumann", "moore", "sphere_neighbors"}` 必须作**入参且进 manifest/指纹**，
+-   禁默认值兜（极点处分量差异实测存在，`sphere_engine.py:943` 一行注释即"极点 `neighbors(0)` 返回 120 格"级别的数量差）。
++   禁默认值兜。理由分两层，别混着说：**复现性**（不声明就没人能重跑同一张块表——极点行邻居规模与普通行差一个量级，
++   `sphere_engine.py:943` 注「普通格 24、极区 240」，且极区靠 `_perception_cap` 降级）；**读数敏感性**
++   （⚠️ 本轮 §二F 实测：60×120 与 28,800 两档下 8 邻与 4 邻**块数完全相同** ⇒ 在本档**不是**偏差来源，
++   更密的布置/更大 radius 是否分歧**未测**，所以这条按"复现性要求"守，不按"已证明会改变读数"吹）。
+ 2. **逐字节等价门**：甲/乙默认关档 = 现网逐位不变（C7 类钉死基线不许动；新读数走 sidecar 新键，**不改 `energy_ledger` 列面**——轻舟约束 1 在主线同样适用）。
+ 3. **不消费 RNG**（甲/乙）；丙若引入随机分裂，必须走预生成随机数 + 双路径对拍（AGENTS.md 关键约束 1）。
+ 4. **fail-loud**：口径缺失/表长越界/事件流与登记表不自洽 ⇒ 当场 raise，禁"扫不出来就当 0 块"（未观测≠0，砚⑥）。
+@@ -212,7 +215,7 @@ SphereWorld(rows, cols) + ResourceField(..., distribution="patchy", patch_count=
+ | R1 面积类 | 块 → 格集合基数 | ✅ | 甲即可读 |
+ | R2 边界/周长类 | 块 → 边界格判定（依赖 §四-1 邻接口径） | ✅ | 口径必须先声明 |
+ | R3 强度/产能类 | 块 → Σ存量 或 Σ容量 | ✅ | 与"有效加成格"定义绑定 |
+-| R4 数量类（几块） | 连通分量计数 | ✅ | 🔴 **不等于 `patch_count`**（中心数），须在读数里明写两者不同 |
++| R4 数量类（几块） | 连通分量计数 | ✅ | 🔴 **实测：30 中心 ⇒ 22 块（60×120）／26 块（28,800 格档）**，`patch_count` 是中心数不是块数（§二F）⇒ 两者必须分列，读数里不许互换 |
+ | R5 寿命类 | 块的**出生/死亡 tick** | ❌ 需乙 | 甲的单 tick 快照无跨窗身份 |
+ | R6 分裂/合并/继承类 | 块谱系（谁变成谁） | ❌ 需乙或丙 | 丙才"真的发生"分裂合并；乙只能记录被动拓扑变化 |
+ 
+@@ -238,7 +241,7 @@ SphereWorld(rows, cols) + ResourceField(..., distribution="patchy", patch_count=
+ 1. 🔴[待裁定 PI] 选哪档（甲 / 乙 / 丙 / 甲→乙→丙分三批）——我推 **甲先行、乙随 R5 需求**，丙等步B；
+ 2. 🔴[待裁定 砚] R1–R6 的**定义与邻接口径**（尤其 R4"块数"与 `patch_count` 的区分是否入册）；
+ 3. 🔴[待裁定 镜] 实体是否算**新机制**（若算，丙要走设计稿）；
+-4. ⚠️[假设] 构造期"30 中心 radius=2 会粘连成更少连通块"——我今晚**没实测**（要跑一次扫描才知道），列为甲的第一条取证项；
++4. ✅[已实测，23:3x] 原 [假设]「30 中心 radius=2 会粘连成更少连通块」**成立**：60×120 档 30 中心 ⇒ **22 块**（最大块 156 格 ≈ 名义盘 6 倍）、28,800 格档 ⇒ **26 块**，见 §二F。⇒ `patch_count ≠ 块数` 从怀疑升为取证；同一把尺也把我的邻接口径警告降级了（两档实测差=0，见 §二 末行与 §二F-2）。
+ 5. ⚠️[假设] 甲的扫描在 460,800 格档可承受——**未实测**，禁止拿 S0 小档的数替它背书；
+ 6. 风险：实体账一旦进 main，`patch_count` 这类既有参数会被误读成"块数"⇒ 上板与读数件要同步打**术语澄清**（我今晚那条 `cap_hits` 饱和态就是同类误读的教训）。
+ 
+-- 
+2.46.1.windows.1
+

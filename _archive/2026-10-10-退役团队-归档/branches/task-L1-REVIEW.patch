@@ -1,0 +1,96 @@
+From 3157fed1d72bf90c4215ada0494e7ff261445c91 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=95=9C?= <jing@the-world.local>
+Date: Mon, 5 Oct 2026 23:00:18 +0800
+Subject: [PATCH] =?UTF-8?q?review:=20[=E9=95=9C=C2=B7=E4=BB=A3=E7=A0=81?=
+ =?UTF-8?q?=E5=AE=A1=E6=A0=B8]=20=E9=98=9F=E5=88=97=E2=91=A4=20L1-JOINTCOL?=
+ =?UTF-8?q?=20=E5=AE=A1=E5=A4=B4=EF=BC=88=F0=9F=9F=A1=E6=9C=89=E6=9D=A1?=
+ =?UTF-8?q?=E4=BB=B6=E9=80=9A=E8=BF=87=C2=B71=20=E5=8F=AF=E8=BF=90?=
+ =?UTF-8?q?=E8=A1=8C=E6=80=A7=E9=98=BB=E5=A1=9E=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+对象 gitee/task/L1-JOINTCOL@163d922（作者 澜舟）｜只审不改，未动被审文件一字节
+
+核心发现：
+- 🔴 本枝 --l1-joint 跑不起来：_attach_l1 硬要求 _alpha=="8"，但本枝无 --alphabet CLI 旋钮（默认 "16"）⇒ 装配必 RuntimeError。她的 15 例靶向测试用 _Eng 假件 ⇒ 单元级成立，但端到端路径在本枝从未被走过
+- 🟢 环境端 e 比较式与引擎逐字同式（:3577-3580）
+- 🟢 read_many 零副作用零 RNG（world/signal_field.py:120）
+- 🟢 15 例靶向测试全绿（0.24s）
+- 🟢 全量对差零新增红（base 136 failed = head 136 failed，双向空集）
+- 🟢 默认关逐字节等价（CSV 剔计时列 + summary 剔 out 路径 ⇒ 完全相同）
+- 🟡 --append 段下 run 级 l1 计数只覆盖恢复后段（读码证，未实测）
+- 🟡 三枝共改 s3_memory_probe.py（S3-RDSWITCH / G6-EMITRATE / L1-JOINTCOL），合并序需 PI 裁
+
+证据 TEMP jing_l1/（对差全量输出 + 微缩等价 CSV+summary）；已上板初步一条（5f583d26）。
+署名：R371 逐命令显式 -c user.name=镜 -c user.email=jing@the-world.local
+---
+ ...0\227\344\272\244\344\273\230-20261005.md" | 56 +++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+ create mode 100644 "docs/\345\256\241\346\240\270-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+
+diff --git "a/docs/\345\256\241\346\240\270-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md" "b/docs/\345\256\241\346\240\270-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+new file mode 100644
+index 00000000..9789fef0
+--- /dev/null
++++ "b/docs/\345\256\241\346\240\270-L1-JOINTCOL-\350\201\224\345\220\210\351\207\207\346\240\267\345\210\227\344\272\244\344\273\230-20261005.md"
+@@ -0,0 +1,56 @@
++# 审核 — L1-JOINTCOL `experiments/s3_memory_probe.py`（队列⑤）
++
++- 审核人：镜 `[代码审核]`｜日期 2026-10-05（22:5x 收口）
++- 被审件：`gitee/task/L1-JOINTCOL @163d922`（作者 澜舟，基点 main@4fdb7dd）
++- 卡：`_share/任务卡.md` L1-JOINTCOL（claimed；验收 = 17 列联合计数落表 + 行和不变量 + occ=0 空窗门 + 默认关逐字节等价 + 靶向测试绿）
++- 只审不改：未动被审文件一字节；证据在 TEMP `jing_l1/`。
++
++---
++
++## 一、结论
++
++🟡 **有条件通过**（代码质量高、家规映射正确、五性质有守），但 **1 条 🔴 使本枝不可单独合入并宣称可用**：
++
++| 项 | 判定 | 一句话 |
++|---|---|---|
++| 🔴 可运行性 | 🔴 | 本枝 `--l1-joint` **跑不起来**：`_attach_l1` 硬要求 `eng._alpha == "8"`，但本枝无 `--alphabet` CLI 旋钮（默认 "16"，config.py:1466）⇒ 装配必 RuntimeError。她的 15 例靶向测试用 `_Eng` 假件 ⇒ 单元级成立，但**端到端路径在本枝从未被走过** |
++| 🟢 环境端 e 口径 | 🟢 | `e = _grid[cur] > FOOD_RICH_LEVEL * _capacity[cur]` 与引擎 `sphere_engine.py:3577-3580` **逐字同式**（且她 import 常量不硬编 0.5）✅ |
++| 🟢 read_many 纯度 | 🟢 | `signals.read_many(cur)` 返回 `.copy()`（world/signal_field.py:120）零副作用/零 RNG ✅；她的测试 stub 与真件同形 ✅ |
++| 🟢 靶向测试 | 🟢 | 15 passed / 0.24s ✅ |
++| 🟢 全量对差 | 🟢 | base@4fdb7dd 136 failed / 1036 passed vs head@163d922 136 failed / 1051 passed（+15 = 她新测试）；FAILED 集合**双向空集** ⇒ **零新增红** ✅ |
++| 🟢 默认关逐字节等价 | 🟢 | 微缩跑（8×16, 60t, seeds 902,903）CSV 剔计时列 + summary 剔 `out` 路径 ⇒ **完全相同** ✅ |
++| 🟡 口径注 | 🟡 | 她 doc §六 称"41 例存量红"，我实测 136（含 Rust/预设类 95 例本机不可用）；"零新增"结论不受影响，但 doc 应标注机器口径（本机无 Rust/scipy） |
++| 🟡 --append 段下计数 | 🟡 | `l1_pooled(rows_out)` 接收当前段 rows ⇒ `--l1-joint` + `--append`（允许）时 run 级 17 列只覆盖恢复后段，MI 复算基数不足且**不报错**（行和不变量仍成立）。建议：要么也禁 `--l1-joint` + `--append`，要么从 CSV 全量行池化 |
++| 🟡 三枝共改同文件 | 🟡 | `task/L1-JOINTCOL` 与 `task/S3-RDSWITCH`（轻舟）+ `task/G6-EMITRATE`（她自枝）**同改 `experiments/s3_memory_probe.py`**，且她自述 `_summary_meta` 与 G6 枝同名函数须"两笔合 main 时并成一个函数、两条 pop（她 own 那次 rebase）"⇒ 合并序与冲突处置须 PI 一次裁定 |
++
++---
++
++## 二、实证表
++
++| # | 动作 | 结果 |
++|---|---|---|
++| E1 | `py -m pytest tests/test_l1_joint_columns.py -q` | **15 passed / 0.24s** |
++| E2 | 全量对差（base@4fdb7dd vs head@163d922，本机无 Rust/scipy） | base 136 failed / 1036 passed；head 136 failed / 1051 passed；FAILED 双向空集 ⇒ **零新增红** |
++| E3 | 微缩默认关逐字节等价（8×16, 60t, seeds 902,903, --m0-instruments） | CSV 剔计时列 + summary 剔 `out` 路径 ⇒ **完全相同** |
++| E4 | 核对引擎 `sphere_engine.py:3577-3580` 富指示式 | `self.resources._grid[cur_flat] > FOOD_RICH_LEVEL * self.resources._capacity[cur_flat]` ⇒ 与她 `e = grid[cur] > FOOD_RICH_LEVEL * cap[cur]` **逐字同式** |
++| E5 | 核对 `signals.read_many` 纯度（world/signal_field.py:120） | `return self._marks[cells].copy()` ⇒ 零副作用/零 RNG |
++| E6 | 核对 config.py:1466 `signal_alphabet` 默认 | `"16"`；本枝无 `--alphabet` CLI 旋钮 ⇒ `--l1-joint` 装配必 RuntimeError |
++| E7 | 读码：`l1_pooled(rows_out)` 调用点（:1763） | `rows_out` 为当前段（`_build_fresh_run` :1182 `rows_out=[]`）⇒ `--append` 段下只覆盖恢复后段 |
++| E8 | 读码：`_attach_l1` 硬要求 `_alpha == "8"`（:654-660） | 否则 RuntimeError（防 8..15 态静默丢弃，设计正确） |
++
++---
++
++## 三、请 PI 处置
++
++| 项 | 请求 |
++|---|---|
++| 🔴 可运行性 | 本枝**不可单独合入并宣称可用**；须等 S3-RDSWITCH（轻舟）的 `--alphabet` 旋钮合入 main，或本枝自行补一个 `--alphabet` 旋钮（但三枝共改同文件，建议 PI 一次裁定合并序） |
++| 🟡 --append 段下计数 | 建议补一例：`--l1-joint` + `--append` 跑两段，验 summary 的 `l1_joint_n` 是否只覆盖段 2 ⇒ 若属实，要么也禁 `--l1-joint` + `--append`，要么从 CSV 全量行池化 |
++| 🟡 三枝合并序 | 请裁：S3-RDSWITCH / G6-EMITRATE / L1-JOINTCOL 合入顺序与冲突处置（她 own rebase，但三枝共点同文件） |
++| 🟡 口径标注 | 她 doc §六 "41 例存量红" 应标注机器口径（本机无 Rust/scipy ⇒ 136 failed） |
++| 本件交付 | = 本审头（分支 `task/L1-REVIEW`，候合，合并候 PI）。任务卡 L1-JOINTCOL 审核结果登记请**板桥/PI 代执**（R371，我不写 `_share/任务卡.md`） |
++
++**证据路径**：`C:/Users/圣羽/AppData/Local/Temp/jing_l1/`（`base_full.txt`/`head_full.txt` 对差全量输出、`eq/` 微缩等价 CSV+summary、`note.txt` 已上板初步一条）。
++**群报说明**：本 waker `0252d9a72439` 无已启用 IM channel ⇒ 群内 @PI 不可达，板帖即 R384/R387 上报载体。
++
++—— 镜 `[代码审核]`
+-- 
+2.46.1.windows.1
+

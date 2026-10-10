@@ -1,0 +1,70 @@
+From 3fa90c1778152b8cbd1f7c3ec365ce88fa459989 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E7=A0=9A?= <yan@the-world.local>
+Date: Sun, 4 Oct 2026 16:02:55 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20D-DENSITY-SMOKE=E2=80=94=E2=80=94build?=
+ =?UTF-8?q?=5Fcmd=20=E5=AF=B9=E2=89=A01700=E6=A1=A3=E8=A1=A5=20--smoke?=
+ =?UTF-8?q?=EF=BC=88=E6=8E=A2=E9=92=88=E9=9D=9E=E5=88=A4=E5=88=AB=E8=A3=85?=
+ =?UTF-8?q?=E7=BD=AE=E5=AE=88=E5=8D=AB=EF=BC=8C=E5=AE=9E=E6=B5=8B12=20run?=
+ =?UTF-8?q?=E5=85=A8=E6=8B=92=E8=B7=91=EF=BC=89+=20=E5=86=BB=E7=BB=93?=
+ =?UTF-8?q?=E4=B8=B2=E6=9B=B4=E6=96=B0=20+=20=E8=B4=AF=E9=80=9A=E6=B5=8B?=
+ =?UTF-8?q?=E8=AF=95=EF=BC=88=5FS2=20=E7=9C=9F=E5=80=BC=E6=A0=B8=E5=AF=B9?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ experiments/p1c_density_sweep.py |  5 +++++
+ tests/test_p1c_density_sweep.py  | 15 +++++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/experiments/p1c_density_sweep.py b/experiments/p1c_density_sweep.py
+index 13993685..0d687261 100644
+--- a/experiments/p1c_density_sweep.py
++++ b/experiments/p1c_density_sweep.py
+@@ -81,6 +81,11 @@ def build_cmd(python: str, patches: int, seed: int, out_path: Path,
+         cmd += ["--home-range"]
+     if dm_guard:
+         cmd += ["--dm-guard", str(dm_guard)]
++    # D-DENSITY-SMOKE（砚，2026-10-04）：探针 R278 装置守卫对 ≠480×960/1700 的档
++    #   要求显式 --smoke（`p1c_erasure_probe` 前置读回 fail-loud，仿真前即拒跑）；
++    #   密度批 D1–D3 的 patches 是**被测变量**（非判别=常态），须显式声明。
++    if patches != PATCHES_LADDER[0]:
++        cmd += ["--smoke"]
+     cmd += ["--out", str(out_path)]
+     return cmd
+ 
+diff --git a/tests/test_p1c_density_sweep.py b/tests/test_p1c_density_sweep.py
+index e0426d85..b81bdf6d 100644
+--- a/tests/test_p1c_density_sweep.py
++++ b/tests/test_p1c_density_sweep.py
+@@ -48,11 +48,26 @@ def test_build_cmd_frozen_string():
+             "--bg-low-prod-frac 0.0 --bg-low-cap-mult 0.0 --seed 207 --ticks 3000 "
+             "--sample 100 --ring-depth 64 --home-range") in joined
+     assert cmd[-2:] == ["--out", str(Path("D/p1c_density_d850_s207_t3000.csv"))]
++    # D-DENSITY-SMOKE：≠1700 档必须带 --smoke（探针非判别装置守卫，仿真前即拒跑）
++    assert "--smoke --out" in joined
+     # 变异检查：R5.6 红线——s2 必须显式，patches 必须逐档显式（不吃默认 60×120/1700）
+     assert "--device" in cmd and cmd[cmd.index("--device") + 1] == "s2"
+     assert cmd[cmd.index("--patches") + 1] == "850"
+ 
+ 
++def test_build_cmd_smoke_flag_guards():
++    """D-DENSITY-SMOKE 贯通检查：守卫语义=patches≠1700 ⇒ --smoke，D0/复现门路径逐字不变。"""
++    from experiments.p1c_erasure_probe import _S2   # 探针守卫真值（非判别装置指纹）
++    cmd_d0 = sweep.build_cmd("PY", 1700, 207, Path("D/x.csv"), dm_guard="G.csv")
++    assert "--smoke" not in cmd_d0
++    assert (480, 960, 1700) == _S2, "D0 必须命中判别装置（否则 D0 也需 --smoke）"
++    for p in (850, 425, 213):
++        cmd = sweep.build_cmd("PY", p, 208, Path("D/x.csv"))
++        assert (480, 960, p) != _S2, f"{p} 档应为非判别装置（守卫触发前提）"
++        assert cmd.count("--smoke") == 1, f"d{p} 缺/多 --smoke：{cmd}"
++        assert cmd[cmd.index("--smoke") + 1] == "--out"
++
++
+ def test_ladder_locked():
+     assert sweep.PATCHES_LADDER == [1700, 850, 425, 213]
+     assert sweep.SEEDS == [207, 208, 209, 210]
+-- 
+2.46.1.windows.1
+

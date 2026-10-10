@@ -1,0 +1,292 @@
+From e0b8d9b455445a876456a42a7c3b9e836ab7796f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=BE=9C=E8=88=9F?= <lanhou@the-world.local>
+Date: Sun, 4 Oct 2026 16:12:40 +0800
+Subject: [PATCH] =?UTF-8?q?[=E5=BC=80=E5=8F=91=C2=B7=E6=BE=9C=E8=88=9F]=20?=
+ =?UTF-8?q?L3-G5COL:=20s3=20=E6=8E=A2=E9=92=88=E8=BF=BD=E5=8A=A0=E7=AC=AC?=
+ =?UTF-8?q?=E4=B8=89=E5=88=97=20g5=5Fdircond=5Fdiff=EF=BC=88=E6=9D=A1?=
+ =?UTF-8?q?=E4=BB=B6=E6=96=B9=E5=90=91=20TV=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+口径 = 砚 R367-1 锁定（docs/C1-M0仪表产出规格-20261003.md §七，追加、不改
+§一已锁两列）：仅有位移个体（code≠4）上，有/无信号两组 8 向 argmax
+归一化直方图的 TV = 0.5·Σ|p_sig − p_nosig|；任一有位移组空 ⇒ NaN（不静默 0）。
+M0 只出数、不设阈值。
+
+改动 4 处（探针侧、零引擎改动、纯观测不消费 RNG）：
+  ① _M0_COLS 追加列名（M0 默认关 ⇒ 表头逐字节不变）
+  ② _compute_g5 out 初始化 NaN 键
+  ③ _compute_g5 内条件 TV（剔静止槽 4 ⇒ 8 档）
+  ④ sample_cols 透传 + CLI help 同步
+
+tests/test_g5_dircond_diff.py（7 项，合成假引擎直测）：
+  已知两组位移分布钉值（构造 Z：dircond=0.75 / dir_diff=0.6 / move=0.133）、
+  全相同方向 ⇒ 0.0、单组无位移 ⇒ NaN、
+  变异检查两条均实测注入变红（误含静止槽 / 忘筛有位移子集）。
+⚠️ 本文件属轻舟领地（R382）：板 15:48 已报备，此提交仅落分支待 ack，不合 main。
+---
+ experiments/s3_memory_probe.py |  19 +++-
+ tests/test_g5_dircond_diff.py  | 185 +++++++++++++++++++++++++++++++++
+ 2 files changed, 201 insertions(+), 3 deletions(-)
+ create mode 100644 tests/test_g5_dircond_diff.py
+
+diff --git a/experiments/s3_memory_probe.py b/experiments/s3_memory_probe.py
+index 3b4f566c..8d0eca84 100644
+--- a/experiments/s3_memory_probe.py
++++ b/experiments/s3_memory_probe.py
+@@ -434,7 +434,7 @@ _M0_COLS = (["g15_mean", "g1_entropy"]
+             + [f"sig_run_len_hist_{i}" for i in range(1, 9)]
+             + ["g3_fresh_cells", "g3_ambig_n", "g3_orphan_n",
+                "g4_mem_bit_frac", "g4_mem_bit_on", "g4_mem_bit_n",
+-               "g5_dir_diff", "g5_move_diff", "g5_n_sig", "g5_n_nosig"])
++               "g5_dir_diff", "g5_move_diff", "g5_dircond_diff", "g5_n_sig", "g5_n_nosig"])
+ 
+ 
+ class _M0Instruments:
+@@ -453,6 +453,8 @@ class _M0Instruments:
+         显式告警；Rust 下沉路径不累计 ⇒ 本探针强制 Python 路径天然满足）；
+       · G5 `g5_dir_diff` = 「有信号 vs 无信号」个体下一步去向分布的总变差距离
+         （9 档：8 邻 + 静止）；`g5_move_diff` = |P(静止|无) − P(静止|有)|；
++        `g5_dircond_diff` = **仅有位移子集**（code≠4）上两组 8 向 argmax 归一化
++        直方图的 TV（R367-1 锁定口径；任一有位移组空 ⇒ NaN）；
+         `g5_n_sig`/`g5_n_nosig` = 两档人·次。
+ 
+     🔴 测量时点（与引擎源码逐点对齐；改引擎需复核本类）：
+@@ -592,7 +594,8 @@ class _M0Instruments:
+         n_sig = int(hs.sum())
+         n_no = int(cells.size) - n_sig
+         out = {"g5_n_sig": n_sig, "g5_n_nosig": n_no,
+-               "g5_dir_diff": float("nan"), "g5_move_diff": float("nan")}
++               "g5_dir_diff": float("nan"), "g5_move_diff": float("nan"),
++               "g5_dircond_diff": float("nan")}
+         if n_sig and n_no:
+             h1 = np.bincount(code[hs], minlength=9).astype(np.float64)
+             h0 = np.bincount(code[~hs], minlength=9).astype(np.float64)
+@@ -600,6 +603,15 @@ class _M0Instruments:
+             p0 = h0 / h0.sum()
+             out["g5_dir_diff"] = float(0.5 * np.abs(p1 - p0).sum())
+             out["g5_move_diff"] = float(abs(p0[4] - p1[4]))
++            mv_sig = hs & mv
++            mv_no = (~hs) & mv
++            if mv_sig.any() and mv_no.any():
++                # R367-1：条件方向 TV —— 剔静止槽(4)，8 档 argmax 归一化后 0.5·Σ|Δp|
++                bins = [k for k in range(9) if k != 4]
++                c1 = np.bincount(code[mv_sig], minlength=9)[bins].astype(np.float64)
++                c0 = np.bincount(code[mv_no], minlength=9)[bins].astype(np.float64)
++                out["g5_dircond_diff"] = float(
++                    0.5 * np.abs(c1 / c1.sum() - c0 / c0.sum()).sum())
+         return out
+ 
+     def sample_cols(self, eng) -> dict:
+@@ -632,6 +644,7 @@ class _M0Instruments:
+         g5 = self.g5 if self.g5 is not None else {}
+         d["g5_dir_diff"] = g5.get("g5_dir_diff", float("nan"))
+         d["g5_move_diff"] = g5.get("g5_move_diff", float("nan"))
++        d["g5_dircond_diff"] = g5.get("g5_dircond_diff", float("nan"))
+         d["g5_n_sig"] = g5.get("g5_n_sig", 0)
+         d["g5_n_nosig"] = g5.get("g5_n_nosig", 0)
+         return d
+@@ -1363,7 +1376,7 @@ def main():
+     ap.add_argument("--m0-instruments", action="store_true",
+                     help="每采样点追加 M0 仪表列：g15_mean / g1_entropy + "
+                          "marks_hist_0..15 / sig_run_len_hist_1..8 + g3_* 审计 / "
+-                         "g4_mem_bit_* / g5_dir_diff,g5_move_diff,g5_n_*。"
++                         "g4_mem_bit_* / g5_dir_diff,g5_move_diff,g5_dircond_diff,g5_n_*。"
+                          "**只读引擎状态、不消费 RNG**；G4 需 signal_alphabet='8'"
+                          "（否则告警为 n/a）")
+     # ---- 🔴 R278 §三 P3：装置预设档防呆（默认 None ⇒ 不介入 = 旧行为）----
+diff --git a/tests/test_g5_dircond_diff.py b/tests/test_g5_dircond_diff.py
+new file mode 100644
+index 00000000..04558f2a
+--- /dev/null
++++ b/tests/test_g5_dircond_diff.py
+@@ -0,0 +1,185 @@
++"""L3-G5COL：g5_dircond_diff（条件方向 TV，R367-1 锁定口径）靶向测试。
++
++口径（docs/C1-M0仪表产出规格-20261003.md §七）：
++  仅有位移个体（move_dir ≠ 静止）上，有/无信号两组 8 向 argmax 序号
++  归一化直方图的 TV = 0.5·Σ|p_sig − p_nosig|；任一有位移组空 ⇒ NaN。
++
++覆盖：
++  ① 已知两组位移分布 ⇒ 钉 TV 值（含静止个体干扰项，dir_diff/dircond_diff 分离）
++  ② 两组位移方向完全相同 ⇒ 0.0（且 dir_diff 仍可为正 ⇒ 证互补）
++  ③ 任一有位移组空（全静止/单组动）⇒ NaN fail-loud（不静默给 0）
++  ④ 变异检查 A：把静止槽(4)误并入直方图 ⇒ 该测试必须变红
++  ⑤ 变异检查 B：无位移过滤（全量两组）⇒ 该测试必须变红
++  ⑥ M0_COLS 含新列且默认关时表头不变（逐字节等价锁）
++"""
++
++import sys
++import types
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from experiments.s3_memory_probe import _M0_COLS, _M0Instruments
++
++ROWS, COLS = 24, 12
++N_CELLS = ROWS * COLS
++
++
++def _mk_engine(ids, dec_flat, now_flat, marks_hit_cells):
++    """合成假引擎：ids 升序；dec_flat=决策时点格（上步末）；now_flat=本步末格。
++
++    marks_hit_cells：这些格 _marks>0 ⇒ 决策时点"有信号"组（hs=True）。
++    """
++    eng = types.SimpleNamespace()
++    eng._id = np.asarray(ids, dtype=np.int64)
++    eng._flat = np.asarray(now_flat, dtype=np.int64)
++    eng.world = types.SimpleNamespace(
++        cols=COLS, rows=ROWS, _pole_top=0, _pole_bottom=ROWS - 1)
++    nb = np.zeros((N_CELLS, 8), dtype=np.int64)
++    nb[:] = np.arange(N_CELLS)[:, None]          # 自指即可：只要 _marks 全 0 除命中格
++    eng._nb_table = nb
++    eng._pole_nb = np.zeros((2, 8), dtype=np.int64)
++    marks = np.zeros(N_CELLS, dtype=np.uint8)
++    for c in marks_hit_cells:
++        marks[c] = 5                              # 任意 >0 pattern
++    eng.signals = types.SimpleNamespace(_marks=marks)
++    return eng
++
++
++def _mk_inst(ids, dec_flat):
++    inst = _M0Instruments()
++    inst.last_ids = np.asarray(ids, dtype=np.int64)
++    inst.last_flat = np.asarray(dec_flat, dtype=np.int64)
++    return inst
++
++
++# 8 向 code：code = (dr+1)*3 + sign(dc) + 1，静止=4
++#   dr=-1 行上移(-)；dc 环向。 dir 右= (0,+1)→code 5；左=4-? 推算：
++#   (dr=0,dc=+1): (1)*3+1+1=5; (dr=0,dc=-1): 3+(-1)+1=3; (dr=-1,dc=0): 0+0+1=1;
++#   (dr=+1,dc=0): 6+0+1=7。
++
++RIGHT = (0, +1)
++LEFT = (0, -1)
++UP = (-1, 0)
++STAY = None
++
++
++def _flat_at(row, col):
++    return row * COLS + col
++
++
++def _moved(dec, direction):
++    if direction is STAY:
++        return dec
++    dr, dc = direction
++    row, col = divmod(dec, COLS)
++    return _flat_at((row + dr) % ROWS, (col + dc) % COLS)
++
++
++def test_dircond_known_tv():
++    """sig 组：全向右(5)；nosig 动组：向上(7)+向左(3)；nosig 组含 1 静止个体。
++
++    条件分布：p_sig=one-hot(5)；p_no={7:0.5, 3:0.5} ⇒ dircond TV = 1.0（支撑不重叠）。
++    """
++    ids = [10, 11, 12, 13, 14]
++    dec = [_flat_at(5, 3), _flat_at(5, 6), _flat_at(8, 2),
++           _flat_at(8, 8), _flat_at(12, 4)]
++    sig_cells = {dec[0], dec[1]}                  # 个体 0/1 决策点有信号
++    now = [_moved(dec[0], RIGHT), _moved(dec[1], RIGHT),
++           _moved(dec[2], UP),
++           _moved(dec[3], LEFT),
++           dec[4]]                                 # 个体 4 无信号且静止
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    # 动组：sig={5:2} ⇒ one-hot 5；no={7:1, 3:1}
++    # dircond TV = 0.5*(1 + 0.5 + 0.5) = 1.0
++    assert out["g5_dircond_diff"] == pytest.approx(1.0)
++    # 全量 9 档：p_sig=one-hot5；p_no={3:0.5, 7:0.5, 4:0}…个体 4 静止 ⇒
++    # p_no={3:1/3, 7:1/3, 4:1/3}；TV = 0.5*(1 + 1/3 + 1/3 + 1/3) = 1.0（支撑不重叠恒 1）
++    assert out["g5_dir_diff"] == pytest.approx(1.0)
++    assert out["g5_move_diff"] == pytest.approx(1.0 / 3)
++
++
++def test_dircond_dilution_known_value():
++    """构造 Z：方向支撑有重叠 + 静止稀释 ⇒ dircond 与 dir_diff 取不同已知值。
++
++    sig 组：RIGHT, RIGHT, STAY；no 组：RIGHT, LEFT, LEFT, LEFT, STAY。
++    条件（剔静止）：p_sig={5:1}, p_no={5:0.25, 3:0.75} ⇒ TV = 0.5*(0.75+0.75) = 0.75
++    全量 9 档：    p_sig={5:2/3,4:1/3}, p_no={5:.2,3:.6,4:.2} ⇒ TV = 0.6
++    静止率差：    |P(静|no) − P(静|sig)| = |0.2 − 1/3| = 0.1333
++    """
++    ids = [80, 81, 82, 83, 84, 85, 86, 87]
++    dec = [_flat_at(5, c) for c in (1, 4, 7, 10)] + [_flat_at(9, c) for c in (1, 4, 7, 10)]
++    sig_cells = {dec[0], dec[1], dec[2]}
++    now = [_moved(dec[0], RIGHT), _moved(dec[1], RIGHT), dec[2],
++           _moved(dec[3], RIGHT), _moved(dec[4], LEFT), _moved(dec[5], LEFT),
++           _moved(dec[6], LEFT), dec[7]]
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    assert out["g5_dircond_diff"] == pytest.approx(0.75)
++    assert out["g5_dir_diff"] == pytest.approx(0.6)
++    assert out["g5_move_diff"] == pytest.approx(abs(0.2 - 1 / 3), abs=1e-6)
++
++
++def test_dircond_nan_when_all_stationary_one_group():
++    """无信号组全静止 ⇒ 有位移子集单组空 ⇒ NaN（不许静默 0）。"""
++    ids = [30, 31]
++    dec = [_flat_at(4, 4), _flat_at(4, 9)]
++    sig_cells = {dec[0]}
++    now = [_moved(dec[0], RIGHT), dec[1]]          # 个体 1 静止
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    assert np.isnan(out["g5_dircond_diff"])
++    assert out["g5_move_diff"] > 0                 # 其它列照常
++
++
++def test_dircond_nan_when_no_displacement_at_all():
++    ids = [40, 41]
++    dec = [_flat_at(7, 1), _flat_at(7, 6)]
++    eng = _mk_engine(ids, dec, list(dec), {dec[0]})
++    inst = _mk_inst(ids, dec)
++    out = inst._compute_g5(eng)
++    assert np.isnan(out["g5_dircond_diff"])
++
++
++def _construction_z():
++    ids = [80, 81, 82, 83, 84, 85, 86, 87]
++    dec = [_flat_at(5, c) for c in (1, 4, 7, 10)] + [_flat_at(9, c) for c in (1, 4, 7, 10)]
++    sig_cells = {dec[0], dec[1], dec[2]}
++    now = [_moved(dec[0], RIGHT), _moved(dec[1], RIGHT), dec[2],
++           _moved(dec[3], RIGHT), _moved(dec[4], LEFT), _moved(dec[5], LEFT),
++           _moved(dec[6], LEFT), dec[7]]
++    eng = _mk_engine(ids, dec, now, sig_cells)
++    return _mk_inst(ids, dec), eng
++
++
++def test_mutation_include_stationary_would_fail():
++    """变异 A：误把静止槽(4)并入条件直方图 ⇒ 独立口径值为 0.5，
++    与本构造正确值 0.75 不等 ⇒ 断言钉死即变红。
++    """
++    inst, eng = _construction_z()
++    out = inst._compute_g5(eng)
++    assert out["g5_dircond_diff"] == pytest.approx(0.75)
++    # 独立"9 档含静止"参考值（= dir_diff 口径）：
++    assert out["g5_dircond_diff"] != out["g5_dir_diff"]      # 含静止/忘筛 ⇒ 相等或 0.6 ⇒ 红
++
++
++def test_mutation_no_displacement_filter_would_fail():
++    """变异 B：忘筛有位移子集（退化为全量 dir_diff=0.6）⇒ 与 0.75 不等 ⇒ 红。"""
++    inst, eng = _construction_z()
++    out = inst._compute_g5(eng)
++    assert out["g5_dircond_diff"] == pytest.approx(0.75)
++    assert out["g5_dircond_diff"] != pytest.approx(out["g5_dir_diff"])
++
++
++def test_m0_cols_contains_dircond_and_off_default_unchanged():
++    assert "g5_dircond_diff" in _M0_COLS
++    # 表头拼接逻辑在 main：`if a.m0_instruments: header = header + _M0_COLS`
++    # 默认关 ⇒ header 不含任何 M0 列（逐字节等价锁由 _run_one 自检承担）
++    src = Path("experiments/s3_memory_probe.py").read_text(encoding="utf-8")
++    assert "header = header + _M0_COLS" in src     # 仅开时追加（模式不变）
+-- 
+2.46.1.windows.1
+

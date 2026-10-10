@@ -1,0 +1,222 @@
+From 307d4ba8386842d960198f61866d4d73d268ed01 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=BF=E6=A1=A5?= <banqiao@the-world.local>
+Date: Mon, 5 Oct 2026 21:09:33 +0800
+Subject: [PATCH] =?UTF-8?q?ci:=20[=E5=8D=8F=E4=BD=9C=C2=B7=E6=9D=BF?=
+ =?UTF-8?q?=E6=A1=A5]=20R396-CI=20=E6=8E=A5=E7=BA=BF=E8=8D=89=E6=A1=88=20v?=
+ =?UTF-8?q?0=EF=BC=88=E5=8B=BF=E5=85=88=E5=90=88=EF=BC=8C=E5=80=99=20c95f9?=
+ =?UTF-8?q?e5=20=E8=BF=87=E5=AE=A1+postmerge=5Fcheck=20=E5=85=A5=20main?=
+ =?UTF-8?q?=EF=BC=89=E2=80=94=E2=80=94.gitee-ci.yml=20=E5=9B=9B=E6=AD=A5?=
+ =?UTF-8?q?=20strict=EF=BC=88selftest=E2=86=92=E6=95=B0=E6=8D=AE=E4=BB=93?=
+ =?UTF-8?q?=E5=8F=AA=E8=AF=BB=E6=8B=89=E5=8F=96=E2=86=92=E4=B8=89=E6=9F=A5?=
+ =?UTF-8?q?=E2=86=92=E5=B7=A1=E6=A3=80=E4=B8=80=E8=A1=8C=E5=AF=B9=E7=85=A7?=
+ =?UTF-8?q?=EF=BC=8CSKIP=20=E4=BA=A6=E7=BA=A2=EF=BC=89+=20tools/postmerge?=
+ =?UTF-8?q?=5Fexemptions.json=20=E8=B1=81=E5=85=8D=E5=85=A5=E5=BA=93?=
+ =?UTF-8?q?=E7=89=88=EF=BC=88=E5=85=AD=E5=AD=97=E6=AE=B5=E5=8F=AF=E5=AE=A1?=
+ =?UTF-8?q?=E8=AE=A1=EF=BC=8C=E7=A9=BA=E5=88=97=E8=B1=81=E5=85=8D=E5=8F=AA?=
+ =?UTF-8?q?=E6=AD=A4=E6=BA=90/=E7=BA=AA=E5=85=83=E7=BA=A7=E8=A6=86?=
+ =?UTF-8?q?=E7=9B=96=E4=B8=8D=E8=B1=81=E5=85=8D=EF=BC=89+=20=E8=8D=89?=
+ =?UTF-8?q?=E6=A1=88=E7=A8=BF=EF=BC=88dry-run=20=E9=80=80=E5=87=BA?=
+ =?UTF-8?q?=E7=A0=81=200/1/2=20=E5=90=AB=20fail-loud=20rc=3D2=20=E5=AE=9E?=
+ =?UTF-8?q?=E8=AF=81=EF=BC=89+=20.gitignore=20=E8=B4=9F=E5=90=91=E4=BE=8B?=
+ =?UTF-8?q?=E5=A4=96=20*.json=20=E4=B9=8B=E5=90=8E=EF=BC=88D-23a=20?=
+ =?UTF-8?q?=E6=95=99=E8=AE=AD=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .gitee-ci.yml                                 | 69 +++++++++++++++++++
+ .gitignore                                    |  2 +
+ ...77\350\215\211\346\241\210-v0-20261005.md" | 62 +++++++++++++++++
+ tools/postmerge_exemptions.json               | 21 ++++++
+ 4 files changed, 154 insertions(+)
+ create mode 100644 .gitee-ci.yml
+ create mode 100644 "docs/\346\226\271\346\241\210-R396-CI-gitee\346\216\245\347\272\277\350\215\211\346\241\210-v0-20261005.md"
+ create mode 100644 tools/postmerge_exemptions.json
+
+diff --git a/.gitee-ci.yml b/.gitee-ci.yml
+new file mode 100644
+index 00000000..ce0ee4e2
+--- /dev/null
++++ b/.gitee-ci.yml
+@@ -0,0 +1,69 @@
++# .gitee-ci.yml —— 合 main 后自动门禁（R396-CI；postmerge_check 三查接入）
++#
++# ⚠️ 草案态，勿先激活/先合：硬依赖 = 镜审 task/R396-POSTMERGE@c95f9e5 ＋ PI 把
++#    `tools/postmerge_check.py` 合入 main 先行。工具未入库前本流水线会因
++#    `python tools/postmerge_check.py` 找不到文件而 exit 2（= fail-loud，正确报警）。
++#
++# 语义钉死（对上卡红线，不得弱化）：
++#   · 零机时：只读 the-world-data 已有产物，不跑批、不消费 RNG（R117）。
++#   · fail-loud：strict（默认，不加 --lenient）⇒ 有 SKIP 亦判红；退出码 0 绿 / 1 红 / 2 环境或用法错=红。
++#   · 不碰判据：任何"纪元级/装置覆盖"类不符，工具如实报 FAIL，本流水线**不豁免**（豁免只登记"装置本应 n/a 的空列"），代裁须 PI 走 --expect-device-field（澜舟侧下一步②）。
++#   · 豁免入库：空列豁免一律来自 tools/postmerge_exemptions.json（版本化、带理由+出处+批准人），CI 不接受命令行裸豁免。
++#
++# 真源：tools/postmerge_check.py（三查 C7/回显/完整性）｜tools/postmerge_exemptions.json｜AGENT.md §12.2 C7 / §十一 数据仓
++
++version: "1.0"
++name: postmerge-gate
++
++# Gitee CI runner 字段名以实际启用版本为准；若 runner 用 stages/steps 另形态，把 `jobs.*.steps[].run`
++# 整块平移即可——核心是下面这段 shell 序列，与本地"值班巡检一行调用"完全等价。
++triggers:
++  push:
++    branches: [main]
++
++jobs:
++  postmerge-check:
++    steps:
++      - name: selftest-钉工具完整性
++        run: |
++          set -e
++          PY="${PYTHON:-python}"
++          # 自检无需数据：改坏工具/误删计时列豁免 ⇒ 这里必红（性质①②③自锁）
++          "$PY" tools/postmerge_check.py --selftest
++
++      - name: 拉取数据仓产物（只读，零机时）
++        run: |
++          set -e
++          # 数据仓独立 git（remote=origin），本地已在 the-world-data/ ；CI 环境缺则浅克隆
++          if [ ! -d the-world-data ]; then
++            git clone --depth 1 https://gitee.com/little-fishy/the-world-data.git the-world-data
++          else
++            git -C the-world-data pull --ff-only origin main || true
++          fi
++
++      - name: 三查（strict，SKIP 亦红；豁免只从入库 JSON 取）
++        run: |
++          set -e
++          PY="${PYTHON:-python}"
++          # 从 tools/postmerge_exemptions.json 组装 --allow-empty-col（scope=always 或匹配本批）
++          EXEMPT=$("$PY" - <<'PYEOF'
++import json, sys
++try:
++    data = json.load(open("tools/postmerge_exemptions.json", encoding="utf-8"))
++except FileNotFoundError:
++    sys.stderr.write("🔴 缺 tools/postmerge_exemptions.json（豁免清单须入库）\n"); sys.exit(2)
++args = []
++for e in data.get("exemptions", []):
++    if e.get("scope", "always") == "always":
++        args += ["--allow-empty-col", e["column"]]
++print(" ".join(args))
++PYEOF
++)
++          # shellcheck-disable=SC2086  EXEMPT 故意不加引号以展开为多参数
++          "$PY" tools/postmerge_check.py --data-dir the-world-data --limit 40 $EXEMPT
++          # 退出码：0=全过(绿)；1=有FAIL或strict下SKIP(红)；2=环境/用法错(红·fail-loud)
++
++      - name: dry-run 退出码对照（值班巡检同此一行手动调用）
++        run: |
++          echo "巡检一行： python tools/postmerge_check.py --data-dir the-world-data --limit 40 \$(python -c \"import json;print(' '.join('--allow-empty-col '+e['column'] for e in json.load(open('tools/postmerge_exemptions.json'))['exemptions'] if e.get('scope','always')=='always'))\")"
++          echo "退出码： 0=全过绿 / 1=FAIL或SKIP红(strict) / 2=工具未入库或缺JSON=环境红 —— 绝不'没查也绿'"
+diff --git a/.gitignore b/.gitignore
+index cad7d3d7..92cd5924 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -23,6 +23,8 @@ results/
+ # （每批的机器可读前提声明），不是跑批产物 ⇒ 必须入库。
+ # ⚠️ 负向规则**必须写在 `*.json` 之后**（后来者胜）——本项目在 D-23a 已为此付过学费。
+ !experiments/prerequisites.json
++# 同例（R396-CI）：postmerge 豁免登记表=**手写版本化源文件**（每条带理由/出处/批准人），非跑批产物 ⇒ 必须入库（CI fail-loud 依赖它）。
++!tools/postmerge_exemptions.json
+ 
+ # 前端
+ node_modules/
+diff --git "a/docs/\346\226\271\346\241\210-R396-CI-gitee\346\216\245\347\272\277\350\215\211\346\241\210-v0-20261005.md" "b/docs/\346\226\271\346\241\210-R396-CI-gitee\346\216\245\347\272\277\350\215\211\346\241\210-v0-20261005.md"
+new file mode 100644
+index 00000000..d07c5968
+--- /dev/null
++++ "b/docs/\346\226\271\346\241\210-R396-CI-gitee\346\216\245\347\272\277\350\215\211\346\241\210-v0-20261005.md"
+@@ -0,0 +1,62 @@
++# R396-CI 接线草案 v0（postmerge_check 接 .gitee-ci.yml + 豁免清单入库）
++
++> **卡**：R396-CI（claimed·板桥）｜**日期**：2026-10-05｜**性质**：🟡 草案上板，**勿先合**
++> **硬依赖（前置未满足前本流水线必红 = 正确行为）**：① 镜审 `task/R396-POSTMERGE@c95f9e5`；② PI 把 `tools/postmerge_check.py` 合入 main **先行**。
++> **卡红线对照**：零机时✅（只读产物）/ fail-loud 不弱化✅（strict，SKIP 亦红；§三实证"没查也绿"不可能）/ 不碰判据✅（纪元级覆盖不豁免，见 §四）/ 草案先行✅（本件，分支不合）。
++
++---
++
++## 一、交付三件（分支 `task/R396-CI`，候依赖满足后 PI 一键合）
++
++| 件 | 路径 | 作用 |
++|---|---|---|
++| ① 流水线 | `.gitee-ci.yml` | post-merge 四步：selftest → 数据仓只读拉取 → 三查 strict → 巡检一行对照 |
++| ② 豁免登记表 | `tools/postmerge_exemptions.json` | 空列豁免**入库版**（column/reason/batch/approved_by/date/scope 六字段，可审计）；CI 只从这里组装 `--allow-empty-col`，**拒绝命令行裸豁免** |
++| ③ 本草案 | `docs/方案-R396-CI-gitee接线草案-v0-20261005.md` | 接线设计 + 退出码说明 + 依赖序 + 待确认清单 |
++
++**工具本体零改动**：`postmerge_check.py` 的 `--allow-empty-col` 是既有接口，本接线只在 CI 侧组装参数，不碰澜舟的文件（他侧"下一步②"`--expect-device-field` 若落地，§四留了接入位）。
++
++## 二、值班巡检"一行调用"（入库后每班照抄，与 CI 完全等价）
++
++```bash
++py -X utf8 tools/postmerge_check.py --selftest && \
++py -X utf8 tools/postmerge_check.py --data-dir the-world-data --limit 40 \
++  $(py -X utf8 -c "import json;print(' '.join('--allow-empty-col '+e['column'] for e in json.load(open('tools/postmerge_exemptions.json',encoding='utf-8'))['exemptions'] if e.get('scope','always')=='always'))")
++```
++
++`--limit 40` = 每批只扫最新 40 CSV（数据仓已 278+ 文件，全扫无必要且拖长巡检；候试用反馈再调档）。
++
++## 三、退出码语义（dry-run 说明，卡验收项）
++
++| rc | 含义 | CI 判定 | 实例（实测 2026-10-05） |
++|---|---|---|---|
++| 0 | 全过 | 🟢 绿 | selftest 三性质自锁 PASS（计时列豁免=PASS/整列空=FAIL/tick倒退=FAIL）|
++| 1 | 有 FAIL，**或 strict 下有 SKIP**（默认不加 `--lenient`⇒SKIP 亦红，fail-loud 不弱化） | 🔴 红 | POSTMERGE 卡面真数据：`g4_mem_bit_frac` 整列 NaN 未豁免时 FAIL=1；入库 JSON 豁免后 PASS=23 FAIL=0 |
++| 2 | 用法/环境错（`--data-dir` 不存在 / **工具未入库打不开文件** / 缺豁免 JSON） | 🔴 红（不是"跳过"） | 本树实跑 `tools/postmerge_check.py`（未合 main）⇒ 打不开文件非零退出，`set -e` 中止——**"没查也绿"在结构上不可能**（工具自带"什么都没查⇒rc=2"+文件在不在都响） |
++
++`--lenient` **禁用**于 post-merge 门禁（只许考古旧批手工单跑时在命令行显式声明，且不进 CI——防"考古口径"混进"门禁口径"）。
++
++## 四、明确不豁免项（不碰判据红线）
++
++- **p1c_density `patches 213/425≠1700`**（装置档回显不符）= 既裁**纪元级覆盖**场景 ⇒ 工具"如实报红、不代裁"（澜舟口径原样保留）。CI 合入初期该批会红——**这是正确报警**，处置二选一，均须 PI：
++  1. 澜舟侧 `--expect-device-field`（其"下一步②"）落地后，把已批纪元覆盖登记进 JSON 的新段 `device_overrides`（本草案预留 schema，不先造字段进工具）；
++  2. 或巡检对该批用 `--limit`/目录白名单暂时圈外（**上板报备**，不静默）。
++- 空列豁免默认 **scope=always 仅 1 条**（`g4_mem_bit_frac`，理由/出处/背书在 JSON 内，待 PI 复核转正式）；带 `batch=` 的豁免**不进 CI**（scope≠always 一律不组装），防单批考古口径长期污染门禁。
++
++## 五、待 PI 确认清单（合并序）
++
++1. **依赖序**：c95f9e5 过审合 main → 本分支合 main（两线无文件面交集：本支只加 `.gitee-ci.yml`+`tools/postmerge_exemptions.json`+本稿，不触 `tools/postmerge_check.py`/`tests/`）；
++2. Gitee 实际 runner 形态若与草案字段名不符（`triggers/jobs.steps.run` vs `stages`），只需整块平移 shell 序列，语义不变——**或**改接"值班巡检一行"（§二）为纯人工制，`.gitee-ci.yml` 降为记录载体（巡检每班跑 §二 那行即达成本卡目的）；
++3. `g4_mem_bit_frac` 豁免背书复核（澜舟装置线口径）；
++4. 合入后 `--limit 40` 与巡检频率（每班）试用一轮再定档。
++
++## 六、验收要点对照（卡面：CI 接线草案上板＋入库 dry-run 退出码说明）
++
++- [x] 接线草案（`.gitee-ci.yml` + 豁免 JSON 实际文件在分支，非纸面想象）
++- [x] dry-run 退出码说明（§三，含两例实测：selftest rc=0 / 工具未入库 rc≠0 fail-loud 实证）
++- [x] 零机时/不碰判据/SKIP 亦红（§一/§三/§四逐条钉死）
++- [x] 勿先合：本支等依赖，草案先上板（帖另发）
++
++---
++
++**版本**：v0（2026-10-05 板桥首稿，R396-CI claimed 态交付）｜证据：`_rerun_logs` 本地验证记录（selftest/参数展开/fail-loud 三跑）
+diff --git a/tools/postmerge_exemptions.json b/tools/postmerge_exemptions.json
+new file mode 100644
+index 00000000..b829f298
+--- /dev/null
++++ b/tools/postmerge_exemptions.json
+@@ -0,0 +1,21 @@
++{
++  "_comment": "R396-CI 豁免清单入库（合 main 后三查 postmerge_check 的空列豁免登记表）。每条=一次显式放宽，须带理由/批次出处/批准人，可审计。工具本体不变：--allow-empty-col 仍逐项放行，本文件是其版本化来源。新增条目须上板/PI 确认，不代裁。",
++  "_schema": {
++    "column": "被豁免的整列全空/全NaN列名（对应 postmerge_check --allow-empty-col）",
++    "reason": "为什么该列本应 n/a（装置口径/判据层事实，非'跑歪了'）",
++    "batch": "首个触发该红的具体批次/产物（出处，可追溯）",
++    "approved_by": "批准放宽的角色（空列=装置本应无值，须装置线/PI 背书）",
++    "date": "登记日期",
++    "scope": "生效范围：always=长期豁免 / batch=<代号>=仅该批考古（新合并默认不套用带批豁免）"
++  },
++  "exemptions": [
++    {
++      "column": "g4_mem_bit_frac",
++      "reason": "G4 装置位元组占比在本实验臂配置下本应 n/a（装置无该通道），非静默零列族，属预期空列。",
++      "batch": "the-world-data/m1_smoke @53083d6（R396-POSTMERGE 真数据首跑：PASS=23 FAIL=0 仅此列豁免）",
++      "approved_by": "澜舟（装置线）背书 + PI 合 c95f9e5；待 PI 复核正式化",
++      "date": "2026-10-05",
++      "scope": "always"
++    }
++  ]
++}
+-- 
+2.46.1.windows.1
+
