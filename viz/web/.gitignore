@@ -23,8 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 
-# viz dev datapacks (bulk, keep out of git)
-public/datapack/
+# viz dev datapacks (bulk, keep out of git) — `datapack/`（样例拷贝）+ `datapack-synth/`（合成包）
+public/datapack*/
 
 # tracked app config — override root `*.json` data-file policy（负向规则必须最后写，D-23a 学费）
 !/package.json
