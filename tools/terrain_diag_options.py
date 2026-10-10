@@ -20,7 +20,7 @@
   python tools/terrain_diag_options.py [ticks]          # 默认 4000
 
 输出样例（seed42 / 4k）：`_rerun_logs/terrain_s2_smoke/diag_option_analysis.txt`
-（sha256 见证据包 `_audit/S3-pre/SHA256.txt`）
+（sha256 见证据包 `_archive/2026-10-10-退役团队-归档/_audit/S3-pre/SHA256.txt`）
 """
 from __future__ import annotations
 

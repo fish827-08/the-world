@@ -1418,7 +1418,7 @@ _ACTION_SELECTION_FIELDS: frozenset = frozenset(
 class EnergyProbeConfig:
     """ENERGY-CLOSE **步A 只读累加器**（A2 独立实测侧的散逸/逃逸分账埋点）。
 
-    口径：`docs/设计文档/记录-ENERGY-CLOSE步A-通道枚举与A2三账口径-20261007.md` §三/§四
+    口径：`_archive/2026-10-10-退役团队-归档/docs-旧档/设计文档/记录-ENERGY-CLOSE步A-通道枚举与A2三账口径-20261007.md` §三/§四
     （7 通道 = 4 散逸 `dis_meta/dis_move/dis_attack/dis_signal`
     + 3 逃逸 `esc_death_e/esc_pred_e/esc_pred_s`）。
     🔴 **列面纪律（轻舟约束 1 + 砚⑤）**：本机制**不动** `EC_*` 枚举、**不动**

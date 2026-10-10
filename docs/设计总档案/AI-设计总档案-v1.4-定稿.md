@@ -785,7 +785,7 @@ score   = np.where(has_sig[:,None], score + (0.4*perc)[:,None]*interp, score)   
 | 九宫格（8 邻含对角）| `world/sphere_world.py:281` |
 | Rust `signal_emit` 签名 | `sim_core/src/lib.rs:974` |
 | 双峰不可证伪 | `docs/设计文档/证伪-双峰在现行捕食公式下不可能-20260924.md` |
-| 战略定位 L0–L4 | `docs/决策与评审/战略定位-20260912-语言涌现可达性.md` |
+| 战略定位 L0–L4 | `_archive/2026-10-10-退役团队-归档/docs-旧档/决策与评审/战略定位-20260912-语言涌现可达性.md` |
 
 ## 附录 B：文献坐标
 

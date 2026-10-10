@@ -144,3 +144,9 @@ _share/.locks/*.post-journal.json
 # `worktree.py setup --role <键>` 生成的 GIT_CONFIG_* env 注入行 —— 属会话环境而非仓库内容
 # ⇒ 必须忽略（同 R343 游离文件教训）。
 .qoder-sign.env
+
+# === 2026-10-10：Qoder 运行时目录（会话/点数/技能运行态）===
+# 属工具运行时状态，非项目内容 ⇒ 必须忽略（否则污染 git status）。
+.qoder-collab-runtime/
+.qoder-credits/
+.qoder-user-skill-runtime/

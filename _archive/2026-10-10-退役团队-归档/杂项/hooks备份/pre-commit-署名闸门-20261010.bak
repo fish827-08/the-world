@@ -1,0 +1,30 @@
+#!/bin/sh
+# the-world-sign-gate v2 —— 提交署名闸门（R393②，卡 SIGN-HOOK）
+# 装于 2026-10-04 18:41 由 install_git_hook.py；卸载：python C:/Users/圣羽/Desktop/temp/tempCode/the-world/.worktrees/bq_onboard/collab-toolkit/tools/install_git_hook.py remove
+# 规则：作者位 ∈ 花名册 且（在 .worktrees/<卡号> 里时）= 本卡负责人；主树/无卡 ⇒ 只警告不阻断
+GATE=""
+for C in "$(pwd -P)/collab-toolkit/tools/sign_hook.py" \
+         "C:/Users/圣羽/Desktop/temp/tempCode/the-world/.worktrees/bq_onboard/collab-toolkit/tools/sign_hook.py" \
+         "$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p; q')/collab-toolkit/tools/sign_hook.py"; do
+    if [ -f "$C" ]; then GATE="$C"; break; fi
+done
+if [ -z "$GATE" ]; then
+    echo "[署名闸门] 🔴 找不到 sign_hook.py（三处回落均失败）⇒ 本次警告放行；请跑 python collab-toolkit/tools/install_git_hook.py install 重装" >&2
+    exit 0
+fi
+PY=""
+for P in "C:/Users/圣羽/AppData/Local/Programs/Python/Python314/python.exe" python python3 py; do
+    if command -v "$P" >/dev/null 2>&1; then PY="$P"; break; fi
+    if [ -x "$P" ]; then PY="$P"; break; fi
+done
+if [ -z "$PY" ]; then
+    echo "[署名闸门] 🔴 PATH 里没有 python ⇒ 本次警告放行（请重装时带可用解释器）" >&2
+    exit 0
+fi
+# git 钩子的 cwd = 工作树根；用 pwd 而不是 git 输出路径（Windows 中文路径经 git 会变 GBK）
+"$PY" "$GATE" check --root "$(pwd -P)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    echo "[署名闸门] rc=$rc —— 提交被拦（详见上方 🔴 行与修法）" >&2
+fi
+exit $rc

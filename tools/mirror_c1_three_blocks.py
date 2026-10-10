@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """mirror_c1_three_blocks.py —— 镜·C1 三阻塞「由红转守」复核件（R394④：审核人自写）
 
-审头 `docs/审核-C1-IMPLEMENT-钩子侧车与装置面-20261005.md` 留三条 🔴（当时实测 0 红）：
+审头 `_archive/2026-10-10-退役团队-归档/docs-旧档/审核-C1-IMPLEMENT-钩子侧车与装置面-20261005.md` 留三条 🔴（当时实测 0 红）：
   C-A `write_run_summary` 唯一 scipy 入口在收尾 ⇒ 正式档跑完之后才崩（侧车二/manifest 全丢）
   C-B 第二处（致伤致死 site-2）钩子删除 ⇒ 33 例全绿
   C-C `test_t13_no_hardcoded_120` 同式自证 ⇒ `% 120` 硬编码 0 红

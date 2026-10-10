@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """镜 · G6-EMITRATE 独立复核件（只读审核，不改被审分支）
 
-审头：`docs/审核-G6发射率列与GAP-A-20261005.md`
+审头：`_archive/2026-10-10-退役团队-归档/docs-旧档/审核-G6发射率列与GAP-A-20261005.md`
 对象：`task/G6-EMITRATE@7fbe4ae`（+ 出处 `task/GAP-A-EMIT@e8d70f7`）
 
 四个子命令（全部零跑批、微缩装置秒级；R117 不起跑正式批）：

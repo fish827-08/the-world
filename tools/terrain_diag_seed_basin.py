@@ -15,7 +15,7 @@
   python tools/terrain_diag_seed_basin.py [ticks]       # 默认 3000
 
 输出样例（3k）：`_rerun_logs/terrain_s2_smoke/diag_seed_basin.txt`
-（sha256 见证据包 `_audit/S3-pre/SHA256.txt`）
+（sha256 见证据包 `_archive/2026-10-10-退役团队-归档/_audit/S3-pre/SHA256.txt`）
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 """GAP-A-EMIT 只读核对：`sig_run_len_hist_1..8` 合计是否 ≡ 发射密度？
 
 结论（本脚本实测给出）：**不等价，且与发射量不成比例** ⇒ M1 判据"发射率不降"
-须另立专列（需求单 `docs/tasks/需求单-GAP-A-EMIT-发射率专列-20261004.md`）。
+须另立专列（需求单 `_archive/2026-10-10-退役团队-归档/docs-旧档/tasks/需求单-GAP-A-EMIT-发射率专列-20261004.md`）。
 
 纪律：🔴 **零机时**——不跑引擎、不消费 RNG、不改任何文件、不动已锁口径（R225）。
 做法：直接驱动 s3 探针的**真实仪表代码** `_M0Instruments._track_runs`，
@@ -134,7 +134,7 @@ def main() -> int:
           "④ 同格多写者只记一 vid（`ambig_n`）；⑤ 累计直方图无 tick/种群分母 ⇒ 出不了'率'。")
     print(f"实测比值跨度 {min(ratios):.0%} → {max(ratios):.0%}（同装置族、同 ticks）"
           "⇒ 连'固定系数换算'都不成立。")
-    print("⇒ 需求单：`docs/tasks/需求单-GAP-A-EMIT-发射率专列-20261004.md`"
+    print("⇒ 需求单：`_archive/2026-10-10-退役团队-归档/docs-旧档/tasks/需求单-GAP-A-EMIT-发射率专列-20261004.md`"
           "（真值抓手 = `signals.write_many` 的类级挂钩旁路计数，探针侧零引擎改动可出 G6 "
           "发射率列；🔴 不是引擎 `_emit_count`——需求单 §二 实测它在 M1 装置下恒为 0）。")
 
