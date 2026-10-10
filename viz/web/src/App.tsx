@@ -1,11 +1,12 @@
 /**
- * 应用壳：左侧世界画布（丹青 render/WorldCanvas）+ 控制条；右侧 ECharts 仪表盘。
+ * 应用壳：左侧世界画布（球体 WorldGlobe / 平面 WorldCanvas，可切换）+ 控制条；右侧 ECharts 仪表盘。
  * 数据包地址默认 /datapack/（开发期放 public/datapack/）。
  */
 import { useEffect, useState } from "react";
 import { ControlsBar } from "./app/ControlsBar";
 import { SeriesChart } from "./app/SeriesChart";
 import { WorldCanvas } from "./render/WorldCanvas";
+import { WorldGlobe } from "./render/WorldGlobe";
 import { DEFAULT_DATAPACK_URL, useViz } from "./app/store";
 import "./App.css";
 
@@ -42,10 +43,17 @@ function App() {
   const datapackUrl = useViz((s) => s.datapackUrl);
   const layer = useViz((s) => s.layer);
 
-  const [urlInput, setUrlInput] = useState(DEFAULT_DATAPACK_URL);
+  const [urlInput, setUrlInput] = useState(
+    () => new URLSearchParams(window.location.search).get("datapack") ?? DEFAULT_DATAPACK_URL,
+  );
+  /** 世界读法：球体（v1，默认）/ 平面（v0 地图读法，保留作对照）；`?view=flat` 可深链 */
+  const [view, setView] = useState<"globe" | "flat">(() =>
+    new URLSearchParams(window.location.search).get("view") === "flat" ? "flat" : "globe",
+  );
 
   useEffect(() => {
-    void load();
+    // ?datapack=/path/ 可深链切换数据包（缺省 /datapack/）
+    void load(new URLSearchParams(window.location.search).get("datapack") ?? undefined);
   }, [load]);
 
   return (
@@ -53,7 +61,7 @@ function App() {
       <header className="viz-header">
         <div className="brand">
           <span className="logo">the-world</span>
-          <span className="sub">可视化 v0 · 世界回放 + 指标仪表盘</span>
+          <span className="sub">可视化 v1 · 三维球体 + 世界回放 + 指标仪表盘</span>
         </div>
         <form
           className="url-form"
@@ -85,30 +93,61 @@ function App() {
       )}
       <main className="viz-main">
         <section className="viz-world">
-          {meta ? (
-            <div className="stage">
-              <WorldCanvas
-                meta={meta}
-                grid={grid}
-                entities={entities}
-                scale={meta.channels.find((c) => c.key === layer)?.scale ?? { p_lo: 0, p_hi: 1 }}
-              />
-            </div>
-          ) : (
-            <div className="stage">
-              <div className="empty">
-                {loading ? (
-                  "加载数据包中…"
+          <div className="stage-wrap">
+            {meta ? (
+              <div className={view === "globe" ? "stage stage-globe" : "stage"}>
+                {view === "globe" ? (
+                  <WorldGlobe
+                    meta={meta}
+                    grid={grid}
+                    entities={entities}
+                    scale={meta.channels.find((c) => c.key === layer)?.scale ?? { p_lo: 0, p_hi: 1 }}
+                  />
                 ) : (
-                  <>
-                    无数据包。把数据包放入 <code>viz/web/public/datapack/</code>
-                    <br />
-                    （默认地址 /datapack/），或在上方输入其他 URL 前缀后点"加载"。
-                  </>
+                  <WorldCanvas
+                    meta={meta}
+                    grid={grid}
+                    entities={entities}
+                    scale={meta.channels.find((c) => c.key === layer)?.scale ?? { p_lo: 0, p_hi: 1 }}
+                  />
                 )}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="stage">
+                <div className="empty">
+                  {loading ? (
+                    "加载数据包中…"
+                  ) : (
+                    <>
+                      无数据包。把数据包放入 <code>viz/web/public/datapack/</code>
+                      <br />
+                      （默认地址 /datapack/），或在上方输入其他 URL 前缀后点"加载"。
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+            {meta && (
+              <div className="view-toggle" role="group" aria-label="视图切换">
+                <button
+                  type="button"
+                  className={view === "globe" ? "on" : undefined}
+                  onClick={() => setView("globe")}
+                  title="三维球体读法（看整体对形）"
+                >
+                  球体
+                </button>
+                <button
+                  type="button"
+                  className={view === "flat" ? "on" : undefined}
+                  onClick={() => setView("flat")}
+                  title="平面地图读法（查具体格值）"
+                >
+                  平面
+                </button>
+              </div>
+            )}
+          </div>
           <ControlsBar />
         </section>
         <aside className="viz-side">

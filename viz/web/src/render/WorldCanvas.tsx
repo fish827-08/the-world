@@ -4,12 +4,13 @@
  * 图层帧 = 导出端按 scale 量化后的 u8（行主序，行 0 = 北极端）⇒ 直接查
  * viridis LUT 上色；`scale` 不参与绘制（契约 §3：量化已含标定），仅为签名完整保留。
  * 实体叠加：flat → (r,c)；`sub_r/sub_c` 亚格绝对坐标（`meta.entities.subdiv`，契约 v0 修订1），
- * 帧级一致性校验不过（如 subpos 关档续跑的漂移列）⇒ 回退格中心；`subdiv` 缺失同此回退。
+ * 帧级裁决见 `./subcell`（与球体渲染共用同一唯一裁决点）——不过 ⇒ 回退格中心；`subdiv` 缺失同此回退。
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
 import type { Meta } from "../contract";
 import { energyColorCss, viridisLut } from "./palette";
+import { resolveSubdiv } from "./subcell";
 
 const LUT = viridisLut();
 const BG = "#0d0d12";
@@ -220,40 +221,6 @@ function dot(
     ctx.arc(x - W, y, r, 0, TAU);
     ctx.fill();
   }
-}
-
-/**
- * 解析本帧 subdiv（契约 v0 修订1 §4）：值取自 `meta.entities.subdiv`；
- * 缺失 或 无亚格数据 ⇒ 0 = 回退格中心。声明 subdiv 时做帧级一致性校验 ——
- * 判据 `sub_r // subdiv == floor(flat/cols)` 且 `sub_c // subdiv == col`
- * （同一实体的两种表示）；不过（实测：subpos 关档续跑时 sub 列与 flat 漂移）
- * ⇒ 一律 0 = 全帧回退格中心，不允许部分实体按亚格绘制。
- */
-function resolveSubdiv(
-  entities: Float32Array,
-  nEnt: number,
-  cols: number,
-  metaSubdiv: number | undefined,
-): number {
-  if (typeof metaSubdiv !== "number" || !Number.isFinite(metaSubdiv) || metaSubdiv < 1) {
-    return 0;
-  }
-  let total = 0;
-  let bad = 0;
-  for (let i = 0; i < nEnt; i++) {
-    const b = i * 7;
-    const sr = entities[b + 1];
-    const sc = entities[b + 2];
-    if (sr === 0 && sc === 0) continue;
-    const flat = entities[b];
-    if (!Number.isFinite(flat) || !Number.isFinite(sr) || !Number.isFinite(sc)) continue;
-    const row = Math.floor(flat / cols);
-    const col = flat - row * cols;
-    total++;
-    if (Math.floor(sr / metaSubdiv) !== row || Math.floor(sc / metaSubdiv) !== col) bad++;
-  }
-  if (total === 0) return 0;
-  return bad === 0 ? metaSubdiv : 0;
 }
 
 export default WorldCanvas;
