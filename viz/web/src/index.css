@@ -1,0 +1,39 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1116;
+  --bg-2: #151a21;
+  --bg-3: #1d2532;
+  --fg: #e6e9ef;
+  --dim: #8b93a3;
+  --accent: #ffd166;
+  --line: #27303f;
+  --danger: #ff6b6b;
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+code {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+}
