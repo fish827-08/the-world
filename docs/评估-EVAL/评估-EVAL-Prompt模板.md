@@ -1,7 +1,7 @@
 # 外部评估 Prompt 模板（4 模型，本地直读 / 云端 Git）
 
 > 用法：把对应模型的 Prompt 整段复制给该模型。
-> **产出约定（重要）**：所有模型的详细评估报告统一保存到项目目录 `_eval_reports/` 下，
+> **产出约定（重要）**：所有模型的详细评估报告统一保存到项目目录 `docs/外来参考线/_eval_reports/` 下，
 > 文件名 `评估报告-{模型名}-{YYYYMMDD}.md`（如 `评估报告-DeepSeekV4Pro-20260908.md`），
 > 仓库所有人将汇总 4 份报告输出最终意见。
 
@@ -9,7 +9,7 @@
 
 ## 一、本地直读版（DeepSeek V4 Pro / Qwen 3.8 Max / Kimi 3）
 
-> 这三个模型可直接访问本机目录，用绝对路径读取文档，无需 git。可直接把报告写到 `_eval_reports/`。
+> 这三个模型可直接访问本机目录，用绝对路径读取文档，无需 git。可直接把报告写到 `docs/外来参考线/_eval_reports/`。
 
 ### 【DeepSeek V4 Pro 版】
 
@@ -119,7 +119,7 @@ C:\Users\圣羽\Desktop\temp\tempCode\the-world\_gitee_review
 
 ## 二、云端 Git 版（ChatGPT / GPT-5）
 
-> ChatGPT 在云端不能直接访问本机，用 Git 链接读取；报告让用户从聊天框复制保存到 `_eval_reports/`。
+> ChatGPT 在云端不能直接访问本机，用 Git 链接读取；报告让用户从聊天框复制保存到 `docs/外来参考线/_eval_reports/`。
 
 ### 【ChatGPT(GPT-5) 版】
 

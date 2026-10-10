@@ -20,7 +20,7 @@
 | 4 | **实验员·科学主管（砚）** | 预注册/判据口径/样本量/台账/判读算账 ＋ 项目构造（科学侧）＋ 科学验证 | 主工作树 |
 | 5 | **审核·设计（镜）** | 只审不改：交付代码 ＋ 设计书/方案稿开工前审核 ＋ 判读复算 ＋ 缺陷账本 | 只读 + 审 |
 | 6 | **协作基建（板桥，`[协作]`）** | 协作机制与工具（一次性/按需） | 分支 |
-| 7 | **联网/外鉴（按需）** | 文献核查 / 外部会诊（外部参考级） | `_web_eval/`、`_advice/` |
+| 7 | **联网/外鉴（按需）** | 文献核查 / 外部会诊（外部参考级） | `_web_eval/`、`docs/外来参考线/_advice/` |
 | — | ~~云端角色~~ | 🔴 **云机 = 工具不入册**（10-03 裁定）：部署归轻舟、启动归 PI（凭 fish 令）、看护共担；云端沙盒会话仅按需（小批+证据包） | — |
 
 ### 1.1 两条验证线互补（不重叠、不越界）
@@ -256,7 +256,7 @@ git ls-remote origin main     # 对账：与本地 HEAD 一致才算 push 成功
 | **实验数据仓库** | **`the-world/the-world-data/`**（嵌套独立仓库，主仓 `.gitignore` 已排除；数据不进主仓，见 §十一） |
 | 待清理残留 | `digital-life-sphere/`（detached `b896cc1`，09-08）、`_gitee_review/`（原 worktree 物理残留）、`.git.corrupt-20260913/`、`_reclone_tmp/` |
 | ⚠️ 仅作对照 | `digital_life/`（第一代封存，独立仓库） |
-| 评估工作区 | `_eval/`、`_web_eval/`、`_roadmap/`、`_advice/` —— **必须入库**（曾误加 `.gitignore`，已纠正） |
+| 评估工作区 | `_eval/`、`_web_eval/`、`docs/外来参考线/_roadmap/`、`docs/外来参考线/_advice/` —— **必须入库**（曾误加 `.gitignore`，已纠正） |
 | **远端** | **`gitee`** = `the-world`（唯一活跃，upstream）；`gitee-archive` = 旧仓库（**禁推**）；`origin`/`github` = 只读归档 |
 | ❌ 已取消 | `collab/main`（R9 封存；分支已删，回溯用标签 `archive/collab-main-20260912`） |
 

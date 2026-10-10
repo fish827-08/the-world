@@ -20,9 +20,9 @@
 
 | 目录 | 追踪 | 被引用 | 性质 | 判定 |
 |---|---|---|---|---|
-| `_advice/` | 7 | 4 | 外部会诊参考（非项目结论）| 🟢 **可迁**（批 B）|
-| `_eval_reports/` | 8 | 1 | 外部 AI 评估报告 | 🟢 **可迁**（批 B）|
-| `_roadmap/` | 3 | 2 | 路线图索引版（旧）| 🟢 **可迁**（批 B）|
+| `docs/外来参考线/_advice/` | 7 | 4 | 外部会诊参考（非项目结论）| 🟢 **可迁**（批 B）|
+| `docs/外来参考线/_eval_reports/` | 8 | 1 | 外部 AI 评估报告 | 🟢 **可迁**（批 B）|
+| `docs/外来参考线/_roadmap/` | 3 | 2 | 路线图索引版（旧）| 🟢 **可迁**（批 B）|
 | `_eval/` | 74 | 18 | 内评线**工作区**（CHARTER/GATE 活件）| 🔴 **留**（线在用）|
 | `_audit/` | 21 | 26 | 审计工作夹 | 🔴 **留** |
 | `_web_eval/` | 13 | 9 | 联网评估线工作区 | 🔴 **留** |
@@ -38,7 +38,7 @@ docs/
 ├─ 技术文档/     ← D3-世代压缩｜L7d-Rayon｜a4_drift_isolate_diagnosis
 ├─ 规格与机制/   ← C1-M0仪表产出规格｜规范-实验署名与记录｜讨论板归档口径-v1｜机制-worktree署名注入-v1
 ├─ 预注册/       ← N1-密度梯度批预注册稿｜Tier-1判读预注册稿（已有此目录，平铺是违规遗留）
-└─ 外来参考线/   ← _advice/ + _eval_reports/ + _roadmap/（整目录 git mv，去向=裁定点 D1）
+└─ 外来参考线/   ← docs/外来参考线/_advice/ + docs/外来参考线/_eval_reports/ + docs/外来参考线/_roadmap/（整目录 git mv，去向=裁定点 D1）
 根目录 after：
   只剩 必读4件 + 代码线目录 + 在用的 _eval/_audit/_web_eval/_archive/_share/docs/tools/tests/…
   _rerun_logs/ results/ 保留（运行时生成区，.gitignore 已管，代码写死）
