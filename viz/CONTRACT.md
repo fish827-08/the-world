@@ -61,6 +61,10 @@
   旧快照缺亚格键时**引擎载入侧**已回退格中心（`sub_r/subdiv = r+0.5` 恒成立，与 flat 一致）、缺 `mode` 键回退 `3`（explore）
   ⇒ 前端无需特判，按下标直读即可；`mode` 取值域：`0=feed / 1=flee / 2=join / 3=explore`。
 - 着色建议用 `meta.entities.norm`。
+- ⚠️ **亚格列有效性**（2026-10-10 实测+静态确认）：引擎只在 `subpos.enabled=True` 时逐 tick 维护 `sub_r/sub_c`；
+  **关档续跑时亚格列停留在出生格中心、与 `flat` 漂移**（样例包实测命中）。消费方必须做帧级一致性校验
+  （`sub_r//subdiv == floor(flat/cols)` 且 `sub_c//subdiv == flat%cols`），不过 ⇒ **一律回退 `flat` 格中心**；
+  导出侧"关档时写回格中心值"改进列为 **v0.1 候选**（不改 v0 语义：v0 仍透传引擎原始列）。
 
 ## 5. `series.csv`
 

@@ -28,6 +28,10 @@ Q_LO, Q_HI = 0.005, 0.995
 _SUBSAMPLE_TARGET = 200_000
 
 
+class DatapackError(RuntimeError):
+    """数据包无法按契约 v0 生成（快照损坏 / 源不可用）。"""
+
+
 def _subsample(a) -> np.ndarray:
     a = np.asarray(a, dtype=np.float64).ravel()
     if a.size <= _SUBSAMPLE_TARGET:
@@ -35,24 +39,57 @@ def _subsample(a) -> np.ndarray:
     return a[:: int(np.ceil(a.size / _SUBSAMPLE_TARGET))]
 
 
+def _check_flat(flat: np.ndarray, n_cells: int) -> None:
+    if flat.size and (int(flat.min()) < 0 or int(flat.max()) >= n_cells):
+        raise DatapackError(
+            f"实体 flat 越界 [{int(flat.min())}, {int(flat.max())}]，合法 [0, {n_cells}) ⇒ 快照/引擎状态已损坏"
+        )
+
+
+def _check_sub(sr: np.ndarray, sc: np.ndarray, rows: int, cols: int, subdiv: int) -> None:
+    """契约 v0 修订1：sub_r/sub_c 为亚格绝对坐标，值域 [0, rows*subdiv) × [0, cols*subdiv)。"""
+    if sr.size and (int(sr.min()) < 0 or int(sr.max()) >= rows * subdiv):
+        raise DatapackError(
+            f"实体 sub_r 越界 [{int(sr.min())}, {int(sr.max())}]，合法 [0, {rows * subdiv})（subdiv={subdiv}）"
+        )
+    if sc.size and (int(sc.min()) < 0 or int(sc.max()) >= cols * subdiv):
+        raise DatapackError(
+            f"实体 sub_c 越界 [{int(sc.min())}, {int(sc.max())}]，合法 [0, {cols * subdiv})（subdiv={subdiv}）"
+        )
+
+
+def _source_grid(eng: SphereEngine, key: str, n: int):
+    """取通道源栅格（拷贝，防与引擎活网格别名）；源不可用（缺键/形状不符）返回 None。"""
+    if key == "energy":
+        P = len(eng._id)
+        flat = eng._flat[:P].astype(np.int64)
+        _check_flat(flat, n)
+        return np.bincount(flat, weights=eng._energy[:P], minlength=n).astype(np.float64)
+    if key == "resource":
+        a = getattr(getattr(eng, "resources", None), "_grid", None)
+    else:  # fruit
+        a = getattr(eng, "_fruit_grid", None)
+    if a is None or np.asarray(a).shape != (n,):
+        return None
+    return np.asarray(a).astype(np.float64)  # astype 默认 copy ⇒ 帧间独立，勿改 asarray
+
+
 def capture_grids(eng: SphereEngine, channels) -> dict:
     n = eng.config.world.rows * eng.config.world.cols
     out = {}
-    if "resource" in channels:
-        out["resource"] = eng.resources._grid.astype(np.float64)
-    if "energy" in channels:
-        P = len(eng._id)
-        out["energy"] = np.bincount(
-            eng._flat[:P].astype(np.int64), weights=eng._energy[:P], minlength=n
-        ).astype(np.float64)
-    if "fruit" in channels:
-        out["fruit"] = eng._fruit_grid.astype(np.float64)
+    for key in channels:
+        a = _source_grid(eng, key, n)
+        if a is not None:
+            out[key] = a
     return out
 
 
 def capture_entities(eng: SphereEngine) -> np.ndarray:
     P = len(eng._id)
-    cols = [
+    rows, n_cols = eng.config.world.rows, eng.config.world.cols
+    _check_flat(eng._flat[:P], rows * n_cols)
+    _check_sub(eng._sub_r[:P], eng._sub_c[:P], rows, n_cols, int(eng.config.subpos.subdiv))
+    arrs = [
         eng._flat[:P],
         eng._sub_r[:P],
         eng._sub_c[:P],
@@ -61,7 +98,7 @@ def capture_entities(eng: SphereEngine) -> np.ndarray:
         eng._generation[:P],
         eng._mode[:P],
     ]
-    return np.stack([np.asarray(c, dtype=np.float32) for c in cols], axis=1)  # (P, 7)
+    return np.stack([np.asarray(c, dtype=np.float32) for c in arrs], axis=1)  # (P, 7)
 
 
 def _scale_from_samples(samples: np.ndarray) -> dict:
@@ -127,20 +164,41 @@ def main(argv=None) -> int:
         )
         return 2
 
-    grid_frames = [capture_grids(eng, channels)]
-    ent_frames = [capture_entities(eng)]
-    for i in range(1, (n_frames - 1) * args.stride + 1):
-        eng.step()
-        if i % args.stride == 0:
-            grid_frames.append(capture_grids(eng, channels))
-            ent_frames.append(capture_entities(eng))
+    try:
+        first_grids = capture_grids(eng, channels)
+        eff_channels = [c for c in channels if c in first_grids]
+        missing = [c for c in channels if c not in first_grids]
+        if missing:
+            print(
+                f"[viz-export] 通道不可用已跳过 {missing}（源缺键/形状不符）；实际导出 {eff_channels}",
+                file=sys.stderr,
+            )
+        if not eff_channels:
+            print("[viz-export] 所有请求通道均不可用，放弃导出", file=sys.stderr)
+            return 2
+        if args.ticks % args.stride:
+            print(
+                f"[viz-export] 注：ticks={args.ticks} 非 stride={args.stride} 整数倍 ⇒ "
+                f"末 {args.ticks % args.stride} tick 无采样帧（帧轴止于 +{(n_frames - 1) * args.stride}）",
+                file=sys.stderr,
+            )
+        grid_frames = [first_grids]
+        ent_frames = [capture_entities(eng)]
+        for i in range(1, args.ticks + 1):
+            eng.step()
+            if i % args.stride == 0:
+                grid_frames.append(capture_grids(eng, eff_channels))
+                ent_frames.append(capture_entities(eng))
+    except DatapackError as e:
+        print(f"[viz-export] 错误：{e}", file=sys.stderr)
+        return 2
 
     out = Path(args.out)
     (out / "frames").mkdir(parents=True, exist_ok=True)
     (out / "entities").mkdir(parents=True, exist_ok=True)
 
     ch_meta = []
-    for key in channels:
+    for key in eff_channels:
         scale = _scale_from_samples(
             np.concatenate([_subsample(f[key]) for f in grid_frames])
         )
@@ -177,6 +235,7 @@ def main(argv=None) -> int:
         "entities": {
             "columns": list(ENTITY_COLUMNS),
             "dtype": "float32",
+            "subdiv": int(eng.config.subpos.subdiv),  # 契约 v0 修订1：sub_r/sub_c 为亚格绝对坐标
             "norm": {k: {kk: v[kk] for kk in ("p_lo", "p_hi")} for k, v in ent_norm.items()},
         },
         "source": {
@@ -196,7 +255,7 @@ def main(argv=None) -> int:
 
     print(
         f"[viz-export] OK: {out}｜世界 {rows}x{cols}｜tick {meta['tick']['start']}→{meta['tick']['end']}"
-        f" stride={args.stride}｜帧 {n_frames}｜通道 {channels}｜引擎 {meta['source']['engine']}"
+        f" stride={args.stride}｜帧 {n_frames}｜通道 {eff_channels}｜引擎 {meta['source']['engine']}"
     )
     return 0
 

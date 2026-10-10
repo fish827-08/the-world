@@ -37,6 +37,12 @@ def main(argv=None) -> int:
     n_cells = int(meta["world"]["n_cells"])
     if rows * cols != n_cells:
         fails.append(f"rows*cols({rows * cols}) != n_cells({n_cells})")
+    tk = meta.get("tick", {})
+    if int(tk.get("end", -1)) != int(tk["start"]) + (n_frames - 1) * int(tk["stride"]):
+        fails.append(
+            f"tick 轴不自洽：end={tk.get('end')} != start + (n_frames-1)*stride"
+            f" = {int(tk['start']) + (n_frames - 1) * int(tk['stride'])}"
+        )
 
     for ch in meta.get("channels", []):
         key = ch["key"]
@@ -60,6 +66,14 @@ def main(argv=None) -> int:
             fails.append(f"ch_{key}: scale 无效 {ch.get('scale')}")
 
     ed = root / "entities"
+    ent_cols = meta.get("entities", {}).get("columns", [])
+    rec = 4 * (len(ent_cols) if ent_cols else 7)  # v0 契约 = 7 列 × f32
+    sd = meta.get("entities", {}).get("subdiv")
+    if sd is None:
+        warns.append("meta.entities.subdiv 缺失（旧包 ⇒ 前端回退格中心；新包应带，契约 v0 修订1）")
+    elif not (isinstance(sd, (int, float)) and int(sd) == sd and int(sd) >= 1):
+        fails.append(f"meta.entities.subdiv 非法: {sd!r}")
+        sd = None
     if not ed.is_dir():
         fails.append("缺 entities/ 目录")
     else:
@@ -70,8 +84,8 @@ def main(argv=None) -> int:
             if p.name != f"{i:05d}.f32":
                 fails.append(f"entities: 命名不连续 -> {p.name}")
                 break
-            if p.stat().st_size % 28 != 0:
-                fails.append(f"entities/{p.name}: 大小 {p.stat().st_size} 非 28 倍数（7×f32）")
+            if p.stat().st_size % rec != 0:
+                fails.append(f"entities/{p.name}: 大小 {p.stat().st_size} 非 {rec} 倍数（{rec // 4}×f32）")
         for p in fs[: min(3, len(fs))]:
             if p.stat().st_size:
                 a = np.fromfile(p, dtype="<f4")
@@ -81,6 +95,18 @@ def main(argv=None) -> int:
                     flat = a[0::7]
                     if flat.size and (flat.min() < 0 or flat.max() >= n_cells):
                         fails.append(f"entities/{p.name}: flat 越界 [{flat.min()}, {flat.max()}]")
+                    if sd is not None:
+                        sr, sc = a[1::7], a[2::7]
+                        if sr.size and (sr.min() < 0 or sr.max() >= rows * sd):
+                            fails.append(
+                                f"entities/{p.name}: sub_r 越界 [{sr.min()}, {sr.max()}]"
+                                f"（应 ⊆ [0, {rows * int(sd)})，subdiv={int(sd)}）"
+                            )
+                        if sc.size and (sc.min() < 0 or sc.max() >= cols * sd):
+                            fails.append(
+                                f"entities/{p.name}: sub_c 越界 [{sc.min()}, {sc.max()}]"
+                                f"（应 ⊆ [0, {cols * int(sd)})，subdiv={int(sd)}）"
+                            )
 
     if not (root / "series.csv").exists():
         warns.append("无 series.csv（可选件）")
