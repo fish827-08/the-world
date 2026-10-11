@@ -11,8 +11,13 @@ export const frameFileName = (k: number): string => String(k).padStart(5, "0");
 
 const withSlash = (base: string): string => (base.endsWith("/") ? base : `${base}/`);
 
-async function fetchOrThrow(url: string, what: string, signal?: AbortSignal): Promise<Response> {
-  const res = await fetch(url, { signal });
+async function fetchOrThrow(
+  url: string,
+  what: string,
+  signal?: AbortSignal,
+  cache?: RequestCache,
+): Promise<Response> {
+  const res = await fetch(url, { signal, cache });
   if (!res.ok) throw new Error(`${what} 加载失败：HTTP ${res.status}（${url}）`);
   // dev/preview 静态服务对缺失路径会 SPA 兜底返回 index.html ⇒ 必须挡掉，防把 HTML 当数据
   if ((res.headers.get("content-type") ?? "").includes("text/html")) {
@@ -21,9 +26,14 @@ async function fetchOrThrow(url: string, what: string, signal?: AbortSignal): Pr
   return res;
 }
 
-/** meta.json → Meta；不认识的大版本报错，未知字段忽略（契约 §0） */
-export async function loadMeta(base: string, signal?: AbortSignal): Promise<Meta> {
-  const res = await fetchOrThrow(`${withSlash(base)}meta.json`, "meta.json", signal);
+/** meta.json → Meta；不认识的大版本报错，未知字段忽略（契约 §0）。
+ *  实时监控传 `cache="no-store"` 以每轮拿到增长后的 n_frames。 */
+export async function loadMeta(
+  base: string,
+  signal?: AbortSignal,
+  cache?: RequestCache,
+): Promise<Meta> {
+  const res = await fetchOrThrow(`${withSlash(base)}meta.json`, "meta.json", signal, cache);
   const meta = (await res.json()) as Meta;
   if (!String(meta.contract_version ?? "").startsWith("v0")) {
     throw new Error(`数据包契约版本不支持：${meta.contract_version}（前端支持 v0）`);
@@ -37,9 +47,10 @@ export async function loadGridFrame(
   key: string,
   k: number,
   signal?: AbortSignal,
+  cache?: RequestCache,
 ): Promise<Uint8Array> {
   const url = `${withSlash(base)}frames/ch_${key}/${frameFileName(k)}.bin`;
-  const res = await fetchOrThrow(url, `通道帧 ${key}/${frameFileName(k)}`, signal);
+  const res = await fetchOrThrow(url, `通道帧 ${key}/${frameFileName(k)}`, signal, cache);
   return new Uint8Array(await res.arrayBuffer());
 }
 
@@ -51,9 +62,10 @@ export async function loadEntities(
   base: string,
   k: number,
   signal?: AbortSignal,
+  cache?: RequestCache,
 ): Promise<Float32Array> {
   const url = `${withSlash(base)}entities/${frameFileName(k)}.f32`;
-  const res = await fetchOrThrow(url, `实体帧 ${frameFileName(k)}`, signal);
+  const res = await fetchOrThrow(url, `实体帧 ${frameFileName(k)}`, signal, cache);
   const buf = await res.arrayBuffer();
   const dv = new DataView(buf);
   const n = Math.floor(buf.byteLength / 4);
@@ -68,8 +80,12 @@ export interface SeriesData {
 }
 
 /** series.csv（可选）→ SeriesData；缺失（404 或 SPA 兜底页）⇒ null（不是错误） */
-export async function loadSeries(base: string, signal?: AbortSignal): Promise<SeriesData | null> {
-  const res = await fetch(`${withSlash(base)}series.csv`, { signal });
+export async function loadSeries(
+  base: string,
+  signal?: AbortSignal,
+  cache?: RequestCache,
+): Promise<SeriesData | null> {
+  const res = await fetch(`${withSlash(base)}series.csv`, { signal, cache });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`series.csv 加载失败：HTTP ${res.status}`);
   if ((res.headers.get("content-type") ?? "").includes("text/html")) return null;

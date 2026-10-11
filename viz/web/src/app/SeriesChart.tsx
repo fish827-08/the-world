@@ -1,21 +1,40 @@
 /**
- * ECharts 仪表盘 —— 读 series.csv（可选文件），每个指标一张独立 y 轴小折线图，
- * 与播放器联动：黄色虚线 = 当前 tick。
- * 按需引入（LineChart + Grid/Tooltip/MarkLine/DataZoom）。
+ * A5 · 曲线分析仪表盘（ECharts）。
+ *
+ * 能力（对齐任务书）：
+ *  1) 从 series.csv **自动发现数值列**（metrics.discoverNumericColumns，不硬编码列集）；
+ *  2) **列名别名映射**做展示（metrics.labelOf：population|N|pop→"种群" 等）；
+ *  3) 保留：多选 chips / markLine tick 联动 / dataZoom / LTTB 抽样；
+ *  4) 新增：**trait 漂移视图**（useConsole.traitDrift，来自 manifest.summary.trait_drift）；
+ *  5) 新增：**多 run 对比**（useConsole.compare，叠加多个数据包/run 的同一列序列）；
+ *  6) 为 **C0 能量守恒残差**与**斑块类型占比**预留指标位（metrics.isReserved：列存在即置顶渲染）。
+ *
+ * 数据源：主序列 = useViz.series（当前离线包 / 实时流）；对比序列 = useConsole.compare。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { JSX } from "react";
 import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
 import {
   DataZoomComponent,
   GridComponent,
+  LegendComponent,
   MarkLineComponent,
   TooltipComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import type { EChartsCoreOption } from "echarts/core";
-import { seriesColumn } from "./loader";
 import { useCurrentTick, useViz } from "./store";
+import { useConsole, type TraitSeries } from "./console";
+import { dataPackUrl } from "./config";
+import {
+  colXY,
+  discoverNumericColumns,
+  isReserved,
+  labelOf,
+  orderColumns,
+  reservedGroup,
+} from "./metrics";
 
 echarts.use([
   LineChart,
@@ -23,25 +42,13 @@ echarts.use([
   TooltipComponent,
   MarkLineComponent,
   DataZoomComponent,
+  LegendComponent,
   CanvasRenderer,
 ]);
 
-/** 默认优先展示的列（存在才启用）；其余数值列按表头顺序补位 */
-const METRIC_PRIORITY = [
-  "pop",
-  "global_sat",
-  "abs_food",
-  "abs_cap",
-  "n_patches",
-  "mean_energy",
-  "sum_resource",
-  "ms_per_tick",
-  "trust",
-  "max_gen",
-];
-const NON_METRIC_COLS = new Set(["tick", "seed", "arm"]);
-const MAX_CHIPS = 14;
+const MAX_CHIPS = 18;
 const DEFAULT_PICKS = 2;
+const PRIMARY_COLOR = "#ffd166";
 
 function fmt(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
@@ -75,55 +82,80 @@ function markLineOf(tick: number) {
   return {
     symbol: "none",
     silent: true,
-    lineStyle: { color: "#ffd166", width: 1, type: "dashed" },
+    lineStyle: { color: PRIMARY_COLOR, width: 1, type: "dashed" },
     label: {
       show: true,
       formatter: String(tick),
       position: "insideEndTop",
       fontSize: 10,
-      color: "#ffd166",
+      color: PRIMARY_COLOR,
     },
     data: [{ xAxis: tick }],
   };
 }
 
-function makeOption(name: string, x: number[], y: number[], markTick: number | null): EChartsCoreOption {
+/** 一条待绘曲线 */
+interface Line {
+  name: string;
+  color: string;
+  x: number[];
+  y: number[];
+  mark?: boolean; // 是否携带当前 tick 指示线（仅主序列）
+}
+
+function makeOption(lines: Line[], markTick: number | null): EChartsCoreOption {
+  const multi = lines.length > 1;
   return {
     animation: false,
-    grid: { left: 56, right: 14, top: 10, bottom: 20 },
+    grid: { left: 56, right: 14, top: multi ? 22 : 10, bottom: 20 },
+    legend: multi
+      ? {
+          show: true,
+          top: 0,
+          right: 4,
+          itemWidth: 12,
+          itemHeight: 8,
+          textStyle: { color: "#8b93a3", fontSize: 10 },
+          data: lines.map((l) => l.name),
+        }
+      : { show: false },
     tooltip: { trigger: "axis", confine: true },
     xAxis: { type: "value", min: "dataMin", max: "dataMax" },
     yAxis: { type: "value", scale: true },
     dataZoom: [{ type: "inside", filterMode: "none" }],
-    series: [
-      {
-        id: name,
-        name,
-        type: "line",
-        showSymbol: false,
-        sampling: "lttb",
-        lineStyle: { width: 1.2 },
-        data: x.map((xv, i) => [xv, y[i]]),
-        markLine: markTick !== null ? markLineOf(markTick) : undefined,
-      },
-    ],
+    series: lines.map((l) => ({
+      id: l.name,
+      name: l.name,
+      type: "line",
+      showSymbol: false,
+      sampling: "lttb",
+      lineStyle: { width: 1.3, color: l.color },
+      itemStyle: { color: l.color },
+      data: l.x.map((xv, i) => [xv, l.y[i]]),
+      markLine: l.mark && markTick !== null ? markLineOf(markTick) : undefined,
+    })),
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* 通用折线卡（主序列 + 对比叠加）                                       */
+/* ------------------------------------------------------------------ */
+
 interface MetricChartProps {
-  name: string;
-  x: number[];
-  y: number[];
+  label: string;
+  lines: Line[];
   markTick: number | null;
-  onRemove: () => void;
+  reserved?: boolean;
+  group?: string | null;
+  onRemove?: () => void;
 }
 
-function MetricChart({ name, x, y, markTick, onRemove }: MetricChartProps) {
+function LineChartCard({ label, lines, markTick, reserved, group, onRemove }: MetricChartProps): JSX.Element {
   const plotRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ReturnType<typeof echarts.init> | null>(null);
   const markTickRef = useRef(markTick);
+  const primary = lines[0];
 
-  // 经 ref 把最新 tick 带入重建 effect（重建不随 tick 触发，避免每 tick 整图重建）
   useEffect(() => {
     markTickRef.current = markTick;
   }, [markTick]);
@@ -142,98 +174,215 @@ function MetricChart({ name, x, y, markTick, onRemove }: MetricChartProps) {
     };
   }, []);
 
-  // 数据/名称变化：整图重建（经 markTickRef 带入当前指示线）
+  // lines 变化：整图重建（带入当前指示线）
   useEffect(() => {
-    chartRef.current?.setOption(makeOption(name, x, y, markTickRef.current), { notMerge: true });
-  }, [name, x, y]);
+    chartRef.current?.setOption(makeOption(lines, markTickRef.current), { notMerge: true });
+  }, [lines]);
 
-  // 仅 tick 变化：合并更新指示线（series 按 id 匹配）
+  // 仅 tick 变化：合并更新主序列指示线
   useEffect(() => {
-    if (markTick === null) return;
-    chartRef.current?.setOption({ series: [{ id: name, markLine: markLineOf(markTick) }] });
-  }, [name, markTick]);
+    if (markTick === null || !primary) return;
+    chartRef.current?.setOption({
+      series: [{ id: primary.name, markLine: markLineOf(markTick) }],
+    });
+  }, [markTick, primary]);
 
-  const latest = valueAt(x, y, markTick);
+  const latest = primary ? valueAt(primary.x, primary.y, markTick) : null;
 
   return (
-    <div className="metric-card">
+    <div className={`metric-card${reserved ? " metric-reserved" : ""}`}>
       <div className="metric-head">
-        <span className="metric-name">{name}</span>
+        <span className="metric-name">{label}</span>
+        {reserved ? <span className="rsv-tag">预留 · {group}</span> : null}
         <span className="metric-value">{fmt(latest)}</span>
-        <button type="button" className="metric-close" onClick={onRemove} title="移除该指标">
-          ×
-        </button>
+        {onRemove ? (
+          <button type="button" className="metric-close" onClick={onRemove} title="移除该指标">
+            ×
+          </button>
+        ) : null}
       </div>
       <div className="metric-plot" ref={plotRef} />
     </div>
   );
 }
 
-export function SeriesChart() {
+/* ------------------------------------------------------------------ */
+/* trait 漂移视图                                                       */
+/* ------------------------------------------------------------------ */
+
+const TRAIT_COLORS = ["#4cc9f0", "#ffd166", "#57cc99", "#c792ea", "#f78c6c", "#82aaff"];
+
+function TraitDriftChart({ data, markTick }: { data: TraitSeries[]; markTick: number | null }): JSX.Element {
+  const lines = useMemo<Line[]>(
+    () =>
+      data.map((d, i) => ({
+        name: d.name,
+        color: TRAIT_COLORS[i % TRAIT_COLORS.length],
+        x: d.points.map((p) => p[0]),
+        y: d.points.map((p) => p[1]),
+        mark: i === 0,
+      })),
+    [data],
+  );
+  return <LineChartCard label="trait 漂移" lines={lines} markTick={markTick} />;
+}
+
+/* ------------------------------------------------------------------ */
+/* 多 run 对比管理器                                                    */
+/* ------------------------------------------------------------------ */
+
+function CompareManager(): JSX.Element {
+  const datapacks = useConsole((s) => s.datapacks);
+  const compare = useConsole((s) => s.compare);
+  const addCompare = useConsole((s) => s.addCompare);
+  const removeCompare = useConsole((s) => s.removeCompare);
+  const clearCompare = useConsole((s) => s.clearCompare);
+
+  const addable = useMemo(
+    () =>
+      datapacks.filter(
+        (p) => !p.error && p.stats?.has_series_csv && !compare.some((c) => c.label === p.name),
+      ),
+    [datapacks, compare],
+  );
+
+  return (
+    <div className="cmp-mgr">
+      <div className="cmp-hd">
+        <span>多 run 对比</span>
+        {compare.length > 0 && (
+          <button type="button" className="metric-close" onClick={clearCompare} title="清空对比">
+            ×
+          </button>
+        )}
+      </div>
+      {compare.length > 0 && (
+        <div className="cmp-list">
+          {compare.map((c) => (
+            <span className="cmp-entry" key={c.label} style={{ borderColor: c.color }}>
+              <i className="cmp-sw" style={{ background: c.color }} />
+              <span className="cmp-label">{c.label}</span>
+              {c.loading ? (
+                <span className="cmp-state">…</span>
+              ) : c.error ? (
+                <span className="cmp-state bad" title={c.error}>
+                  ✕
+                </span>
+              ) : (
+                <span className="cmp-state">{c.data ? `${c.data.rows.length}行` : "空"}</span>
+              )}
+              <button
+                type="button"
+                className="metric-close"
+                onClick={() => removeCompare(c.label)}
+                title="移除"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {addable.length > 0 ? (
+        <div className="cmp-add">
+          <span className="cmp-add-hd">叠加数据包：</span>
+          {addable.slice(0, 12).map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className="chip"
+              onClick={() => void addCompare(p.name, dataPackUrl(p.kind, p.name))}
+              title={`${p.kind}/${p.name}`}
+            >
+              + {p.name}
+            </button>
+          ))}
+        </div>
+      ) : (
+        compare.length === 0 && (
+          <div className="cmp-empty">
+            暂无可叠加的数据包（需含 series.csv）。在「控制台 › 数据包」刷新索引后再试。
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 主组件                                                               */
+/* ------------------------------------------------------------------ */
+
+export function SeriesChart(): JSX.Element {
   const series = useViz((s) => s.series);
   const tick = useCurrentTick();
+  const compare = useConsole((s) => s.compare);
+  const traitDrift = useConsole((s) => s.traitDrift);
   const [selected, setSelected] = useState<string[]>([]);
 
-  const numericColumns = useMemo(() => {
-    if (!series) return [];
-    const idx = new Map(series.columns.map((c, i) => [c, i]));
-    return series.columns.filter((c) => {
-      if (NON_METRIC_COLS.has(c)) return false;
-      const i = idx.get(c)!;
-      for (let r = 0; r < Math.min(5, series.rows.length); r += 1) {
-        if (Number.isFinite(series.rows[r][i])) return true;
-      }
-      return false;
-    });
-  }, [series]);
+  const numericColumns = useMemo(() => discoverNumericColumns(series), [series]);
+  const ordered = useMemo(() => orderColumns(numericColumns), [numericColumns]);
+  const reservedCols = useMemo(() => ordered.filter(isReserved), [ordered]);
+  const chipColumns = useMemo(() => ordered.slice(0, MAX_CHIPS), [ordered]);
 
-  const chipColumns = useMemo(() => {
-    const pri = METRIC_PRIORITY.filter((m) => numericColumns.includes(m));
-    const rest = numericColumns.filter((c) => !pri.includes(c));
-    return [...pri, ...rest].slice(0, MAX_CHIPS);
-  }, [numericColumns]);
-
-  // 列集变化（装载/切换数据包）⇒ 重置为默认前几项（渲染期校正，替代 setState-in-effect）
+  // 列集变化 ⇒ 重置为「预留列 + 默认前几项」（渲染期校正，替代 setState-in-effect）
   const [prevChips, setPrevChips] = useState(chipColumns);
   if (prevChips !== chipColumns) {
     setPrevChips(chipColumns);
-    setSelected(chipColumns.slice(0, DEFAULT_PICKS));
+    const nonReserved = chipColumns.filter((c) => !isReserved(c));
+    setSelected([...reservedCols, ...nonReserved.slice(0, DEFAULT_PICKS)]);
   }
 
-  const shown = useMemo(
-    () => numericColumns.filter((c) => selected.includes(c)),
-    [numericColumns, selected],
-  );
+  const shown = useMemo(() => {
+    const set = new Set(selected);
+    for (const r of reservedCols) set.add(r); // 预留位强制展示
+    return ordered.filter((c) => set.has(c));
+  }, [ordered, selected, reservedCols]);
 
-  const xValues = useMemo((): number[] => {
-    if (!series) return [];
-    const ti = series.columns.indexOf("tick");
-    return series.rows.map((r, i) => (ti >= 0 ? r[ti] : i));
-  }, [series]);
-
-  const yMap = useMemo(() => {
-    const m = new Map<string, number[]>();
-    if (series) for (const c of shown) m.set(c, seriesColumn(series, c));
+  // 主序列 + 对比叠加：每列一组 lines
+  const linesByCol = useMemo(() => {
+    const m = new Map<string, Line[]>();
+    if (!series) return m;
+    for (const col of shown) {
+      const p = colXY(series, col);
+      const lines: Line[] = [
+        { name: labelOf(col), color: PRIMARY_COLOR, x: p.x, y: p.y, mark: true },
+      ];
+      for (const c of compare) {
+        if (!c.data) continue;
+        const q = colXY(c.data, col);
+        if (q.x.length === 0) continue;
+        lines.push({ name: `${labelOf(col)} · ${c.label}`, color: c.color, x: q.x, y: q.y });
+      }
+      m.set(col, lines);
+    }
     return m;
-  }, [series, shown]);
+  }, [series, shown, compare]);
 
-  const toggle = (name: string) => {
-    setSelected((sel) =>
-      sel.includes(name) ? sel.filter((s) => s !== name) : [...sel, name],
-    );
+  const toggle = (name: string): void => {
+    if (isReserved(name)) return; // 预留位不可移除
+    setSelected((sel) => (sel.includes(name) ? sel.filter((s) => s !== name) : [...sel, name]));
   };
+
+  const hasData = !!series && series.rows.length > 0;
 
   return (
     <div className="charts-panel">
       <div className="panel-head">
-        <h2>指标仪表盘</h2>
+        <h2>曲线分析</h2>
         <span className="dim small">
-          {series ? `${series.rows.length} 行 · 当前 tick ${tick ?? "—"}` : "series.csv（可选）"}
+          {hasData
+            ? `${series!.rows.length} 行 · ${numericColumns.length} 数值列 · tick ${tick ?? "—"}`
+            : "series.csv（可选）"}
         </span>
       </div>
-      {!series || series.rows.length === 0 ? (
+
+      <CompareManager />
+
+      {!hasData ? (
         <div className="panel-empty">
           数据包无 series.csv 或为空 —— 序列仪表盘不可用（数据包仍可播放）。
+          {traitDrift && traitDrift.length > 0 ? " trait 漂移视图仍可用（见下）。" : ""}
         </div>
       ) : (
         <>
@@ -242,10 +391,12 @@ export function SeriesChart() {
               <button
                 key={c}
                 type="button"
-                className={`chip ${selected.includes(c) ? "on" : ""}`}
+                className={`chip ${shown.includes(c) ? "on" : ""}${isReserved(c) ? " chip-rsv" : ""}`}
                 onClick={() => toggle(c)}
+                title={isReserved(c) ? `${c}（预留指标位，固定展示）` : c}
               >
-                {c}
+                {labelOf(c)}
+                {labelOf(c) !== c ? <span className="chip-raw"> {c}</span> : null}
               </button>
             ))}
             {numericColumns.length > MAX_CHIPS && (
@@ -253,20 +404,29 @@ export function SeriesChart() {
             )}
           </div>
           <div className="charts">
-            {shown.map((m) => (
-              <MetricChart
-                key={m}
-                name={m}
-                x={xValues}
-                y={yMap.get(m) ?? []}
+            {shown.map((col) => (
+              <LineChartCard
+                key={col}
+                label={labelOf(col)}
+                lines={linesByCol.get(col) ?? []}
                 markTick={tick}
-                onRemove={() => toggle(m)}
+                reserved={isReserved(col)}
+                group={reservedGroup(col)}
+                onRemove={isReserved(col) ? undefined : () => toggle(col)}
               />
             ))}
-            {shown.length === 0 && <div className="panel-empty">未选择指标（点上方列名启用）</div>}
+            {shown.length === 0 && (
+              <div className="panel-empty">未选择指标（点上方列名启用）</div>
+            )}
           </div>
         </>
       )}
+
+      {traitDrift && traitDrift.length > 0 ? (
+        <div className="charts" style={{ borderTop: "1px solid var(--line)" }}>
+          <TraitDriftChart data={traitDrift} markTick={tick} />
+        </div>
+      ) : null}
     </div>
   );
 }
