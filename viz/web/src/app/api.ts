@@ -161,6 +161,8 @@ export interface ExperimentCreateBody {
   name?: string | null;
   script?: string;
   extra_args?: string[];
+  /** 结构化参数（键须在 GET /param-schema 白名单内；留空 = 用脚本默认） */
+  params?: Record<string, number | boolean | string>;
   live?: boolean;
 }
 
@@ -375,6 +377,49 @@ export const getDatapacks = (
   signal?: AbortSignal,
 ): Promise<DataPackIndex> =>
   request<DataPackIndex>(`/datapacks${qs(params)}`, { signal });
+
+/* ---------------- 实验参数 schema（启动表单“高级参数”渲染依据） -------- */
+
+export type ParamType = "int" | "float" | "bool" | "choice";
+
+/** GET /param-schema 单个参数项（default 恒为 null ⇒ 留空不传旗标，用脚本默认） */
+export interface ParamSchemaItem {
+  key: string;
+  /** 脚本旗标（kebab-case，如 --diff-du-dv） */
+  flag: string;
+  label: string;
+  type: ParamType;
+  default: number | boolean | string | null;
+  min: number | null;
+  max: number | null;
+  choices: string[] | null;
+  unit: string | null;
+  group: string;
+  /** 如“覆盖默认将产生新配置，读数不与历史可比” */
+  warning: string | null;
+}
+
+/** 参数分组元数据（collapsed = 前端默认折叠，如自发分化组） */
+export interface ParamGroupMeta {
+  key: string;
+  label: string;
+  note: string | null;
+  collapsed: boolean;
+}
+
+/** GET /param-schema 响应（未知 script ⇒ groups/params 均空，不报错） */
+export interface ParamSchema {
+  script: string;
+  script_exists: boolean;
+  groups: ParamGroupMeta[];
+  params: ParamSchemaItem[];
+}
+
+export const getParamSchema = (
+  script: string,
+  signal?: AbortSignal,
+): Promise<ParamSchema> =>
+  request<ParamSchema>(`/param-schema${qs({ script })}`, { signal });
 
 /* ---------------- 快照加载（快照 npz → 导出 v0 数据包 → 载入回放） -------- */
 

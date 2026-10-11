@@ -9,7 +9,8 @@
 GET /datapacks（空/索引 viz+live/kind 过滤/坏 kind）、POST /experiments 的
 四类拒绝（未知 device / 裸 rows-cols / 缺字段 / 脚本不存在）、真拉起（非 live 与
 live-supervise 两条路径）、POST /snapshots（inproc 真引擎 / live 子进程 / 404 / 409）、
-POST /experiments/{id}/cancel。
+POST /experiments/{id}/cancel、GET /param-schema（分组/类型/未知 script）、
+params 翻译（布尔/数值/choice/未知键 422/越界 422）。
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ import observatory.api as api
 from tools.device_presets import preset_names
 
 _EXPECTED_PATHS = {
-    "/health", "/devices", "/experiments", "/experiments/{run_id}",
+    "/health", "/devices", "/param-schema", "/experiments", "/experiments/{run_id}",
     "/experiments/{run_id}/cancel", "/snapshots", "/snapshots/export", "/datapacks",
 }
 
@@ -51,6 +52,54 @@ def main(argv=None):
         "argv": list(argv if argv is not None else sys.argv[1:]),
     }, ensure_ascii=False), encoding="utf-8")
     print("FAKE-RUN-OK device=%s seed=%s ticks=%s" % (a.device, a.seed, a.ticks))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+#: 假脚本（params 契约）：声明全部旗标契约参数，marker 记录解析结果与原始 argv
+_FAKE_PARAMS_SCRIPT = '''"""smoke 用假实验脚本（params 契约）：解析契约旗标，写 marker，秒退。"""
+import argparse, json, sys
+from pathlib import Path
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--device")
+    ap.add_argument("--seed", type=int)
+    ap.add_argument("--ticks", type=int)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--sample", type=int, default=None)
+    ap.add_argument("--pop", type=int, default=None)
+    ap.add_argument("--sun-budget", type=float, default=None)
+    ap.add_argument("--stress-rate", type=float, default=None)
+    ap.add_argument("--abiotic-budget", action="store_true")
+    ap.add_argument("--area-weighted", action="store_true")
+    ap.add_argument("--abiotic-stress", action="store_true")
+    ap.add_argument("--patch-mode", choices=["seed_dilate", "field_threshold"], default=None)
+    ap.add_argument("--patch-coverage", type=float, default=None)
+    ap.add_argument("--env", action="store_true")
+    ap.add_argument("--diff", action="store_true")
+    ap.add_argument("--diff-f", type=float, default=None)
+    ap.add_argument("--diff-k", type=float, default=None)
+    ap.add_argument("--diff-du-dv", type=float, default=None)
+    ap.add_argument("--diff-soc", action="store_true")
+    a = ap.parse_args(argv if argv is not None else sys.argv[1:])
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "marker.json").write_text(json.dumps({
+        "pop": a.pop, "sun_budget": a.sun_budget, "stress_rate": a.stress_rate,
+        "sample": a.sample,
+        "abiotic_budget": a.abiotic_budget, "area_weighted": a.area_weighted,
+        "abiotic_stress": a.abiotic_stress, "patch_mode": a.patch_mode,
+        "patch_coverage": a.patch_coverage, "env": a.env, "diff": a.diff,
+        "diff_f": a.diff_f, "diff_k": a.diff_k, "diff_du_dv": a.diff_du_dv,
+        "diff_soc": a.diff_soc,
+        "argv": list(argv if argv is not None else sys.argv[1:]),
+    }, ensure_ascii=False), encoding="utf-8")
+    print("FAKE-PARAMS-OK", flush=True)
     return 0
 
 
@@ -234,6 +283,65 @@ def test_list_experiments_bad_status_filter(client) -> None:
     r = client.get("/experiments", params={"status": "exploded"})
     assert r.status_code == 400
     assert r.json()["error_code"] == "invalid_request"
+
+
+# ---- 重启回放（rehydrate 与持久化对称）---------------------------------------
+
+
+def _write_ledger(data_root: Path, run_id: str, **extra) -> Path:
+    """手写一条磁盘 run.json（模拟服务重启前 / 旧版本写出的持久化形状）。"""
+    out_dir = data_root / "live" / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ledger = {
+        "run_id": run_id, "name": run_id, "device": preset_names()[0],
+        "seed": 7, "ticks": 3, "arm": None,
+        "script": "experiments/_fake_.py", "args": [], "command": [],
+        "live": False, "out_dir": str(out_dir),
+        "log_path": str(out_dir / api._LOG_NAME),
+        "status": api.STATUS_FINISHED, "pid": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "started_at": "2026-01-01T00:00:01+00:00",
+        "finished_at": "2026-01-01T00:00:02+00:00",
+        "returncode": 0, "ended_reason": "exit_ok", "note": None,
+        "snapshots": [],
+    }
+    ledger.update(extra)
+    path = out_dir / api._RUN_LEDGER
+    path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_rehydrate_ledger_with_log_tail_field(client, data_root) -> None:
+    """修复回归：persist 写出的台账含 log_tail（构造器不收）⇒ 修复前整条 run
+    被当坏台账跳过、重启后 GET /experiments 恒 0 条；修复后必须完整复原。"""
+    _write_ledger(data_root, "replay-log-tail", log_tail=["old", "lines"])
+    api.REGISTRY.reset()                     # 模拟服务重启（重置幂等标志）
+    assert api.REGISTRY.rehydrate() >= 1
+    body = client.get("/experiments").json()
+    rows = {r["run_id"]: r for r in body["runs"]}
+    assert "replay-log-tail" in rows, body
+    row = rows["replay-log-tail"]
+    assert row["status"] == api.STATUS_FINISHED
+    assert row["returncode"] == 0 and row["ended_reason"] == "exit_ok"
+    assert row["seed"] == 7 and row["ticks"] == 3
+
+
+def test_rehydrate_ledger_with_unknown_fields(client, data_root) -> None:
+    """向前兼容：台账带未知字段（log_tail/未来新字段/_ 开头进程内字段）
+    ⇒ 剥离不崩，run 仍完整列出、状态语义不损。"""
+    _write_ledger(
+        data_root, "replay-unknown",
+        log_tail=["x"], future_field={"v": 2}, another_unknown=[1, 2, 3],
+        _proc="bogus", _log_fh=1, _cancelled=True,
+    )
+    api.REGISTRY.reset()
+    assert api.REGISTRY.rehydrate() >= 1
+    body = client.get("/experiments").json()
+    row = next(r for r in body["runs"] if r["run_id"] == "replay-unknown")
+    assert row["status"] == api.STATUS_FINISHED
+    assert row["ended_reason"] == "exit_ok" and row["returncode"] == 0
+    assert "future_field" not in row           # 未知字段不进内存态/响应
+    assert row["log_tail"] is None             # 视图字段：GET 时现算，缺省 None
 
 
 # ---- GET /datapacks ---------------------------------------------------------
@@ -424,6 +532,165 @@ def test_post_experiments_live_mode_uses_supervisor(client, tmp_path) -> None:
     assert cancel.json()["returncode"] is not None
     # 已结束 ⇒ 再取消要 409
     assert client.post(f"/experiments/{run_id}/cancel").status_code == 409
+
+
+# ---- GET /param-schema 与 params 翻译 ----------------------------------------
+
+
+def test_param_schema_groups_and_types(client) -> None:
+    r = client.get("/param-schema", params={"script": "experiments/run_c0_energy.py"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["script"] == "experiments/run_c0_energy.py"
+    assert {g["key"] for g in body["groups"]} == {"basic", "c0_world", "terrain", "diffusion"}
+    diff = next(g for g in body["groups"] if g["key"] == "diffusion")
+    assert diff["collapsed"] is True
+    assert "脚本报告" in diff["note"]
+    assert "分化模型" in diff["note"]
+
+    params = body["params"]
+    assert len(params) == 14
+    # 每项字段齐全：key/flag/label/type/default/min/max/choices/unit/group/warning
+    for p in params:
+        assert p["flag"] == "--" + p["key"].replace("_", "-")
+        assert p["type"] in ("int", "float", "bool", "choice")
+        assert p["default"] is None
+        assert p["group"] in {"basic", "c0_world", "terrain", "diffusion"}
+    by_key = {p["key"]: p for p in params}
+    pop = by_key["pop"]
+    assert pop["type"] == "int" and pop["min"] == 0 and pop["max"] == 100000
+    assert pop["unit"] == "个体" and "覆盖默认" in pop["warning"]
+    sun = by_key["sun_budget"]
+    assert sun["type"] == "float" and "> 0" in sun["warning"]
+    cov = by_key["patch_coverage"]
+    assert cov["min"] == 0 and cov["max"] == 1 and "0 < x < 1" in cov["warning"]
+    mode = by_key["patch_mode"]
+    assert mode["type"] == "choice" and mode["choices"] == ["seed_dilate", "field_threshold"]
+    dudv = by_key["diff_du_dv"]
+    assert dudv["flag"] == "--diff-du-dv" and dudv["group"] == "diffusion"
+    for k in ("abiotic_budget", "area_weighted", "abiotic_stress", "env", "diff", "diff_soc"):
+        assert by_key[k]["type"] == "bool"
+
+
+def test_param_schema_unknown_script_returns_empty(client) -> None:
+    """未知 script ⇒ 空组空参数、200 不报错（宽松，不做 fail-loud 校验）。"""
+    r = client.get("/param-schema", params={"script": "experiments/_nope_.py"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["groups"] == [] and body["params"] == []
+    assert body["script_exists"] is False
+    # 不传 script（默认 run_bare_world 未登记）同式
+    r2 = client.get("/param-schema")
+    assert r2.status_code == 200 and r2.json()["params"] == []
+
+
+def test_post_experiments_translates_params(client, data_root, tmp_path) -> None:
+    """params 翻译：布尔无值旗标 / 数值 / choice / false 不追加，追加在既有 args 之后。"""
+    # 假脚本取契约同名（params 翻译按 script 尾段文件名查 schema 登记表）
+    script = tmp_path / "run_c0_energy.py"
+    script.write_text(_FAKE_PARAMS_SCRIPT, encoding="utf-8")
+    r = client.post("/experiments", json={
+        "device": preset_names()[0], "seed": 7, "ticks": 5,
+        "script": str(script), "live": False,
+        "extra_args": ["--sample", "3"],
+        "params": {
+            "pop": 0, "sun_budget": 2.5, "stress_rate": 0.1,
+            "abiotic_budget": True, "area_weighted": False, "abiotic_stress": False,
+            "patch_mode": "field_threshold", "patch_coverage": 0.5,
+            "env": True, "diff": True,
+            "diff_f": 0.026, "diff_k": 0.056, "diff_du_dv": 0.16, "diff_soc": False,
+        },
+    })
+    assert r.status_code == 201, r.text
+    args = r.json()["args"]
+    # 追加在既有 args 之后（--sample 属 extra_args，在 params 之前）
+    assert args.index("--pop") > args.index("--sample")
+    assert args.index("--sample") > args.index("--out")
+    # 布尔 true → 无值旗标；false → 不追加
+    assert args[args.index("--pop") + 1] == "0"
+    assert args[args.index("--sun-budget") + 1] == "2.5"
+    assert args[args.index("--stress-rate") + 1] == "0.1"
+    i_ab = args.index("--abiotic-budget")   # 无值旗标：后一项不能是它的值
+    assert i_ab + 1 >= len(args) or args[i_ab + 1] not in ("True", "true")
+    assert "--area-weighted" not in args      # false → 不追加
+    assert "--abiotic-stress" not in args     # false → 不追加
+    assert "--diff-soc" not in args           # false → 不追加
+    assert args[args.index("--patch-mode") + 1] == "field_threshold"
+    assert args[args.index("--patch-coverage") + 1] == "0.5"
+    assert "--env" in args and "--diff" in args
+    assert args[args.index("--diff-f") + 1] == "0.026"
+    assert args[args.index("--diff-k") + 1] == "0.056"
+    assert args[args.index("--diff-du-dv") + 1] == "0.16"
+
+    run_id = r.json()["run_id"]
+    _wait_until(
+        lambda: client.get(f"/experiments/{run_id}").json()["status"]
+        in (api.STATUS_FINISHED, api.STATUS_FAILED),
+        timeout=120, msg=f"run {run_id} 未在限时内结束")
+    detail = client.get(f"/experiments/{run_id}").json()
+    assert detail["status"] == api.STATUS_FINISHED, detail
+    marker = json.loads((Path(detail["out_dir"]) / "marker.json").read_text(encoding="utf-8"))
+    assert marker["pop"] == 0
+    assert marker["sun_budget"] == 2.5 and marker["stress_rate"] == 0.1
+    assert marker["abiotic_budget"] is True
+    assert marker["area_weighted"] is False and marker["abiotic_stress"] is False
+    assert marker["patch_mode"] == "field_threshold" and marker["patch_coverage"] == 0.5
+    assert marker["env"] is True and marker["diff"] is True
+    assert marker["diff_f"] == 0.026 and marker["diff_k"] == 0.056
+    assert marker["diff_du_dv"] == 0.16 and marker["diff_soc"] is False
+    assert marker["sample"] == 3  # extra_args 仍在
+
+
+def test_post_experiments_params_rejects_unknown_and_out_of_range(client, tmp_path) -> None:
+    """未知键 / 越界 / 坏类型 / 坏 choice ⇒ 422 invalid_request，detail.fields 指明。
+
+    注意：resolve_script 先于 params 翻译，故 POST 层测试须带真实存在的脚本，
+    才能到 build_script_args 内的校验；422 发生在 REGISTRY.add 之前，不留 run。
+    """
+    script = tmp_path / "run_c0_energy.py"   # 同名 ⇒ 命中 schema 登记表
+    script.write_text(_FAKE_PARAMS_SCRIPT, encoding="utf-8")
+    base = {"device": preset_names()[0], "seed": 1, "ticks": 5, "script": str(script)}
+
+    def post(params: dict) -> dict:
+        return client.post("/experiments", json={**base, "params": params})
+
+    # 未知键
+    r = post({"pops": 1})
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["error_code"] == "invalid_request"
+    fields = {f["field"] for f in body["detail"]["fields"]}
+    assert "params.pops" in fields
+    # 越界（闭区间）
+    for bad in ({"pop": -1}, {"pop": 100001}, {"stress_rate": -0.1}):
+        assert post(bad).status_code == 422, bad
+    # 开区间特判：sun_budget 须 > 0；patch_coverage 须 0 < x < 1
+    assert post({"sun_budget": 0}).status_code == 422
+    assert post({"sun_budget": -3.0}).status_code == 422
+    assert post({"patch_coverage": 1.0}).status_code == 422
+    assert post({"patch_coverage": 0.0}).status_code == 422
+    # choice 非法值
+    r = post({"patch_mode": "nope"})
+    assert r.status_code == 422
+    assert "params.patch_mode" in {f["field"] for f in r.json()["detail"]["fields"]}
+    # 类型：int 收到 str / float；bool 收到 int（bool 是 int 子类 ⇒ 必须先查 bool）
+    for bad in ({"pop": "many"}, {"pop": 1.5}, {"sun_budget": "bright"},
+                {"abiotic_budget": 1}, {"diff": "yes"}):
+        assert post(bad).status_code == 422, bad
+    # 422 发生在 run 创建之前 ⇒ 不留台账残留
+    assert client.get("/experiments").json()["count"] == 0
+    # 合法边界不误伤：pop=0 / pop=max / sun_budget 恰为正 / patch_coverage 开区间内
+    # （HTTP 层要走完 201 需真拉起，边界合法性直调校验器验证）
+    schema = api._param_schema_for("experiments/run_c0_energy.py")
+    assert api.translate_params({"pop": 0, "env": False, "diff_soc": False}, schema) == [
+        "--pop", "0",
+    ]
+    args = api.translate_params({
+        "pop": 100000, "sun_budget": 1, "stress_rate": 0,
+        "patch_coverage": 0.999, "patch_mode": "seed_dilate", "env": False,
+    }, schema)
+    assert args == ["--pop", "100000", "--sun-budget", "1.0", "--stress-rate", "0.0",
+                    "--patch-mode", "seed_dilate", "--patch-coverage", "0.999"]
 
 
 # ---- POST /snapshots --------------------------------------------------------

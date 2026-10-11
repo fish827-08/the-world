@@ -242,7 +242,15 @@ class RunRegistry:
     # -- 生命周期 --
 
     def rehydrate(self) -> int:
-        """扫 `<data_root>/live/*/run.json` 复原历史 run（幂等）。"""
+        """扫 `<data_root>/live/*/run.json` 复原历史 run（幂等）。
+
+        与持久化对称：台账 = `to_dict()` 视图（含 `log_tail` 读时视图字段，
+        落盘恒 null——尾巴每次响应从 stdout.log 现算），而构造器只收状态
+        字段。故按 `dataclasses.fields(RunState)` **白名单过滤**后再构造：
+        单一真源 = 构造器签名，未知键（log_tail / 未来版本新字段 / `_` 开头
+        进程内字段）一律剥离 ⇒ 双向向前兼容（旧 API 读新台账、新 API 读旧
+        台账都安全），重启后历史 run 必然完整出现在 GET /experiments。
+        """
         with self._lock:
             if self._rehydrated:
                 return len(self._runs)
@@ -250,13 +258,11 @@ class RunRegistry:
             root = live_root()
             if not root.is_dir():
                 return 0
+            ctor_keys = {f.name for f in dataclasses.fields(RunState)}
             for ledger in sorted(root.glob(f"*/{_RUN_LEDGER}")):
                 try:
                     raw = json.loads(ledger.read_text(encoding="utf-8"))
-                    raw.pop("_proc", None)
-                    raw.pop("_log_fh", None)
-                    raw.pop("_cancelled", None)
-                    run = RunState(**raw)
+                    run = RunState(**{k: v for k, v in raw.items() if k in ctor_keys})
                 except Exception as exc:  # 坏台账不拖垮服务，但要出声
                     print(f"[api] ⚠️ 跳过坏台账 {ledger}: {exc}", file=sys.stderr, flush=True)
                     continue
@@ -412,6 +418,148 @@ def resolve_script(script: str) -> Path:
     return target
 
 
+# ---- 实验参数 schema（前端自主配置 → 旗标翻译） ------------------------------
+#
+# 旗标契约（kebab-case；布尔 = 无值旗标，数值 = --flag value）：
+#   --pop N(int≥0，0=纯场) / --sun-budget X(float>0) / --stress-rate X(float≥0) /
+#   --abiotic-budget / --area-weighted / --abiotic-stress(布尔) /
+#   --patch-mode(seed_dilate|field_threshold) / --patch-coverage X(0<x<1) / --env(布尔) /
+#   --diff / --diff-f / --diff-k / --diff-du-dv / --diff-soc(自发分化组)。
+# 个别旗标若实验脚本暂未实现，提交时脚本 argparse 会 fail-loud 报错并在 UI 展示——
+# 可接受的过渡态（schema 以契约为准，不迁就个别脚本的实现进度）。
+
+_WARN_OVERRIDE = "覆盖默认将产生新配置，读数不与历史可比"
+_WARN_DIFF_NOTE = "该组参数由分化模型定义，最终口径以脚本报告为准"
+
+#: 分组元数据（collapsed = 前端默认折叠；diffusion 组口径待脚本报告 ⇒ 默认折叠）
+_PARAM_GROUPS: list[dict[str, Any]] = [
+    {"key": "basic", "label": "基础", "note": None, "collapsed": False},
+    {"key": "c0_world", "label": "C0 世界规则", "note": None, "collapsed": False},
+    {"key": "terrain", "label": "斑块与地形", "note": None, "collapsed": False},
+    {"key": "diffusion", "label": "自发分化", "note": _WARN_DIFF_NOTE, "collapsed": True},
+]
+
+
+def _p(key: str, label: str, ptype: str, *, flag: Optional[str] = None,
+       minv: Optional[float] = None, maxv: Optional[float] = None,
+       choices: Optional[list[str]] = None, unit: Optional[str] = None,
+       group: str = "basic", warning: Optional[str] = None) -> dict[str, Any]:
+    """schema 单项构造器（default 恒为 null：留空 = 不传旗标 = 用脚本默认）。"""
+    return {"key": key, "flag": flag or ("--" + key.replace("_", "-")),
+            "label": label, "type": ptype, "default": None,
+            "min": minv, "max": maxv, "choices": choices, "unit": unit,
+            "group": group, "warning": warning}
+
+
+#: run_c0_energy.py 的参数 schema（顺序即翻译/展示顺序）
+_PARAM_SCHEMA_C0: list[dict[str, Any]] = [
+    _p("pop", "生物数量", "int", minv=0, maxv=100000, unit="个体",
+       group="basic", warning=_WARN_OVERRIDE + "（0 = 纯场无生物）"),
+    _p("sun_budget", "光照总预算", "float", minv=0, group="c0_world",
+       warning="须 > 0；" + _WARN_OVERRIDE),
+    _p("stress_rate", "胁迫强度", "float", minv=0, group="c0_world",
+       warning="须 ≥ 0；" + _WARN_OVERRIDE),
+    _p("abiotic_budget", "启用非生物能量预算", "bool", group="c0_world",
+       warning=_WARN_OVERRIDE),
+    _p("area_weighted", "按面积加权统计", "bool", group="c0_world",
+       warning=_WARN_OVERRIDE),
+    _p("abiotic_stress", "启用非生物胁迫", "bool", group="c0_world",
+       warning=_WARN_OVERRIDE),
+    _p("patch_mode", "斑块生成方式", "choice", choices=["seed_dilate", "field_threshold"],
+       group="terrain", warning=_WARN_OVERRIDE),
+    _p("patch_coverage", "斑块覆盖率", "float", minv=0, maxv=1, group="terrain",
+       warning="须 0 < x < 1（开区间）；" + _WARN_OVERRIDE),
+    _p("env", "启用环境地形", "bool", group="terrain", warning=_WARN_OVERRIDE),
+    _p("diff", "启用自发分化", "bool", group="diffusion", warning=_WARN_OVERRIDE),
+    _p("diff_f", "分化参数 f", "float", group="diffusion", warning=_WARN_OVERRIDE),
+    _p("diff_k", "分化参数 k", "float", group="diffusion", warning=_WARN_OVERRIDE),
+    _p("diff_du_dv", "扩散系数 du/dv", "float", group="diffusion",
+       warning="归一化 RD 参数；" + _WARN_OVERRIDE),
+    _p("diff_soc", "分化社会耦合", "bool", group="diffusion", warning=_WARN_OVERRIDE),
+]
+
+#: script 文件名 → 参数 schema；未登记的 script ⇒ 空参数集（端点不报错）
+_PARAM_SCHEMA_BY_SCRIPT: dict[str, list[dict[str, Any]]] = {
+    "run_c0_energy.py": _PARAM_SCHEMA_C0,
+}
+
+
+def _param_schema_for(script: str) -> list[dict[str, Any]]:
+    """按 script 路径取 schema（尾段文件名匹配；未知脚本 ⇒ 空参数集）。"""
+    return _PARAM_SCHEMA_BY_SCRIPT.get(Path(script).name, [])
+
+
+def _bad_param(key: str, msg: str, ptype: str) -> dict[str, str]:
+    """422 detail.fields 单项（与 RequestValidationError handler 形状一致）。"""
+    return {"field": f"params.{key}", "msg": msg, "type": ptype}
+
+
+def translate_params(params: dict[str, Any],
+                     schema: list[dict[str, Any]]) -> list[str]:
+    """params → 旗标列表（按 schema 固定顺序；校验 fail-loud ⇒ 422 invalid_request）。
+
+    翻译规则：bool=true → 追加无值旗标，false/null/缺省 → 不追加；数值 → --flag value；
+    choice → --flag <值>。结果追加在既有 args 之后（由调用方保证）。校验失败聚合一次抛出
+    （detail.fields 指明全部非法项）。
+    """
+    by_key = {p["key"]: p for p in schema}
+    unknown = sorted(k for k in params if k not in by_key)
+    fields: list[dict[str, str]] = [
+        _bad_param(k, "未知参数键（不在 schema 白名单内）", "unknown_key") for k in unknown
+    ]
+    args: list[str] = []
+    for p in schema:
+        key = p["key"]
+        if key in unknown or key not in params:
+            continue
+        raw = params[key]
+        if raw is None:  # null 同“留空”：不传旗标
+            continue
+        flag, ptype = p["flag"], p["type"]
+        if ptype == "bool":
+            if not isinstance(raw, bool):  # 先查 bool（bool 是 int 子类）
+                fields.append(_bad_param(key, f"须为布尔，得到 {type(raw).__name__}", ptype))
+                continue
+            if raw:
+                args.append(flag)  # 无值旗标；false → 不追加
+            continue
+        if ptype == "choice":
+            if not isinstance(raw, str) or raw not in p["choices"]:
+                fields.append(_bad_param(
+                    key, f"须为 {'|'.join(p['choices'])}，得到 {raw!r}", ptype))
+                continue
+            args += [flag, raw]
+            continue
+        # int / float（bool 已在上面拦截，不会走到这）
+        is_num = isinstance(raw, (int, float))
+        is_ok = is_num and (ptype == "float" or isinstance(raw, int))
+        if not is_ok:
+            got = type(raw).__name__
+            fields.append(_bad_param(key, f"须为 {ptype}，得到 {got}", ptype))
+            continue
+        val = float(raw)
+        if key == "sun_budget" and val <= 0:
+            fields.append(_bad_param(key, "须 > 0", ptype))
+            continue
+        if key == "patch_coverage" and not 0 < val < 1:
+            fields.append(_bad_param(key, "须 0 < x < 1（开区间）", ptype))
+            continue
+        lo, hi = p.get("min"), p.get("max")
+        if lo is not None and val < float(lo):
+            fields.append(_bad_param(key, f"须 ≥ {p['min']}", ptype))
+            continue
+        if hi is not None and val > float(hi):
+            fields.append(_bad_param(key, f"须 ≤ {p['max']}", ptype))
+            continue
+        args += [flag, str(int(raw)) if ptype == "int" else str(val)]
+    if fields:
+        raise ApiError(422, "invalid_request",
+                       f"params 校验失败（{len(fields)} 项）："
+                       + "；".join(f"{f['field']} {f['msg']}" for f in fields),
+                       {"fields": fields})
+    return args
+
+
 def build_script_args(req: "ExperimentCreate", run_dir: Path) -> list[str]:
     """装配传给实验脚本的参数（装置档位 + 臂 + 种子 + tick + 产物目录）。"""
     args: list[str] = ["--device", req.device, "--seed", str(req.seed),
@@ -423,6 +571,8 @@ def build_script_args(req: "ExperimentCreate", run_dir: Path) -> list[str]:
     if not any(a == "--out" or a.startswith("--out=") for a in extra):
         args += ["--out", str(run_dir)]
     args += extra
+    # 结构化参数（params）翻译为旗标，追加在既有 args 之后
+    args += translate_params(dict(req.params or {}), _param_schema_for(req.script))
     return args
 
 
@@ -1012,6 +1162,9 @@ class ExperimentCreate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=64, description="人类可读名（进 run_id）；缺省 = <device>-arm<arm>")
     script: str = Field(default=DEFAULT_SCRIPT, description="实验脚本（相对 repo root 的 .py，或仓内绝对路径）")
     extra_args: list[str] = Field(default_factory=list, description="原样追加给脚本的额外参数（如 ['--sample','20']）")
+    params: dict[str, Any] = Field(default_factory=dict, description=(
+        "结构化参数（键须在 GET /param-schema 白名单内，值按类型/范围校验；"
+        "bool=true → 无值旗标，false → 不追加；数值 → --flag value；追加在既有 args 之后）"))
     live: bool = Field(default=True, description="True = 经 supervise 包装（具备 POST /snapshots 能力）")
 
 
@@ -1145,6 +1298,22 @@ def create_app() -> FastAPI:
             "count": len(names),
             "devices": [{"name": n, "fields": device_fields(n)} for n in names],
             "note": "只接受白名单内的 device 名；不接受任意 rows/cols（纪律 R5.6）",
+        }
+
+    @app.get("/param-schema", tags=["meta"],
+             summary="实验脚本的结构化参数 schema（前端高级参数区渲染依据）")
+    def param_schema(
+        script: str = Query(default=DEFAULT_SCRIPT,
+                            description="实验脚本（相对 repo root 的 .py；未知 script 返回空组不报错）"),
+    ) -> dict:
+        params = _param_schema_for(script)
+        target = Path(script)
+        script_abs = target if target.is_absolute() else repo_root() / target
+        return {
+            "script": script,
+            "script_exists": script_abs.is_file(),
+            "groups": [dict(g) for g in _PARAM_GROUPS] if params else [],
+            "params": [dict(p) for p in params],
         }
 
     @app.post("/experiments", status_code=201, tags=["experiments"],
