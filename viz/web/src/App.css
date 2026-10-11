@@ -144,9 +144,11 @@
 .globe-host {
   position: absolute;
   inset: 0;
+  /* 深空底：中心微蓝雾托住球体，四周压暗做渐晕，让场景内星空/辉光有对比 */
   background:
-    radial-gradient(circle at 50% 46%, rgba(78, 108, 190, 0.16) 0%, rgba(13, 13, 18, 0) 58%),
-    #06070b;
+    radial-gradient(circle at 50% 46%, rgba(78, 108, 190, 0.1) 0%, rgba(13, 13, 18, 0) 52%),
+    radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0) 45%, rgba(0, 0, 0, 0.55) 100%),
+    #04050a;
 }
 
 /* ---- 视图切换浮钮（球体 / 平面） ---- */
