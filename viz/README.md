@@ -100,7 +100,7 @@ npm run dev -- --host 127.0.0.1 --port 5180 --strictPort
 http://127.0.0.1:5180/?datapack=/data/viz/v1_s2_sample/
 ```
 
-从控制台发起实验（⚠️ 本分支落后 main，当前会 fail-loud 报 `script_not_found`，见《已知坑 · 3》）：
+从控制台发起实验（脚本侧已默认 arm 1；**启动成功后自动切到世界视图实时观看**）：
 
 ```
 http://127.0.0.1:5180/?tab=console
@@ -165,16 +165,15 @@ vite 默认只监听 IPv6 `[::1]`，直接用 `http://127.0.0.1:<端口>` 可能
 
 > **深链里的端口以你 dev server 实际监听为准**：默认 **5173**，被占会**自动顺延**（5173→5174→5175…）；启动加 `--port 5180 --strictPort` 可**固定为 5180**（被占直接报错，不顺延）。本文深链示例统一用 `5180` 举例；若你用默认端口，把 `5180` 换成终端实际打印的端口即可。
 
-### 深链（三个 query 参数可自由组合）
+### 深链（两个 query 参数可自由组合）
 
 | URL（示例用 5180） | 打开 |
 |---|---|
 | `http://127.0.0.1:5180/` | 默认球体，自动加载自带样例 `/datapack/` |
-| `http://127.0.0.1:5180/?view=flat` | 平面视图 |
 | `http://127.0.0.1:5180/?tab=console` | 实验控制台 |
 | `http://127.0.0.1:5180/?datapack=/data/viz/v1_s2_sample/` | 指定真实 s2 数据包（需设 `THE_WORLD_DATA_ROOT`） |
 
-组合示例：`/?view=flat&tab=console&datapack=/data/viz/v1_s2_sample/`
+组合示例：`/?tab=console&datapack=/data/viz/v1_s2_sample/`（平面视图已移除，`?view=flat` 被忽略）
 
 ---
 

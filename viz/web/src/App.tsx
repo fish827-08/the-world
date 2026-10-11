@@ -1,14 +1,14 @@
 /**
  * 应用壳：顶栏页签切换「世界 | 控制台」。
- *  · 世界：左侧世界画布（球体 WorldGlobe / 平面 WorldCanvas，可切换）+ 控制条；右侧 A5 曲线分析。
- *  · 控制台：A3 实验控制台 / A4 实时监控 / 数据包浏览（ExperimentConsole）。
+ *  · 世界：左侧球体世界画布（WorldGlobe，平面视图已移除）+ 控制条；右侧 A5 曲线分析。
+ *  · 控制台：A3 实验控制台 / A4 实时监控 / 数据包浏览（ExperimentConsole）；
+ *    快照“导出并载入”成功、启动实验成功（live）后均经 onGoWorld 自动切回世界页签。
  * 数据包地址默认 /datapack/（开发期放 public/datapack/），或经控制台数据包浏览器载入 /data/*。
- * ⚠ 球体渲染（WorldGlobe）与球/平切换、离线回放保持原样，仅在外层加页签条件渲染。
+ * ⚠ 球体渲染（WorldGlobe）与离线回放保持原样，仅在外层加页签条件渲染。
  */
 import { useEffect, useState } from "react";
 import { ControlsBar } from "./app/ControlsBar";
 import { SeriesChart } from "./app/SeriesChart";
-import { WorldCanvas } from "./render/WorldCanvas";
 import { WorldGlobe } from "./render/WorldGlobe";
 import { DEFAULT_DATAPACK_URL, useViz } from "./app/store";
 import { ExperimentConsole } from "./console/ExperimentConsole";
@@ -53,11 +53,7 @@ function App() {
   const [urlInput, setUrlInput] = useState(
     () => new URLSearchParams(window.location.search).get("datapack") ?? DEFAULT_DATAPACK_URL,
   );
-  /** 世界读法：球体（v1，默认）/ 平面（v0 地图读法，保留作对照）；`?view=flat` 可深链 */
-  const [view, setView] = useState<"globe" | "flat">(() =>
-    new URLSearchParams(window.location.search).get("view") === "flat" ? "flat" : "globe",
-  );
-  /** 顶栏页签：世界 | 控制台；`?tab=console` 可深链 */
+  /** 顶栏页签：世界 | 控制台；`?tab=console` 可深链（平面视图已移除，?view=flat 被忽略） */
   const [tab, setTab] = useState<Tab>(() =>
     new URLSearchParams(window.location.search).get("tab") === "console" ? "console" : "world",
   );
@@ -131,22 +127,13 @@ function App() {
             <section className="viz-world">
               <div className="stage-wrap">
                 {meta ? (
-                  <div className={view === "globe" ? "stage stage-globe" : "stage"}>
-                    {view === "globe" ? (
-                      <WorldGlobe
-                        meta={meta}
-                        grid={grid}
-                        entities={entities}
-                        scale={meta.channels.find((c) => c.key === layer)?.scale ?? { p_lo: 0, p_hi: 1 }}
-                      />
-                    ) : (
-                      <WorldCanvas
-                        meta={meta}
-                        grid={grid}
-                        entities={entities}
-                        scale={meta.channels.find((c) => c.key === layer)?.scale ?? { p_lo: 0, p_hi: 1 }}
-                      />
-                    )}
+                  <div className="stage stage-globe">
+                    <WorldGlobe
+                      meta={meta}
+                      grid={grid}
+                      entities={entities}
+                      scale={meta.channels.find((c) => c.key === layer)?.scale ?? { p_lo: 0, p_hi: 1 }}
+                    />
                   </div>
                 ) : (
                   <div className="stage">
@@ -163,26 +150,6 @@ function App() {
                     </div>
                   </div>
                 )}
-                {meta && (
-                  <div className="view-toggle" role="group" aria-label="视图切换">
-                    <button
-                      type="button"
-                      className={view === "globe" ? "on" : undefined}
-                      onClick={() => setView("globe")}
-                      title="三维球体读法（看整体对形）"
-                    >
-                      球体
-                    </button>
-                    <button
-                      type="button"
-                      className={view === "flat" ? "on" : undefined}
-                      onClick={() => setView("flat")}
-                      title="平面地图读法（查具体格值）"
-                    >
-                      平面
-                    </button>
-                  </div>
-                )}
               </div>
               <ControlsBar />
             </section>
@@ -192,7 +159,7 @@ function App() {
           </main>
         </>
       ) : (
-        <ExperimentConsole />
+        <ExperimentConsole onGoWorld={() => setTab("world")} />
       )}
     </div>
   );
