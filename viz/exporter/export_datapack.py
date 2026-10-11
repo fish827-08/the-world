@@ -126,6 +126,53 @@ def quantize(frame: np.ndarray, scale: dict) -> np.ndarray:
     return np.rint(np.clip(v, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
+#: --series auto 扫描的时序 CSV 文件名模式（优先级降序）
+_SERIES_AUTO_PATTERNS = (
+    "generations.csv",
+    "arm*.csv",
+    "run_segment*.csv",
+    "series.csv",
+    "*.csv",
+)
+
+
+def _resolve_series(series_arg: str, snapshot_path: Path, out_dir: Path) -> Path | None:
+    """解析 --series 参数：具体路径直接返回；'auto' 则扫描相关目录。
+
+    扫描策略（按优先级）：
+    1. 快照所在目录
+    2. 输出目录本身（可能已有实验产物）
+    3. 输出目录的父目录
+
+    匹配模式按 _SERIES_AUTO_PATTERNS 降序优先：先找 generations.csv，再 arm*.csv 等。
+    表头原样复制，不重排不改列。
+    """
+    if series_arg.lower() != "auto":
+        p = Path(series_arg)
+        return p if p.is_file() else None
+
+    # auto 模式：扫描候选目录
+    search_dirs: list[Path] = []
+    snap_dir = snapshot_path.parent
+    if snap_dir.is_dir():
+        search_dirs.append(snap_dir)
+    if out_dir.is_dir():
+        search_dirs.append(out_dir)
+    parent = out_dir.parent
+    if parent.is_dir() and parent not in search_dirs:
+        search_dirs.append(parent)
+
+    for pattern in _SERIES_AUTO_PATTERNS:
+        for d in search_dirs:
+            matches = sorted(d.glob(pattern))
+            # 排除输出目录自身的 series.csv（避免自引用）
+            matches = [m for m in matches
+                       if m.is_file() and m.resolve() != (out_dir / "series.csv").resolve()]
+            if matches:
+                return matches[0]
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--snapshot", required=True)
@@ -133,7 +180,8 @@ def main(argv=None) -> int:
     ap.add_argument("--ticks", type=int, default=0, help="续跑 tick 数（0=仅快照当前帧）")
     ap.add_argument("--stride", type=int, default=1, help="采样间隔 tick/帧")
     ap.add_argument("--channels", default="resource,energy")
-    ap.add_argument("--series", default=None, help="可选：随包复制的 series.csv 源路径")
+    ap.add_argument("--series", default=None,
+                    help="可选：随包复制的 series.csv 源路径；'auto' = 自动扫描同目录时序 CSV")
     ap.add_argument("--force-python", action="store_true", help="强制 Python 引擎路径（默认随快照）")
     ap.add_argument("--mem-guard-mb", type=int, default=512)
     args = ap.parse_args(argv)
@@ -221,7 +269,12 @@ def main(argv=None) -> int:
         f.astype("<f4").tofile(out / "entities" / f"{k:05d}.f32")
 
     if args.series:
-        shutil.copyfile(args.series, out / "series.csv")
+        series_src = _resolve_series(args.series, Path(args.snapshot), out)
+        if series_src is not None:
+            shutil.copyfile(series_src, out / "series.csv")
+            print(f"[viz-export] series.csv ← {series_src}", file=sys.stderr)
+        elif args.series.lower() == "auto":
+            print("[viz-export] --series auto：未找到可用时序 CSV（跳过）", file=sys.stderr)
 
     meta = {
         "contract_version": "v0",
