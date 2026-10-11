@@ -5,7 +5,7 @@
 import type { CSSProperties, JSX, ReactNode } from "react";
 import { ApiError } from "../app/api";
 import type { RunStatus } from "../app/api";
-import { STATUS_LABEL, badgeClass, ledClass } from "./format";
+import { STATUS_HINT, STATUS_LABEL, badgeClass, ledClass } from "./format";
 
 export function Panel({
   idx,
@@ -56,9 +56,24 @@ export function StatusLed({ status }: { status: RunStatus | string | null }): JS
 export function StatusBadge({ status }: { status: RunStatus | string }): JSX.Element {
   const label = STATUS_LABEL[status as RunStatus] ?? String(status);
   return (
-    <span className={badgeClass(status)}>
+    <span
+      className={badgeClass(status)}
+      title={STATUS_HINT[status as RunStatus] ?? `${label}：run 状态`}
+    >
       <StatusLed status={status} />
       {label}
+    </span>
+  );
+}
+
+/** 极简悬浮提示（纯 CSS，无新依赖）：问号圆点，hover / 键盘聚焦显示气泡（样式见 console.css .tip） */
+export function Tip({ text }: { text: string }): JSX.Element {
+  return (
+    <span className="tip" tabIndex={0}>
+      <span aria-hidden="true">?</span>
+      <span className="tip-bd" role="tooltip">
+        {text}
+      </span>
     </span>
   );
 }

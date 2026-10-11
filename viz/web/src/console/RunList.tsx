@@ -10,7 +10,9 @@ import type { Run, RunStatus } from "../app/api";
 import { useConsole } from "../app/console";
 import { ErrorBox, Panel, StatusBadge, StatusLed } from "./bits";
 import {
+  ENDED_REASON_HINT,
   ENDED_REASON_LABEL,
+  STATUS_HINT,
   clockUTC,
   fmtBytes,
   fmtNum,
@@ -56,16 +58,16 @@ function RunBody({
         <dd>
           <StatusBadge status={run.status} />
           {run.ended_reason ? (
-            <span className="dim2" style={{ marginLeft: 8 }}>
+            <span className="dim2" style={{ marginLeft: 8 }} title={ENDED_REASON_HINT[run.ended_reason]}>
               {ENDED_REASON_LABEL[run.ended_reason] ?? run.ended_reason}
             </span>
           ) : null}
         </dd>
-        <dt>返回码</dt>
+        <dt title="returncode：进程退出码（0 = 正常，非 0 = 异常）">返回码</dt>
         <dd className={run.returncode === 0 ? "ok" : run.returncode !== null ? "bad" : ""}>
           {run.returncode === null || run.returncode === undefined ? "—" : run.returncode}
         </dd>
-        <dt>PID</dt>
+        <dt title="PID：后端实验进程的操作系统进程号（排查用）">PID</dt>
         <dd>{run.pid ?? "—"}</dd>
         <dt>创建</dt>
         <dd>
@@ -113,7 +115,7 @@ function RunBody({
       </div>
 
       <div>
-        <div className="log-hd">
+        <div className="log-hd" title="log_tail：实验进程 stdout/stderr 的末尾若干行，每 1s 随台账轮询刷新">
           <span>log_tail</span>
           <span className="dim2">（最近 {log ? log.length : 0} 行 · 每 1s 刷新）</span>
         </div>
@@ -156,7 +158,7 @@ export function RunList(): JSX.Element {
     >
       <div className="by-status">
         {BY_STATUS_ORDER.map((s) => (
-          <span className={`bs-item bs-${s}`} key={s}>
+          <span className={`bs-item bs-${s}`} key={s} title={STATUS_HINT[s]}>
             <StatusLed status={s} />
             {s}
             <b>{byStatus[s] ?? 0}</b>

@@ -370,7 +370,10 @@ export function SeriesChart(): JSX.Element {
     <div className="charts-panel">
       <div className="panel-head">
         <h2>曲线分析</h2>
-        <span className="dim small">
+        <span
+          className="dim small"
+          title="数据来源 = 当前数据包内的 series.csv（可选产物）；样例包未带时此区为空，属正常"
+        >
           {hasData
             ? `${series!.rows.length} 行 · ${numericColumns.length} 数值列 · tick ${tick ?? "—"}`
             : "series.csv（可选）"}
@@ -381,7 +384,8 @@ export function SeriesChart(): JSX.Element {
 
       {!hasData ? (
         <div className="panel-empty">
-          数据包无 series.csv 或为空 —— 序列仪表盘不可用（数据包仍可播放）。
+          数据来源 = 数据包内 series.csv（可选产物；样例包未带时为空，属正常）——
+          当前数据包无 series.csv 或为空，序列仪表盘不可用（数据包仍可播放）。
           {traitDrift && traitDrift.length > 0 ? " trait 漂移视图仍可用（见下）。" : ""}
         </div>
       ) : (

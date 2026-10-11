@@ -19,6 +19,14 @@ const LIVE_STATUS_LABEL: Record<string, string> = {
   error: "错误",
 };
 
+/** 状态读数悬浮白话（live-stats「状态」格 title 用） */
+const LIVE_STATUS_HINT: Record<string, string> = {
+  idle: "未开始监控：在上方选 run 并点「开始监控」",
+  waiting: "等待首帧：正在轮询 live/<run_id>/meta.json，数据包一出现即自动接流",
+  streaming: "实时流：已连上数据包，新帧到达即喂给世界视图",
+  error: "出错：见下方错误信息",
+};
+
 export function LiveMonitor(): JSX.Element {
   const runs = useConsole((s) => s.runs);
   const details = useConsole((s) => s.details);
@@ -124,13 +132,18 @@ export function LiveMonitor(): JSX.Element {
       <div className="live-stats" style={{ marginTop: 12 }}>
         <div className="lstat">
           <div className="k">状态</div>
-          <div className="v" style={{ fontSize: 13 }}>
+          <div className="v" style={{ fontSize: 13 }} title={LIVE_STATUS_HINT[liveStatus]}>
             {LIVE_STATUS_LABEL[liveStatus] ?? liveStatus}
           </div>
         </div>
         <div className="lstat">
           <div className="k">帧数</div>
-          <div className="v">{fmtNum(liveFrames)}</div>
+          <div
+            className="v"
+            title="已拉取的实时帧数：随实验运行不断增长（每帧 = 引擎按 stride 存出的一张世界快照）"
+          >
+            {fmtNum(liveFrames)}
+          </div>
         </div>
         <div className="lstat">
           <div className="k">当前 tick</div>

@@ -48,9 +48,22 @@ function PackRow({
       className={`pack-item${active ? " active" : ""}`}
       onClick={onLoad}
       disabled={!!pack.error}
-      title={pack.path}
+      title={
+        pack.error
+          ? pack.path
+          : `${pack.path}\nrows×cols：格网行×列（n_cells = 总格数）\nN 帧：包含的帧数\ntick a→b：覆盖 tick 段（含 stride 采样间隔）\nchannels：帧内图层（resource = 资源场 / energy = 能量场）\nentities：实体层（生物个体）\ncontract_version：数据包契约版本\nsize：包大小\nseries✓：含曲线数据 series.csv（缺 = 曲线区为空，属正常）`
+      }
     >
-      <span className={`kind-tag kind-${pack.kind}`}>{pack.kind}</span>
+      <span
+        className={`kind-tag kind-${pack.kind}`}
+        title={
+          pack.kind === "viz"
+            ? "viz 包：完整可视化数据包（离线回放 / 曲线分析用）"
+            : "live 包：supervise 实时运行增量写出的数据包（可静态回放；实时观看请用「实时监控」）"
+        }
+      >
+        {pack.kind}
+      </span>
       <span className="pk-main">
         <span className="pk-name">{pack.name}</span>
         <span className="pk-sub">
@@ -92,6 +105,7 @@ export function DatapackBrowser(): JSX.Element {
           className="btn btn-ghost btn-sm"
           onClick={() => void refreshDatapacks()}
           disabled={datapacksLoading}
+          title="重新扫描 data_root，刷新数据包索引（坏包不报 500，逐包标注错误）"
         >
           {datapacksLoading ? (
             <>
@@ -105,6 +119,10 @@ export function DatapackBrowser(): JSX.Element {
       style={{ ["--d" as string]: "240ms" }}
       className="reveal"
     >
+      <div className="field-hint" style={{ marginBottom: 8 }}>
+        viz = 完整可视化包（离线回放 / 曲线分析）；live = supervise 实时运行增量写出的包
+        （此处可静态回放，实时观看用「实时监控」）。
+      </div>
       {dataRootExists === false && (
         <div className="empty-note">
           <code>data_root</code> 不存在（本 worktree 缺 <code>the-world-data/</code>）。

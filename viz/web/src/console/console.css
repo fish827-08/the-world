@@ -363,6 +363,60 @@
   flex: none;
 }
 
+/* 悬浮提示（Tip 组件，纯 CSS 无依赖）：hover / 聚焦显示气泡 */
+.tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  color: var(--dim);
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+  cursor: help;
+  flex: none;
+  vertical-align: 1px;
+  user-select: none;
+}
+.tip:hover,
+.tip:focus-visible {
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  outline: none;
+}
+.tip .tip-bd {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  width: max-content;
+  max-width: 300px;
+  padding: 6px 9px;
+  border-radius: 4px;
+  background: var(--bg-inset);
+  border: 1px solid rgba(76, 201, 240, 0.45);
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: normal;
+  text-align: left;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  pointer-events: none;
+  z-index: 30;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.tip:hover .tip-bd,
+.tip:focus-visible .tip-bd {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
+
 /* 开关（live） */
 .switch {
   display: inline-flex;
@@ -418,6 +472,62 @@
 .switch .sw-sub {
   font-size: 11px;
   color: #6b7488;
+}
+
+/* 高级参数（GET /param-schema 渲染的折叠分组区） */
+.adv-hd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.warn-badge {
+  font-size: 11.5px;
+  color: #e0af68;
+  background: rgba(224, 175, 104, 0.08);
+  border: 1px solid rgba(224, 175, 104, 0.35);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+}
+.param-group {
+  grid-column: 1 / -1;
+  border: 1px dashed var(--line-2);
+  border-radius: 4px;
+  padding: 8px 11px;
+}
+.param-group.param-group-dim {
+  opacity: 0.72;
+}
+.param-group-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0 6px;
+  text-align: left;
+  color: inherit;
+}
+.param-group-hd .pg-label {
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  flex: none;
+}
+.param-group-hd .pg-note {
+  font-size: 11px;
+  color: #6b7488;
+}
+.param-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
 }
 
 /* 装置字段回显（R278 人眼复核） */
@@ -1269,4 +1379,59 @@
   font-size: 11px;
   color: #5b6577;
   line-height: 1.6;
+}
+
+/* 术语速查（控制台顶部可折叠面板；口径与 viz/README.md 术语表一致） */
+.gloss {
+  border: 1px dashed var(--line-2);
+  border-radius: 4px;
+  background: rgba(76, 201, 240, 0.03);
+}
+.gloss-hd {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px 12px;
+  text-align: left;
+  color: inherit;
+}
+.gloss-hd .gloss-title {
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  flex: none;
+}
+.gloss-hd .gloss-sum {
+  font-size: 11px;
+  color: #6b7488;
+}
+.gloss-bd {
+  padding: 6px 12px 10px;
+  display: grid;
+  gap: 6px;
+  border-top: 1px dashed var(--line);
+}
+.gloss-item {
+  display: flex;
+  gap: 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  align-items: baseline;
+}
+.gloss-item .gloss-k {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  flex: none;
+  min-width: 150px;
+}
+.gloss-item .gloss-v {
+  color: #8b93a3;
 }

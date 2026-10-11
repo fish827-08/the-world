@@ -32,15 +32,17 @@ function SnapshotRow({
 }): JSX.Element {
   return (
     <div className="snap-row" style={{ justifyContent: "flex-start" }}>
-      <span className="tk" title={entry.snapshot}>
+      <span className="tk" title={`${entry.snapshot}（相对 data_root 的路径）`}>
         {tail(entry.snapshot)}
       </span>
-      <span className="dim2" title={`tick ${entry.tick ?? "未知"}`}>
+      <span className="dim2" title={`tick ${entry.tick ?? "未知"}：快照对应的引擎步数`}>
         tick {entry.tick === null ? "—" : fmtNum(entry.tick)}
       </span>
-      <span className="sz">{fmtBytes(entry.size_bytes)}</span>
+      <span className="sz" title="快照 npz 文件大小">
+        {fmtBytes(entry.size_bytes)}
+      </span>
       <span className="dim2">{timeAgo(entry.modified_at)}</span>
-      <span className="dim2" title={entry.run_id ?? "不在 live/<run_id>/ 下"}>
+      <span className="dim2" title={entry.run_id ?? "不在 live/<run_id>/ 下（散落在 data_root 根部的快照）"}>
         {entry.run_id ? `run:${entry.run_id.slice(-10)}` : "散落"}
       </span>
       <span className="grow" />
@@ -49,7 +51,7 @@ function SnapshotRow({
         className="btn btn-ghost btn-sm"
         onClick={onExport}
         disabled={disabled}
-        title={`导出 ${entry.snapshot} 为 v0 数据包并载入世界视图`}
+        title={`快照 → 导出为 v0 数据包 → 自动载入世界视图（服务端续跑采样，可能需数秒至数十秒）\n${entry.snapshot}`}
       >
         {busy ? (
           <>
@@ -63,7 +65,12 @@ function SnapshotRow({
   );
 }
 
-export function SnapshotsLoader(): JSX.Element {
+export function SnapshotsLoader({
+  onGoWorld,
+}: {
+  /** 导出并载入成功后调用（App 下放：自动切回“世界”页签看球面回放） */
+  onGoWorld?: () => void;
+}): JSX.Element {
   // 列表来自 store（bootstrap 拉首轮；扫描按钮手动刷新），导出动作组件内自管
   const snapshots = useConsole((s) => s.snapshots);
   const skipped = useConsole((s) => s.snapshotsSkipped);
@@ -94,6 +101,7 @@ export function SnapshotsLoader(): JSX.Element {
       await refreshDatapacks();
       setDoneName(res.name);
       await load(dataPackUrl("viz", res.name));
+      onGoWorld?.(); // 载入成功 ⇒ 自动切到世界页签（深链/手动切换不受影响）
     } catch (e) {
       setExportError(e instanceof ApiError ? e : describeError(e));
     } finally {
@@ -112,6 +120,7 @@ export function SnapshotsLoader(): JSX.Element {
           className="btn btn-ghost btn-sm"
           onClick={() => void refreshSnapshots()}
           disabled={loading || exporting !== null}
+          title="重新扫描 data_root 下的引擎快照 npz 列表"
         >
           {loading ? (
             <>
@@ -155,6 +164,7 @@ export function SnapshotsLoader(): JSX.Element {
               value={ticks}
               onChange={(e) => setTicks(e.target.value)}
               disabled={exporting !== null}
+              title="导出时让引擎从快照继续跑多少 tick；0 = 不续跑，仅当前帧静态查看"
             />
             <span className="field-hint">0=仅当前帧（静态单帧查看）</span>
           </div>
@@ -168,6 +178,7 @@ export function SnapshotsLoader(): JSX.Element {
               value={stride}
               onChange={(e) => setStride(e.target.value)}
               disabled={exporting !== null}
+              title="续跑时每 N tick 采一帧（stride = 20 即每 20 tick 留一帧）"
             />
             <span className="field-hint">每 N tick 采一帧（帧数 = ticks/stride + 1）</span>
           </div>

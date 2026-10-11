@@ -18,6 +18,23 @@ export const ENDED_REASON_LABEL: Record<EndedReason, string> = {
   unknown_after_restart: "重启后状态未知",
 };
 
+/** 状态徽标悬浮白话（StatusBadge / RunList 计数条共用，title 用） */
+export const STATUS_HINT: Record<RunStatus, string> = {
+  pending: "排队：实验已创建，尚未开始运行",
+  running: "运行中：实验进程正在执行",
+  finished: "正常结束：进程退出码为 0",
+  failed: "失败：非零退出 / 启动失败 / 已取消",
+};
+
+/** ended_reason 悬浮白话（运行台账「状态」行 title 用） */
+export const ENDED_REASON_HINT: Record<EndedReason, string> = {
+  exit_ok: "exit_ok：进程正常退出（returncode = 0）",
+  exit_nonzero: "exit_nonzero：进程异常退出（returncode ≠ 0）",
+  cancelled: "cancelled：运行被主动取消",
+  spawn_error: "spawn_error：进程没能启动（命令 / 环境错误）",
+  unknown_after_restart: "unknown_after_restart：服务重启后无法确认该 run 的最终状态",
+};
+
 /** 状态 → LED class 后缀 */
 export const ledClass = (s: RunStatus | string | null | undefined): string => {
   switch (s) {

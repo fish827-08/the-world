@@ -13,23 +13,30 @@ import { ErrorBox, Panel, StatusLed } from "./bits";
 import { clockUTC, fmtBytes, fmtNum } from "./format";
 
 function MetaGrid({ meta }: { meta: SnapshotMeta }): JSX.Element {
-  const cells: [string, string][] = [
-    ["mode", String(meta.mode)],
-    ["tick", meta.tick === null || meta.tick === undefined ? "—（未标注）" : fmtNum(meta.tick)],
-    ["size", fmtBytes(meta.size_bytes)],
-    ["gene_count", meta.gene_count === null || meta.gene_count === undefined ? "—" : fmtNum(meta.gene_count)],
-    ["snapshot_version", meta.snapshot_version === null || meta.snapshot_version === undefined ? "—" : String(meta.snapshot_version)],
-    ["config_fingerprint", meta.config_fingerprint ?? "—"],
-    ["created_at", clockUTC(meta.created_at)],
-    ...(meta.request_id ? ([["request_id", meta.request_id]] as [string, string][]) : []),
+  // 每项 = [键, 值, 白话悬浮说明]；说明在 .snap-cell 的 title 上
+  const cells: [string, string, string?][] = [
+    ["mode", String(meta.mode), "快照方式：live = 运行中实时取帧（非原子）；inproc = 引擎内同步取帧"],
+    ["tick", meta.tick === null || meta.tick === undefined ? "—（未标注）" : fmtNum(meta.tick), "快照标注的 tick（取快照时留空 = 引擎当前 tick）"],
+    ["size", fmtBytes(meta.size_bytes), "快照 npz 文件大小"],
+    ["gene_count", meta.gene_count === null || meta.gene_count === undefined ? "—" : fmtNum(meta.gene_count), "基因位数：个体基因组的长度"],
+    ["snapshot_version", meta.snapshot_version === null || meta.snapshot_version === undefined ? "—" : String(meta.snapshot_version), "快照格式版本（契约 v0）"],
+    ["config_fingerprint", meta.config_fingerprint ?? "—", "配置指纹：校验快照与启动配置一致（不匹配 = 配置被改过）"],
+    ["created_at", clockUTC(meta.created_at), "快照创建时间（UTC）"],
+    ...(meta.request_id
+      ? ([
+          ["request_id", meta.request_id, "本次取快照请求的唯一 ID（排查用）"],
+        ] as [string, string, string?][])
+      : []),
     ...(meta.engine_tick_at_request !== null && meta.engine_tick_at_request !== undefined
-      ? ([["engine_tick@req", fmtNum(meta.engine_tick_at_request)]] as [string, string][])
+      ? ([
+          ["engine_tick@req", fmtNum(meta.engine_tick_at_request), "取快照请求时引擎实际推进到的 tick（live 快照非原子：可能与标注 tick 有偏差）"],
+        ] as [string, string, string?][])
       : []),
   ];
   return (
     <div className="snap-grid">
-      {cells.map(([k, v]) => (
-        <div className="snap-cell" key={k}>
+      {cells.map(([k, v, hint]) => (
+        <div className="snap-cell" key={k} title={hint}>
           <div className="k">{k}</div>
           <div className="v" title={v}>
             {v}
@@ -101,12 +108,15 @@ export function SnapshotPanel(): JSX.Element {
     >
       <div className="snap-form">
         <div className="field">
-          <span className="field-label">目标 run</span>
+          <span className="field-label" title="选择对哪个 run 取快照（优先列出 live / 运行中的 run）">
+            目标 run
+          </span>
           <select
             className="select"
             value={runId}
             onChange={(e) => setRunId(e.target.value)}
             disabled={snapBusy || pool.length === 0}
+            title="选择对哪个 run 取快照（优先列出 live / 运行中的 run）"
           >
             {pool.length === 0 && <option value="">（无可快照 run）</option>}
             {pool.map((r) => (
@@ -129,6 +139,7 @@ export function SnapshotPanel(): JSX.Element {
             value={tick}
             onChange={(e) => setTick(e.target.value)}
             disabled={snapBusy || !runId}
+            title="给快照打 tick 标签：留空 = 引擎当前 tick。仅是标注，不会让引擎回退"
           />
           <span className="field-hint">仅标注，不回退引擎</span>
         </div>
@@ -137,6 +148,7 @@ export function SnapshotPanel(): JSX.Element {
           className="btn btn-primary"
           onClick={submit}
           disabled={snapBusy || !runId}
+          title="POST /snapshots：向运行中的实验要一帧世界状态；只回元数据，绝不回 npz 内容"
         >
           {snapBusy ? (
             <>
