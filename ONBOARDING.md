@@ -58,9 +58,11 @@ git clone https://gitee.com/little-fishy/the-world-data.git
 ### 1.2 建环境
 
 ```bash
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install numpy pytest        # Windows
-# .venv/bin/python -m pip install numpy pytest              # Linux / macOS
+# Windows ⚠️ 本机 bash 里没有 `python`/`python3` ⇒ 用 Windows 启动器 py（`py -0` 可列已装版本）
+py -3.14 -m venv .venv
+.venv/Scripts/python.exe -m pip install numpy pytest maturin   # maturin = §1.3 编译 Rust 扩展用
+# Linux / macOS：
+python3 -m venv .venv && .venv/bin/python -m pip install numpy pytest maturin
 ```
 
 Python ≥3.10（`sim_core/pyproject.toml` requires-python）；本机实况 **3.14.7** + numpy 2.5.3 + pytest 9.1.1。
@@ -122,6 +124,8 @@ print('ticks:', len(stats), '| pop:', stats[-1].population)"
 
 | 症状 | 原因 | 解法 |
 |---|---|---|
+| `python: command not found`（bash 内） | 本机 PATH 里没有 `python`/`python3` | 用 Windows 启动器：`py -3.14`（`py -0` 列已装版本）；建好 venv 后一律走 `.venv/Scripts/python.exe` |
+| `No module named maturin` | 新建/更换 venv 后未装构建器 | `.venv/Scripts/python.exe -m pip install maturin`（§1.2 已含） |
 | `UnicodeDecodeError: 'gbk' codec ...` / 控制台乱码 | 中文 Windows 控制台编码 | 跑脚本前 `PYTHONIOENCODING=utf-8`（py≥3.12 可加 `-X utf8`）；新脚本入口照抄 `experiments/run_bare_world.py:204-208` 的 stdout reconfigure；**自写 subprocess 测试两端钉 UTF-8**（env + `run(encoding="utf-8")`），否则给本机加伪失败 |
 | `which cargo` 为空 | cargo 不在 bash PATH（实际在 `C:\Users\<你>\.cargo\bin`） | 用绝对路径或 `export PATH="$HOME/.cargo/bin:$PATH"` |
 | maturin 在 pip 输出处 GBK 解码中止 | venv 路径含中文（本机 `C:\Users\圣羽\...`） | `PYTHONIOENCODING=utf-8` 前置（`sim_core/BUILD.md §2`） |
