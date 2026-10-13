@@ -86,15 +86,15 @@ cd ..
 # 快速自检（约 2 秒，49 例：ENV 场 + Rust 对拍 + 基因注册表）
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest tests/test_env_field.py tests/test_sim_core.py tests/test_genes_registry.py -q
 
-# 全量（本机约 10 分钟）：预期 ~1376 passed / ~53 failed / 9 skipped
+# 全量（本机约 9 分钟）：预期 ~1377 passed / ~52 failed / 9 skipped
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest tests/ -q --ignore=tests/test_broker.py
 ```
 
-**~53 个失败是存量环境族，不是代码缺陷**（`[实测]` 2026-10-13，591s）：
+**~52 个失败是存量环境族，不是代码缺陷**（`[实测]` 2026-10-13，537s；含 broker 档 = 1383/52/9）：
 
 - 52 个固定失败：`test_f_r21_presets` ×36 + `test_r278_p3_device_flush` ×7（其中 1 例是 ULP 最末位）+ `test_r287_s3_sample_resume` ×4 + `test_221_snap_shard` ×3 + `test_r98_nonascii_print` ×1 + `test_f_r10_f_r12` ×1。
   根因：子进程 stdout 写 UTF-8，父进程 `subprocess.run(text=True)` 未指定 encoding ⇒ 在中文 Windows 上按 locale **GBK 解码**报 `UnicodeDecodeError`。
-- 1 个并发 flake：`test_r110_criteria.py::test_concurrent_start_exactly_one_wins`（负载下偶发；隔离复跑 11/11 绿）。
+- 另 1 个并发 flake：`test_r110_criteria.py::test_concurrent_start_exactly_one_wins`（负载下偶发；触发时总数 1376/53/9；隔离复跑 11/11 绿）。
 
 **对账纪律**：只看「失败集合是否与上述清单一致、零新增」，不看 pass 数绝对值（pass 随测试增长）。在 UTF-8 locale 的 Linux/macOS 上 GBK 族多数会转绿。
 
