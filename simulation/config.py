@@ -1480,6 +1480,17 @@ class EnvFieldConfig:
       面积权均温逐位保持）⇒ W 的纬度压印只剩"地形偶然残余"。
     * `False`（默认）⇒ 走旧公式，**逐位不变**（默认关档 = 唯一回滚点；C7 基线不动）。
 
+    🔴 自然剖面选项 `insolation_profile`（默认关；2026-10-13 owner 令"调节到自然界一致"）
+    --------------------------------------------------------------------------------
+    * 动机 = 把纬度影响从**手定常数**（`t_pole/t_equator = −20/30`°C 线性 cosφ）换成
+      **自然界一致**：年平辐照数值积分 → 有效辐射温度 + 温室增量（一层 EBM）。
+    * 常数全为地球来源、零自由参数：`S0=1361 W/m²`（太阳常数）、`ε=23.44°`（黄赤交角）、
+      `α=0.29`（行星反照率）、`σ=5.670374419e-8 W·m⁻²·K⁻⁴`、`ΔT_gh=33 K`（温室增量）。
+      期望剖面：赤道 ≈ +28.6°C、极点 ≈ −23.0°C（与真实地球年平吻合）。
+    * 与 `uniform_base_t` **互斥**（fail-loud）：一个去梯度、一个换自然梯度，不可叠加。
+    * `False`（默认）⇒ 走旧公式，**逐位不变**（同一回滚点；只作用于 EnvField 内部、
+      不动 `LightAndTemperature.base_temperature` 本体）。
+
     🔴 fail-loud 组合（构造期，见 `sphere_engine` 接线；禁静默）
     ----------------------------------------------------------
     * `enabled ∧ simulation.use_sim_core` ⇒ 报错（Rust regrow 不吃新因子 ⇒ 静默 no-op，
@@ -1507,6 +1518,9 @@ class EnvFieldConfig:
     uniform_base_t: bool = False     # 🔴 去混杂臂选项（默认关）：True ⇒ 基温取"面积权全球均值"
                                      #   （只关纬度梯度、不动全球均值；治 Magnus 纬度压印混杂——
                                      #   见 ADR 教训 2「置换后水分场仍带纬度梯度」）
+    insolation_profile: bool = False # 🔴 自然剖面选项（默认关）：True ⇒ 基温取 EBM 年平气温剖面
+                                     #   （辐照数值积分；常数全为地球来源——见上方 docstring；
+                                     #   与 uniform_base_t 互斥）
     lapse_c: float = 20.0            # H∈[0,1] 全程温差（°C）：T = base_temperature − lapse×H
     orographic: float = 1.0          # 抬升增雨系数：Pr = q × (1 + orographic×H)
     et_frac: float = 0.5             # 蒸散比：Et = et_frac × q（q = Magnus 饱和水汽压，hPa）
@@ -1519,6 +1533,9 @@ class EnvFieldConfig:
         assert isinstance(self.enabled, bool), "enabled 必须是布尔值"
         assert isinstance(self.shuffle, bool), "shuffle 必须是布尔值"
         assert isinstance(self.uniform_base_t, bool), "uniform_base_t 必须是布尔值"
+        assert isinstance(self.insolation_profile, bool), "insolation_profile 必须是布尔值"
+        assert not (self.uniform_base_t and self.insolation_profile), \
+            "uniform_base_t 与 insolation_profile 互斥（去梯度 ≠ 自然梯度，不可叠加）"
         assert self.terrain_lattice >= 4, "terrain_lattice ≥ 4（太小 = 全场一个团块）"
         assert self.terrain_octaves >= 1, "terrain_octaves ≥ 1"
         assert self.terrain_smooth >= 0, "terrain_smooth ≥ 0"
