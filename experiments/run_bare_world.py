@@ -223,6 +223,10 @@ def main(argv=None) -> None:
                                     logger=lambda m: print(m, file=sys.stderr))
     if a.ticks < 1 or a.sample < 1:
         raise SystemExit("🔴 --ticks/--sample 必须 ≥1")
+    # R278 防呆只覆盖 --device 路径；显式小 rows/cols 忘改回无回显 ⇒ 此处兜底提示
+    if (a.rows, a.cols) != (480, 960):
+        print(f"[提示] 非 s2 正式档：rows×cols={a.rows}×{a.cols}（s2=480×960）"
+              "——仅限小装置自检，读数不与正式批可比（R5.6）。", file=sys.stderr)
     run_arm(a.arm, a.seed, a.ticks, a.sample, Path(a.out), device_applied,
             a.rows, a.cols, a.patches, a.rgm)
 
