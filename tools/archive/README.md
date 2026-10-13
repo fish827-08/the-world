@@ -39,3 +39,13 @@
 **引用纪律**：与 `experiments/archive/README.md` §二 同——引用这里任何工具的旧结论数字前，
 先查 `docs/实验台账.md` / `docs/实验记录.md` 的有效性列；K=2 相关（audit_d1_*、mirror_n4_recalc）
 所服务的批次处于抽奖缺陷阴影内，仅供复现，禁止引用其结论。
+
+## 二次核查（2026-10-13 晚，viz v1 合并后）
+
+- **留驻 30 件 py 逐件重扫**（判据同 `../../experiments/archive/README.md` §一：tests/、现役代码、
+  AGENTS/ONBOARDING/架构地图、现役设计文档/预注册）——**引用证据无变化、零新增入档**。
+- **散置输出件** `_probe_b8.json` / `_probe_diff_smoke.json`（10-11 生成；根 `.gitignore` 的
+  `*.json` 忽略 ⇒ 本就不入 git）：系 **C0 能量线**冒烟读数，生成器在未合并分支
+  `feat/c0-energy-world:experiments/run_c0_energy.py`；该线待接续 ⇒ **留驻原位**（读数即证据）。
+- 留驻件多数被**测试直接 import**（如 `a4_verify_capacity` 系 16 个测试文件的夹具载体）；
+  进一步归档只能"连测试一起挪"（测试重构，非纯移动）⇒ 不属本目录范围，须单独立项评估。
