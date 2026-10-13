@@ -52,7 +52,8 @@ long_run_*.csv
 long_run_*.txt
 
 _rerun_logs/*
-experiments/local_rerun_d2x.bat
+# 本地重跑包装（机器本地路径，从不入库）；2026-10-13 归档 moved to experiments/archive/_artifacts/
+experiments/**/local_rerun_d2x.bat
 
 # === 2026-10-03 R342 文件存放规则：归档区（代码快照/桌面残留，体积大且可重新生成）===
 # 🔴 落点纪律：一律进 `_archive/`（本目录），❌ 不要进 `_trash_local/`
