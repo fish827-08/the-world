@@ -285,15 +285,15 @@ def _plot_lines(path: Path, series: dict[str, list[float]]) -> None:
         col = _LABEL_COLORS[j % _LABEL_COLORS.shape[0]]
         pts = [(xk[i], y0 - (y0 - y1) * (sv[i] - vmin) / max(vmax - vmin, 1e-12))
                for i in range(nk)]
+        samples = list(pts)
         for (xa, ya), (xb, yb) in zip(pts[:-1], pts[1:]):
-            for f in np.linspace(0.0, 1.0, max(int(abs(xb - xa)) * 2, 2)):
-                xi = int(round(xa + (xb - xa) * f))
-                yi = int(round(ya + (yb - ya) * f))
-                img[max(min(yi, y0) - 1, y1):max(min(yi, y0)) + 2,
-                    max(min(xi, x1) - 1, x0):max(min(xi, x1)) + 2] = col
-        for xv, yv in pts:
-            xi, yi = int(round(xv)), int(round(yv))
-            img[max(yi - 1, y1):yi + 2, max(xi - 1, x0):xi + 2] = col
+            samples.extend((xa + (xb - xa) * f, ya + (yb - ya) * f)
+                           for f in np.linspace(0.0, 1.0, max(int(abs(xb - xa)) * 2, 2)))
+        for xv, yv in samples:
+            yc = min(max(int(round(yv)), y1), y0)
+            xc = min(max(int(round(xv)), x0), x1)
+            img[max(yc - 1, y1):min(yc + 1, y0) + 1,
+                max(xc - 1, x0):min(xc + 1, x1) + 1] = col
     _write_png(path, img)
 
 
