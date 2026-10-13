@@ -2,11 +2,14 @@
 
 职责：把数据包渲染成可看的球面世界。接口契约：`viz/CONTRACT.md` 🔒（v0 修订1）。
 
+> ⚠ **`WorldCanvas.tsx`（v0 平面入口部件）已移除**：平面视图下线，只留球体读法
+> `WorldGlobe.tsx`。下文 WorldCanvas 章节（props/行为/示例）仅作存档，不再对应实际文件。
+
 ## 部件
 
 | 文件 | 说明 |
 |---|---|
-| `WorldCanvas.tsx` | 入口部件（Canvas2D + ImageData 逐帧直写） |
+| `WorldGlobe.tsx` | 入口部件（three.js 三维球体，v1 现行） |
 | `palette.ts` | 调色板纯函数（零依赖，便于测试复用） |
 
 ### `WorldCanvas` props（冻结签名）
