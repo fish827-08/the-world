@@ -10,6 +10,8 @@
 ----------------------------------------------------------------------------------
     H  ← 3D 值噪声 fBm（球面采样；独立 rng 流，**不消费引擎 RNG**）
     T  = base_temperature(φ) − lapse_c×H            （气候态温度，°C）
+        └ `cfg.uniform_base_t=True`（去混杂选项，默认关）⇒ base_temperature(φ) 换成其
+          **面积权全球均值**常数（只关纬度梯度、不动全球均值；治 Magnus 纬度压印混杂）
     q  = 6.11×exp(17.27T/(237.3+T))                 （Magnus 饱和水汽压，hPa）
     Pr = q×(1 + orographic×H)                       （抬升增雨）
     Et = et_frac×q                                  （蒸散）
@@ -172,6 +174,15 @@ class EnvField:
 
         # ---- 2) 气候态温度与水量平衡（Magnus）----
         base_t = lt.base_temperature(cells)                  # 纬度基温（年气候态，°C）
+        if bool(cfg.uniform_base_t):
+            # 🔴 去混杂选项（`uniform_base_t`；默认关 = 不走本支 ⇒ 逐位不变）：
+            #   基温置**面积权全球均值**常数 —— 只杀纬度梯度、不抬降全球均值
+            #   （面积权均温逐位保持；动机 = ADR 教训 2「Magnus 纬度压印」：
+            #   T=base_t(φ)−lapse×H 过 Magnus 后 W 仍带纬度暗通道 ⇒ 置换零模型不纯）。
+            #   本支零 RNG 消费（在噪声/置换流之后）⇒ 开档不改引擎 RNG 序列。
+            _areas_t = world.cell_area(cells)
+            _t_awm = float(np.sum(base_t * _areas_t) / np.sum(_areas_t))
+            base_t = np.full(n, _t_awm, dtype=np.float64)
         temp = base_t - float(cfg.lapse_c) * h
         np.clip(temp, _T_FLOOR, None, out=temp)              # 🔴 防极端配置除零
         self.temp = temp
