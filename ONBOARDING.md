@@ -65,13 +65,13 @@ py -3.14 -m venv .venv
 python3 -m venv .venv && .venv/bin/python -m pip install numpy pytest maturin
 ```
 
-Python ≥3.10（`sim_core/pyproject.toml` requires-python）；本机实况 **3.14.7** + numpy 2.5.3 + pytest 9.1.1。
+Python ≥3.10（`sim_core/pyproject.toml` requires-python）；本机实况 **3.14.7** + numpy 2.5.x（未 pin：2.5.3/2.5.4 均实测）+ pytest 9.1.1。
 （`pytest-asyncio`/`fastapi`/`uvicorn`/`websockets` 只有 `tests/test_broker.py` 用——该文件在标准全量命令里被 `--ignore`，可先不装。）
 
 ### 1.3 编译 Rust 扩展（跑全量测试前必做）
 
 ```bash
-# 【Windows 本机】cargo 不在 bash PATH（实际在 ~/.cargo/bin）⇒ 先补 PATH
+# 【Windows 本机】`which cargo` 为空时先补 PATH（2026-10-13 实测一般已在 PATH，此行兜底）
 export PATH="$HOME/.cargo/bin:$PATH"
 cd sim_core
 PYTHONIOENCODING=utf-8 ../.venv/Scripts/python.exe -m maturin develop --release
@@ -88,11 +88,19 @@ cd ..
 # 快速自检（约 2 秒，49 例：ENV 场 + Rust 对拍 + 基因注册表）
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest tests/test_env_field.py tests/test_sim_core.py tests/test_genes_registry.py -q
 
-# 全量（本机约 9 分钟）：预期 ~1377 passed / ~52 failed / 9 skipped
+# 全量（本机约 9–10 分钟）：预期 ~1377 passed / ~52 failed / 9 skipped
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest tests/ -q --ignore=tests/test_broker.py
 ```
 
-**~52 个失败是存量环境族，不是代码缺陷**（`[实测]` 2026-10-13，537s；含 broker 档 = 1383/52/9）：
+⏱️ 全量 9–10 分钟（537–571 s 实测窗口），若工具/子代理单命令有 ~10 分钟超时上限，用**分段跑法**（对账时把两段的失败集**合并**看）：
+
+```bash
+F=$(ls tests/test_*.py | grep -v test_broker); H=$(( $(echo "$F" | wc -l) / 2 ))
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest $(echo "$F" | head -n $H) -q
+PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest $(echo "$F" | tail -n +$((H+1))) -q
+```
+
+**~52 个失败是存量环境族，不是代码缺陷**（`[实测]` 2026-10-13，537s；复测 571s 同集合；含 broker 档 = 1383/52/9）：
 
 - 52 个固定失败：`test_f_r21_presets` ×36 + `test_r278_p3_device_flush` ×7（其中 1 例是 ULP 最末位）+ `test_r287_s3_sample_resume` ×4 + `test_221_snap_shard` ×3 + `test_r98_nonascii_print` ×1 + `test_f_r10_f_r12` ×1。
   根因：子进程 stdout 写 UTF-8，父进程 `subprocess.run(text=True)` 未指定 encoding ⇒ 在中文 Windows 上按 locale **GBK 解码**报 `UnicodeDecodeError`。
@@ -117,7 +125,8 @@ print('ticks:', len(stats), '| pop:', stats[-1].population)"
 # 预期：ticks: 50 | pop: 157
 ```
 
-说明：小装置自检才传小 `--rows/--cols`；**正式批必须 `--device s2`**（忘传 = 静默换装置，R278 防呆会回显）。
+说明：小装置自检才传小 `--rows/--cols`（**非 480×960 会在 stderr 打「非 s2 正式档」提示**）；**正式批必须 `--device s2`**（忘传 = 静默换装置，R278 防呆会回显）。
+⚠️ 无生物小档 100 tick 的读数**全静态是预期**（初始饱和 + 无消耗者；`[实测]` `stock_sum` 恒定、`sat_mean=1.0`）——它只证明管线通、零科学信息；自检完请核对 manifest 的 `device_applied`/`world.rows`（显式小档忘改回此前无回显，2026-10-13 起有 stderr 提示兜底）。
 `run_bare_world` 默认输出到 `the-world-data/bare_world/`（数据仓）；自检请指到 `_rerun_logs/`（已 gitignore）。
 
 ### 1.6 常见报错速查
@@ -195,6 +204,12 @@ print('ticks:', len(stats), '| pop:', stats[-1].population)"
 6. **单测 + 小冒烟**：1 run × ≤2000 tick；性能冒烟（1.10 开/关 ms/tick 中位比门禁）。
 7. **预注册**：判据/零模型/统计口径**跑前锁死**（含固定 k、去混杂设计），见 `docs/预注册/`；范例 `docs/预注册/预注册-纯斑块世界-四臂-20261011.md`。
 8. **跑批 → 判读 → 汇报**：见 §6。
+
+**最小改动清单**（依据 env_field 样板，防漏登记——新 AI 实测易在多文件登记环节耗时）：
+
+- **动文件**：① 机制本体（`world/` 新模块或现有文件）② `simulation/config.py`（新 config 组/字段：默认关 + 列入 `SimConfig` + `from_dict` 旧档缺键回退）③ 引擎接线（如需要，默认关分支）④ `tests/test_<机制>.py`（关档逐位等价 + 机制生效 + fail-loud 守卫，≥3 例）。
+- **必跑（按序）**：① 靶向单测 ② 快速子集（§1.4，49 例）③ C7 钉子 `tests/test_energy_probe.py`（digest 不动）④ `tools/tick_denomination_audit.py` + `tools/config_fallback_audit.py`（rc=0；bool 字段自动豁免登记）⑤ 全量（52 红对账零新增）⑥ 性能冒烟 1 run × ≤2000 tick。
+- **提交**：新分支提交（不碰 main）；提交信息写明「**指纹变、行为不变**」（新键进 `fingerprint()` 时）与「默认关逐位等价」。
 
 ---
 

@@ -1,17 +1,17 @@
 # sim_core 构建说明（本机 Windows）
 
 > 建立：2026-09-26（`[所有者·天平]` 本地验证 `sim_core/src/lib.rs` 改动时踩坑记录）
-> 用途：**本机有 Rust 工具链**（此前误判为"本机无 cargo"，实为不在 bash `PATH` 里）。
+> 用途：**本机有 Rust 工具链**（曾误判为"本机无 cargo"，实为当时不在 bash `PATH` 里；2026-10-13 实测 `which cargo` 已成功）。
 
 ## 1. 工具链在哪
 
 ```
-C:\Users\圣羽\.cargo\bin\cargo.exe      # 不在 bash PATH ⇒ `which cargo` 会失败！
+C:\Users\圣羽\.cargo\bin\cargo.exe      # 2026-10-13 实测已在 bash PATH；为空时用绝对路径/补 PATH
 C:\Users\圣羽\.rustup\toolchains\stable-x86_64-pc-windows-msvc
 maturin 1.15.0（已装在 .venv）
 ```
 
-⇒ **`which cargo` 返回空 ≠ 没装 Rust**。要先用绝对路径或补 PATH。
+⇒ **`which cargo` 返回空 ≠ 没装 Rust**（PATH 未含 `~/.cargo/bin` 的场合）：用绝对路径或补 PATH。
 
 ## 2. 常规构建（推荐）
 
@@ -20,7 +20,7 @@ cd sim_core
 ..\.venv\Scripts\python.exe -m maturin develop --release
 ```
 
-⚠️ maturin 需要 `rustc` 在 PATH ⇒ Git Bash 下先 `PATH="/c/Users/圣羽/.cargo/bin:$PATH"`。
+⚠️ maturin 需要 `rustc` 在 PATH；若 `which cargo` 为空，Git Bash 下先 `PATH="/c/Users/圣羽/.cargo/bin:$PATH"`。
 
 ⚠️ **venv 路径含中文（本机即是：`C:\Users\圣羽\...`）** ⇒ `maturin develop --release` 会在 pip 输出解码处
 以 **GBK 失败**中止 ⇒ 必须前置 `PYTHONIOENCODING=utf-8`：

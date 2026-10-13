@@ -28,6 +28,8 @@
 
 ## 构建命令
 
+> ⚠️ **先分流**：下方命令块为 **Linux/云机** 口径；**Windows 本机（轻舟机位）不要直接套用**——走 `sim_core/BUILD.md` 的 maturin 配方（见本节点下方提示）。
+
 ```bash
 # 编译 Rust 扩展（release）
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -40,7 +42,7 @@ cp /tmp/sim_core_target/release/libsim_core.so ../sim_core.so
 cd .. && python3 -m pytest tests/ -q --ignore=tests/test_broker.py
 ```
 
-> 🖥️ **本机（Windows，轻舟机位）配方见 `sim_core/BUILD.md`**：用 `maturin develop --release` 而非 cargo build（cargo 不在 bash PATH；venv 路径含中文须前置 `PYTHONIOENCODING=utf-8`）。本机全量测试：`.venv/Scripts/python.exe -m pytest tests/ -q`（~10 分钟；`test_broker.py` 6 例依赖 fastapi/uvicorn/websockets，环境缺依赖时用上方 `--ignore`）。
+> 🖥️ **本机（Windows，轻舟机位）配方见 `sim_core/BUILD.md`**：用 `maturin develop --release` 而非 cargo build（venv 路径含中文须前置 `PYTHONIOENCODING=utf-8`；cargo 在 `~/.cargo/bin`，`which cargo` 为空时先补 PATH）。本机全量测试：`.venv/Scripts/python.exe -m pytest tests/ -q`（~10 分钟；`test_broker.py` 6 例依赖 fastapi/uvicorn/websockets，环境缺依赖时用上方 `--ignore`）。
 
 ## 关键约束
 
@@ -125,7 +127,7 @@ g15 任何判读**之前**必须先过生态门：**≥5 seed 中多数存活至
 
 ---
 
-## 测试状态（**2026-10-13 实测**；全量 `tests/` ≈9 分钟）
+## 测试状态（**2026-10-13 实测**；全量 `tests/` ≈9–10 分钟）
 
 - **全量（标准命令，`--ignore=tests/test_broker.py`）**：**1377 passed / 52 failed / 9 skipped**（`[实测]` 2026-10-13，537 s）。含 broker 档 = 1383/52/9（`test_broker.py` 6/6 绿，需 fastapi/uvicorn/websockets）。
 - **52 红全部为存量环境族、非代码回归**（逐名核过）：`test_f_r21_presets` ×36 + `test_r278_p3_device_flush` ×7（含 1 例 ULP 最末位）+ `test_r287_s3_sample_resume` ×4 + `test_221_snap_shard` ×3 + `test_r98_nonascii_print` ×1 + `test_f_r10_f_r12` ×1。
