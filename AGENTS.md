@@ -9,6 +9,8 @@
 >
 > 仓库已于 2026-09-13 迁移：主工作树 = `the-world/` 根，远端 `gitee` = `the-world`；
 > 实验数据在独立仓库 `the-world/the-world-data/`（**不进主仓**）。
+>
+> 🆕 **新 AI / 新协作者接手：先读根目录 `ONBOARDING.md`**——10 分钟跑通 + 架构地图 + 术语表 + 红线 + 加机制/跑实验流程。
 
 ## 项目概述
 
@@ -26,6 +28,8 @@
 
 ## 构建命令
 
+> ⚠️ **先分流**：下方命令块为 **Linux/云机** 口径；**Windows 本机（轻舟机位）不要直接套用**——走 `sim_core/BUILD.md` 的 maturin 配方（见本节点下方提示）。
+
 ```bash
 # 编译 Rust 扩展（release）
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -37,6 +41,8 @@ cp /tmp/sim_core_target/release/libsim_core.so ../sim_core.so
 # 跑测试
 cd .. && python3 -m pytest tests/ -q --ignore=tests/test_broker.py
 ```
+
+> 🖥️ **本机（Windows，轻舟机位）配方见 `sim_core/BUILD.md`**：用 `maturin develop --release` 而非 cargo build（venv 路径含中文须前置 `PYTHONIOENCODING=utf-8`；cargo 在 `~/.cargo/bin`，`which cargo` 为空时先补 PATH）。本机全量测试：`.venv/Scripts/python.exe -m pytest tests/ -q`（~10 分钟；`test_broker.py` 6 例依赖 fastapi/uvicorn/websockets，环境缺依赖时用上方 `--ignore`）。
 
 ## 关键约束
 
@@ -121,26 +127,24 @@ g15 任何判读**之前**必须先过生态门：**≥5 seed 中多数存活至
 
 ---
 
-## 测试状态
+## 测试状态（**2026-10-13 实测**；全量 `tests/` ≈9–10 分钟）
 
-- 全量：192 passed, 1 skipped（含 17 例 D2 单元测试 + 双路径逐位对拍 + 快照 + 信号 + 愉悦度 + 繁殖 + L10a + 基因注册表）
-- D2 信息结构：17/17（配置/数据结构/学习瓶颈/码本/信息不对称/Steels对齐/快照v3/向后兼容）
-- 快照：10/10（save/load + RNG 可复现 + 多次循环 + v3 兼容）
-- 信号发射：6/6（函数级对拍）
-- 愉悦度：5/5（函数级对拍）
-- 繁殖下沉：3/3（函数级对拍，T4）
-- 果实-种子传播：6/6（函数级对拍，L10a）
-- 基因注册表：18/18（双写漂移检测 + 元数据完整性）
+- **全量（标准命令，`--ignore=tests/test_broker.py`）**：**1377 passed / 52 failed / 9 skipped**（`[实测]` 2026-10-13，537 s）。含 broker 档 = 1383/52/9（`test_broker.py` 6/6 绿，需 fastapi/uvicorn/websockets）。
+- **52 红全部为存量环境族、非代码回归**（逐名核过）：`test_f_r21_presets` ×36 + `test_r278_p3_device_flush` ×7（含 1 例 ULP 最末位）+ `test_r287_s3_sample_resume` ×4 + `test_221_snap_shard` ×3 + `test_r98_nonascii_print` ×1 + `test_f_r10_f_r12` ×1。
+  根因：子进程 stdout 写 UTF-8，父进程 `subprocess.run(text=True)` 未指定 encoding ⇒ 中文 Windows 按 locale **GBK 解码** ⇒ `UnicodeDecodeError`（环境问题，非代码问题）。
+- 另有 1 例并发 flake：`test_r110_criteria.py::test_concurrent_start_exactly_one_wins`（负载下偶发；触发时总数变 1376/53/9，隔离复跑绿）。
+- **对账纪律**：与失败**集合**逐名对比（零新增才算过），不看总数（pass 数随测试增长）；新写 subprocess 测试两侧钉 UTF-8（env `PYTHONIOENCODING=utf-8` + `run(encoding="utf-8")`）。
+- 快速子集（≈2 秒，49 例）：`test_env_field.py` + `test_sim_core.py` + `test_genes_registry.py` ⇒ 49 passed。更多口径见 `ONBOARDING.md` §1.4。
 
-## 当前阶段（**2026-09-13 更正**；详见归档件 `_archive/2026-10-10-退役团队-归档/_share/路线图.md` 与 `_archive/2026-10-10-退役团队-归档/docs-旧档/决策与评审/实况.md`）
+## 当前阶段（**2026-10-13 更正**；活文档：`docs/项目状态.md` §三）
 
-> ⚠️ 本节原为 2026-09-08 版本，**已被 R1/R2/R5/R6 取代**。旧的"后续发展路线.md"已移入 `_archive/`，其 L9→L10→L8 优先级已作废。
+> ⚠️ 本节原为 2026-09-13 版本（P0' 生态稳定性修复为唯一阻塞）；随**纯斑块世界线**（2026-10-11 拍板）与运行模式切换（owner 直领），主线已更换，旧 P0' 表述作废。**查在办线一律以 `docs/项目状态.md` 为准**（下面是 2026-10-13 快照）。
 
-**当前阶段 = P0' 生态稳定性修复（阻塞一切）**：
+**在办线**：
 
-1. **P0**：R19 验收批（修复后代码、5 seed × 60k）过生态门——这是唯一阻塞项；
-2. **P1**：判据工具（漂变零模型改造 / 指标口径统一 / 最小统计推断）；
-3. **P2**：验 C3（R2 声誉权重，须先过生态门）；
-4. **支线**：`mini-world` 反事实沙盒（R17 已立项，评估阶段禁止写代码）。
+1. 🔝 **接手开发指南 / 项目记忆（owner 令第一优先）**——让任意无历史的新 AI 只看仓库即可接手；产物 = `ONBOARDING.md` + `docs/技术文档/技术-架构地图-20261013.md` + `docs/技术文档/技术-历史教训与关键决策-20261013.md`。传达件 `docs/汇报/话事人传达-20261013-C裁定与接手开发任务.md`。
+2. **纯斑块世界线**（无生物、底层规则自组织）——四臂批（s2/2000t）跑毕，交裁项 owner 裁定 **C**：本批不下单边结论；下一批 amend 预注册（fixed-k 主判据 + 明示 Magnus 纬度混杂 + 去混杂臂）**排在接手指南之后**。汇报 `docs/汇报/汇报-20261011-纯斑块世界四臂.md`｜预注册 `docs/预注册/预注册-纯斑块世界-四臂-20261011.md`。
+3. **实验主线 S0′**（ENERGY-CLOSE 合成闭环口径）——⏸ 三裁点已定档，接续方式待 owner 示意。
+4. **可视化 v1**——已实施完毕（分支 `feat/viz-v1-globe`），**owner 审过后才并 main**（v0 已在 main）。
 
 **纪律锚点**：对外表述一律锚定《战略定位》的 **L0–L4 判据阶梯**（原文见归档 `_archive/2026-10-10-退役团队-归档/docs-旧档/决策与评审/战略定位-20260912-语言涌现可达性.md`）；未过判据的不得写成"涌现"。
