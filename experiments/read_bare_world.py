@@ -1,12 +1,15 @@
-"""纯斑块世界四臂判读（read_bare_world.py）——观察侧，零重跑。
+"""纯斑块世界判读（read_bare_world.py）——观察侧，零重跑。
 
-口径真源 = 预注册 `docs/预注册/预注册-纯斑块世界-四臂-20261011.md`（§2 全套）；
+口径真源：旧批 = `docs/预注册/预注册-纯斑块世界-四臂-20261011.md`（§2 全套）；
+C 去混杂批 = `docs/预注册/预注册-纯斑块世界-去混杂-20261013.md`（fixed-k=2 主口径）。
 本脚本只读 `the-world-data/bare_world/arm{N}_s{seed}.{npz,csv,manifest.json}` 产物，
 不改引擎、不重跑。脚本偏差 = 脚本 bug，口径以预注册为准。
 
 用法
 ----
-  python experiments/read_bare_world.py --seed 42
+  python experiments/read_bare_world.py --seed 42                       # 旧批 arm1–4（legacy k* 口径）
+  python experiments/read_bare_world.py --seed 42 --arms 5,6,7,8 \
+      --fixed-k 2 --pairs 5:8,6:7 --fig2-arm 7                          # C 去混杂批（amend 口径）
 """
 from __future__ import annotations
 
@@ -22,7 +25,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-ARMS = (1, 2, 3, 4)
+ARMS = (1, 2, 3, 4)   # 默认=旧批臂集；C 批以 --arms 覆写
 
 
 # ---------------------------------------------------------------- 几何/斑块
@@ -258,6 +261,42 @@ def _label_map(plab: np.ndarray, lab_patch: np.ndarray) -> np.ndarray:
     return rgb.reshape(*plab.shape, 3)
 
 
+def _plot_lines(path: Path, series: dict[str, list[float]]) -> None:
+    """手绘折线小图（附录用；无字体 ⇒ 不画文字，数值以报告 JSON/表为准）。
+
+    折线色序 = _LABEL_COLORS 顺序（与臂列表一一对应）；x 轴刻度 = k 位置。
+    """
+    h, w = 220, 360
+    img = np.full((h, w, 3), 245, dtype=np.uint8)
+    ml, mr, mt, mb = 44, 12, 12, 26
+    x0, x1 = ml, w - mr
+    y0, y1 = h - mb, mt
+    vals = [v for s in series.values() for v in s]
+    vmin, vmax = min(vals), max(vals)
+    pad = max((vmax - vmin) * 0.08, 1e-4)
+    vmin, vmax = vmin - pad, vmax + pad
+    nk = len(next(iter(series.values())))
+    xk = [x0 + (x1 - x0) * i / max(nk - 1, 1) for i in range(nk)]
+    img[y1:y0 + 1, x0] = 70
+    img[y0, x0:x1 + 1] = 70
+    for xv in xk:
+        img[y0:y0 + 5, int(round(xv))] = 70
+    for j, sv in enumerate(series.values()):
+        col = _LABEL_COLORS[j % _LABEL_COLORS.shape[0]]
+        pts = [(xk[i], y0 - (y0 - y1) * (sv[i] - vmin) / max(vmax - vmin, 1e-12))
+               for i in range(nk)]
+        samples = list(pts)
+        for (xa, ya), (xb, yb) in zip(pts[:-1], pts[1:]):
+            samples.extend((xa + (xb - xa) * f, ya + (yb - ya) * f)
+                           for f in np.linspace(0.0, 1.0, max(int(abs(xb - xa)) * 2, 2)))
+        for xv, yv in samples:
+            yc = min(max(int(round(yv)), y1), y0)
+            xc = min(max(int(round(xv)), x0), x1)
+            img[max(yc - 1, y1):min(yc + 1, y0) + 1,
+                max(xc - 1, x0):min(xc + 1, x1) + 1] = col
+    _write_png(path, img)
+
+
 # ---------------------------------------------------------------- 主流程
 
 def _load(data_dir: Path, arm: int, seed: int) -> dict:
@@ -286,29 +325,54 @@ def main(argv=None) -> None:
         pass
     ap = argparse.ArgumentParser(description="四臂判读（预注册口径）")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--arms", default=",".join(str(a) for a in ARMS),
+                    help="臂列表，逗号分隔（默认 %(default)s）")
+    ap.add_argument("--fixed-k", type=int, default=0,
+                    help="固定 k 主口径（0=legacy k*；C 批=2）")
+    ap.add_argument("--pairs", default="",
+                    help="归因配对 null:treat（如 5:8,6:7；需 --fixed-k）")
+    ap.add_argument("--fig2-arm", type=int, default=0,
+                    help="fig2 场四联用臂（0=臂列表中最后一个含 env 场的臂）")
+    ap.add_argument("--no-figs", action="store_true", help="跳过出图（校准复算用）")
     ap.add_argument("--data-dir",
                     default=str(ROOT / "the-world-data" / "bare_world"))
     args = ap.parse_args(argv)
 
     data_dir = Path(args.data_dir)
-    runs = {a: _load(data_dir, a, args.seed) for a in ARMS}
-    rows, cols = (runs[1]["man"]["world"]["rows"], runs[1]["man"]["world"]["cols"])
+    arms = tuple(int(x) for x in args.arms.split(",") if x.strip())
+    fixed_k = int(args.fixed_k)
+    if fixed_k and not 2 <= fixed_k <= 6:
+        raise SystemExit(f"🔴 --fixed-k 只许 2..6（给 {fixed_k}）")
+    pairs = []
+    for tok in args.pairs.split(","):
+        tok = tok.strip()
+        if tok:
+            n_arm, t_arm = tok.split(":")
+            pairs.append((int(n_arm), int(t_arm)))
+    if pairs and not fixed_k:
+        raise SystemExit("🔴 --pairs 需与 --fixed-k 同用（归因增量按固定 k 口径）")
+    base_arm = arms[0]
+    runs = {a: _load(data_dir, a, args.seed) for a in arms}
+    rows = runs[base_arm]["man"]["world"]["rows"]
+    cols = runs[base_arm]["man"]["world"]["cols"]
     lat_row = _lat_deg(rows)
     n_cells = rows * cols
     area1 = np.cos(np.radians(np.repeat(lat_row, cols)))
 
-    report: dict = {"seed": args.seed, "rows": rows, "cols": cols, "arms": {}}
+    report: dict = {"seed": args.seed, "rows": rows, "cols": cols,
+                    "arms_list": [int(a) for a in arms],
+                    "fixed_k": int(fixed_k), "arms": {}}
 
     # ---- 几何一致性 + 口径 B 恒等（预注册 §1/§2.1 断言；npz 全为扁平 (n_cells,)）----
-    pm_flat = runs[1]["npz"]["patch_mask"].astype(bool)
+    pm_flat = runs[base_arm]["npz"]["patch_mask"].astype(bool)
     pm0 = pm_flat.reshape(rows, cols)
     caps = {}
-    for a in ARMS:
+    for a in arms:
         pm = runs[a]["npz"]["patch_mask"].astype(bool)
         if not np.array_equal(pm, pm_flat):
-            raise SystemExit(f"[STOP] arm{a} patch_mask 与 arm1 不一致——破几何一致性，停读照报")
+            raise SystemExit(f"[STOP] arm{a} patch_mask 与 arm{base_arm} 不一致——破几何一致性，停读照报")
     plab, n_patch = _components(pm0)
-    for a in ARMS:
+    for a in arms:
         cap = runs[a]["npz"]["capacity"]
         caps[a] = cap
         if not np.array_equal(cap > 0.0, pm_flat):
@@ -317,14 +381,14 @@ def main(argv=None) -> None:
     report["patch_cells"] = int(pm0.sum())
 
     # ---- CSV 平线检查（预注册 §3.1；非平 = 发现事件，照报不停）----
-    report["csv_flatness"] = {a: _csv_flatness(runs[a]["csv"]) for a in ARMS}
-    flat_all = all(v["flat"] for a in ARMS
+    report["csv_flatness"] = {a: _csv_flatness(runs[a]["csv"]) for a in arms}
+    flat_all = all(v["flat"] for a in arms
                    for v in report["csv_flatness"][a].values())
     report["csv_all_flat"] = bool(flat_all)
 
     # ---- C-c 完整性：三快照容量逐位相同（预注册 §2.4）----
     cc = {}
-    for a in ARMS:
+    for a in arms:
         keys = sorted((k for k in runs[a]["npz"].files if k.startswith("stock_t")),
                       key=lambda k: int(k.split("_t")[1]))
         snaps = [runs[a]["npz"][k] for k in keys]
@@ -332,20 +396,23 @@ def main(argv=None) -> None:
     report["snapshot_identity"] = cc
 
     # ---- 供给记账（预注册 §2.5）----
-    cap_sum = {a: float(caps[a].sum()) for a in ARMS}
-    capw_sum = {a: float((caps[a] * area1).sum()) for a in ARMS}
+    cap_sum = {a: float(caps[a].sum()) for a in arms}
+    capw_sum = {a: float((caps[a] * area1).sum()) for a in arms}
+    report["supply_base_arm"] = base_arm
     report["supply"] = {
         "cap_sum": cap_sum,
         "cap_area_sum": capw_sum,
-        "cap_sum_pct_vs_arm1": {a: (cap_sum[a] / cap_sum[1] - 1.0) * 100.0 for a in ARMS},
-        "cap_area_pct_vs_arm1": {a: (capw_sum[a] / capw_sum[1] - 1.0) * 100.0 for a in ARMS},
+        "cap_sum_pct_vs_base": {a: (cap_sum[a] / cap_sum[base_arm] - 1.0) * 100.0 for a in arms},
+        "cap_area_pct_vs_base": {a: (capw_sum[a] / capw_sum[base_arm] - 1.0) * 100.0 for a in arms},
     }
 
     # ---- 每臂特征/聚类/轮廓/连贯（预注册 §2.2–2.4）----
     pairs_by_d = {d: _adjacent_pairs(plab, d) for d in (2, 3)}
-    labels_at_kstar = {}
+    labels_main = {}
     feats_all = {}
-    for a in ARMS:
+    Xall = {}
+    abslat_c = np.abs(np.repeat(lat_row, cols))
+    for a in arms:
         u = None
         if "w" in runs[a]["npz"].files:
             # w_ref 不在 npz 里 ⇒ 用 manifest env_probe.w_mean（= env_field.w_ref，面积权均值）
@@ -361,6 +428,7 @@ def main(argv=None) -> None:
         mu = X_raw.mean(axis=0)
         sd = X_raw.std(axis=0)
         X = np.where(sd > 1e-12, (X_raw - mu) / np.where(sd > 1e-12, sd, 1.0), 0.0)
+        Xall[a] = X
         rng = np.random.default_rng(0)
         sil = {}
         labels_by_k = {}
@@ -369,87 +437,201 @@ def main(argv=None) -> None:
             labels_by_k[k] = lab
             sil[k] = _silhouette(X, lab)
         kstar = max(sil, key=sil.get)
-        labels_at_kstar[a] = labels_by_k[kstar]
-        sens = {k: _ari(labels_by_k[k], labels_by_k[kstar]) for k in labels_by_k}
+        main_k = fixed_k if fixed_k else kstar
+        labels_main[a] = labels_by_k[main_k]
+        sens = {k: _ari(labels_by_k[k], labels_by_k[main_k]) for k in labels_by_k}
         per_d = {}
         for d, pr in pairs_by_d.items():
             if pr.size == 0:
                 per_d[d] = {"n_pairs": 0}
                 continue
-            obs = _purity(labels_by_k[kstar], pr)
-            nul_m, nul_s, nul_x = _purity_null(labels_by_k[kstar], pr)
+            obs = _purity(labels_main[a], pr)
+            nul_m, nul_s, nul_x = _purity_null(labels_main[a], pr)
             z = (obs - nul_m) / nul_s if nul_s > 1e-300 else float("inf")
             per_d[d] = {"n_pairs": int(pr.shape[0]), "purity_obs": obs,
                         "null_mean": nul_m, "null_std": nul_s, "null_max": nul_x,
                         "purity_z": z, "purity_z_gt_3": bool(z > 3.0)}
-        report["arms"][a] = {
+        rec = {
             "arm_name": runs[a]["man"]["arm_name"],
-            "silhouette": sil, "kstar": int(kstar),
+            "silhouette": sil, "kstar": int(kstar), "main_k": int(main_k),
             "sensitivity_ari": sens,
             "coherence": per_d,
-            "cluster_sizes": np.bincount(labels_at_kstar[a]).tolist(),
+            "cluster_sizes": np.bincount(labels_main[a]).tolist(),
             "feat_sd": {f: float(s) for f, s in zip(
                 ("f1_log_area", "f2_abslat", "f3_cap_mean", "f4_u_mean", "f5_cap_cv"), sd)},
         }
+        # ---- fixed-k 辅读①：corr(u|lat) / corr(temp|lat)（全格，与诊断同式）----
+        if u is not None:
+            rec["corr_u_lat"] = float(np.corrcoef(u.ravel(), abslat_c)[0, 1])
+        if "temp" in runs[a]["npz"].files:
+            rec["corr_temp_lat"] = float(np.corrcoef(
+                runs[a]["npz"]["temp"].ravel(), abslat_c)[0, 1])
+        # ---- fixed-k 辅读②：径流型簇差动（main-k 逐簇：河格占比/富集比/CV/特征）----
+        if "river_mask" in runs[a]["npz"].files:
+            rm = runs[a]["npz"]["river_mask"].astype(bool)
+            pid_cell = plab.ravel()
+            lab_cell = np.where(pid_cell >= 0,
+                                labels_main[a][np.clip(pid_cell, 0, None)], -1)
+            base_rate = float(rm[pid_cell >= 0].mean())
+            cl = {}
+            for c in np.unique(labels_main[a]):
+                pc = labels_main[a] == c
+                cells = lab_cell == c
+                rate = float(rm[cells].mean()) if cells.any() else float("nan")
+                cl[int(c)] = {
+                    "n_patches": int(pc.sum()),
+                    "river_frac": rate,
+                    "river_enrich": (rate / base_rate) if base_rate > 0 else None,
+                    "f5_cap_cv": float(feats["f5_cap_cv"][pc].mean()),
+                    "f3_cap_mean": float(feats["f3_cap_mean"][pc].mean()),
+                    "f4_u_mean": float(feats["f4_u_mean"][pc].mean()),
+                    "f2_abslat": float(feats["f2_abslat"][pc].mean()),
+                }
+            rec["river_cluster"] = {"baseline_frac": base_rate, "clusters": cl}
+        report["arms"][a] = rec
 
     # ---- 跨臂 ARI 矩阵（预注册 §2.4 C-d 部分）----
     ari_mat = {}
-    for a in ARMS:
-        for b in ARMS:
-            ari_mat[f"{a}-{b}"] = _ari(labels_at_kstar[a], labels_at_kstar[b])
+    for a in arms:
+        for b in arms:
+            ari_mat[f"{a}-{b}"] = _ari(labels_main[a], labels_main[b])
     report["ari_matrix"] = ari_mat
 
+    # ---- 归因增量（fixed-k 配对）：Δz = z_t − z_n（d=2 主 / d=3 复验）----
+    if pairs:
+        pt = {}
+        for n_arm, t_arm in pairs:
+            if n_arm not in runs or t_arm not in runs:
+                raise SystemExit(f"[STOP] --pairs 臂不在 --arms 内：{n_arm}:{t_arm}")
+            rec = {"null": n_arm, "treat": t_arm}
+            for d in (2, 3):
+                cn = report["arms"][n_arm]["coherence"].get(d, {})
+                ct = report["arms"][t_arm]["coherence"].get(d, {})
+                if not cn.get("n_pairs") or not ct.get("n_pairs"):
+                    rec[f"d{d}"] = None
+                    continue
+                rec[f"d{d}"] = {
+                    "z_null": cn["purity_z"], "z_treat": ct["purity_z"],
+                    "delta_z": ct["purity_z"] - cn["purity_z"],
+                    "delta_obs": ct["purity_obs"] - cn["purity_obs"],
+                    "pass_dz_ge_3": bool(ct["purity_z"] - cn["purity_z"] >= 3.0),
+                }
+            rec["ari_pair"] = ari_mat.get(f"{n_arm}-{t_arm}")
+            pt[f"{n_arm}->{t_arm}"] = rec
+        report["pairs_delta_z"] = pt
+
+    # ---- 次要读法（amend §3.4-4）：u 残差口径 f4' = f4 − OLS(f4~f2)，重聚类 fixed_k ----
+    if fixed_k:
+        sec_arms = {}
+        for a in arms:
+            f2 = feats_all[a]["f2_abslat"]
+            f4 = feats_all[a]["f4_u_mean"]
+            A = np.stack([np.ones_like(f2), f2], axis=1)
+            coef, *_ = np.linalg.lstsq(A, f4, rcond=None)
+            f4r = f4 - A @ coef
+            Xr = Xall[a].copy()
+            sd_r = float(f4r.std())
+            Xr[:, 3] = (f4r - f4r.mean()) / sd_r if sd_r > 1e-12 else 0.0
+            lab_r, _ = _kmeans(Xr, fixed_k, np.random.default_rng(0))
+            pr = pairs_by_d[2]
+            obs = _purity(lab_r, pr)
+            nm, ns, _nx = _purity_null(lab_r, pr)
+            z = (obs - nm) / ns if ns > 1e-300 else float("inf")
+            sec_arms[a] = {"purity_obs": obs, "null_mean": nm, "null_std": ns,
+                           "purity_z": z, "z_gt_3": bool(z > 3.0),
+                           "ols_coef": [float(coef[0]), float(coef[1])]}
+        sec_pairs = {}
+        for n_arm, t_arm in pairs:
+            if n_arm in sec_arms and t_arm in sec_arms:
+                dz = sec_arms[t_arm]["purity_z"] - sec_arms[n_arm]["purity_z"]
+                sec_pairs[f"{n_arm}->{t_arm}"] = {
+                    "delta_z_prime": dz, "pass_dz_ge_3": bool(dz >= 3.0)}
+        report["secondary_u_resid"] = {"arms": sec_arms, "pairs": sec_pairs}
+
     # ---- 图（预注册 §4）----
+    tag = "".join(str(a) for a in arms)
     figs = data_dir / "figs"
-    figs.mkdir(parents=True, exist_ok=True)
-    cap_lo = min(float(caps[a][pm_flat].min()) for a in ARMS)
-    cap_hi = max(float(caps[a][pm_flat].max()) for a in ARMS)
-    cap_panels = [_cmap(((caps[a] - cap_lo) / max(cap_hi - cap_lo, 1e-300))
-                        .reshape(rows, cols), ~pm0)
-                  for a in ARMS]
-    _write_png(figs / "fig1_capacity_4arms.png", np.concatenate(cap_panels, axis=0))
+    if not args.no_figs:
+        figs.mkdir(parents=True, exist_ok=True)
+        cap_lo = min(float(caps[a][pm_flat].min()) for a in arms)
+        cap_hi = max(float(caps[a][pm_flat].max()) for a in arms)
+        cap_panels = [_cmap(((caps[a] - cap_lo) / max(cap_hi - cap_lo, 1e-300))
+                            .reshape(rows, cols), ~pm0)
+                      for a in arms]
+        _write_png(figs / f"fig1_capacity_{tag}.png", np.concatenate(cap_panels, axis=0))
 
-    lab_panels = [_label_map(plab, labels_at_kstar[a]) for a in ARMS]
-    _write_png(figs / "fig4_clusters_4arms.png", np.concatenate(lab_panels, axis=0))
+        lab_panels = [_label_map(plab, labels_main[a]) for a in arms]
+        _write_png(figs / f"fig4_clusters_{tag}.png", np.concatenate(lab_panels, axis=0))
 
-    if "h" in runs[4]["npz"].files:
-        e = runs[4]["npz"]
-        h = e["h"].reshape(rows, cols)
-        w = e["w"].reshape(rows, cols)
-        acc = e["acc"].reshape(rows, cols)
-        rm = e["river_mask"].reshape(rows, cols).astype(bool)
-        h01 = (h - h.min()) / max(float(np.ptp(h)), 1e-300)
-        w01 = (w - w.min()) / max(float(np.ptp(w)), 1e-300)
-        a01 = np.log10(1.0 + acc)
-        a01 = (a01 - a01.min()) / max(float(np.ptp(a01)), 1e-300)
-        r01 = np.where(rm, 1.0, 0.0)
-        panel = np.concatenate([_cmap(h01, np.zeros_like(pm0)),
-                                _cmap(w01, np.zeros_like(pm0)),
-                                _cmap(a01, np.zeros_like(pm0)),
-                                _cmap(r01, ~rm)], axis=0)
-        _write_png(figs / "fig2_arm4_env_fields.png", panel)
+        fig2_arm = args.fig2_arm or next(
+            (a for a in reversed(arms) if "h" in runs[a]["npz"].files), 0)
+        if fig2_arm in runs and "h" in runs[fig2_arm]["npz"].files:
+            e = runs[fig2_arm]["npz"]
+            h = e["h"].reshape(rows, cols)
+            w = e["w"].reshape(rows, cols)
+            acc = e["acc"].reshape(rows, cols)
+            rm = e["river_mask"].reshape(rows, cols).astype(bool)
+            h01 = (h - h.min()) / max(float(np.ptp(h)), 1e-300)
+            w01 = (w - w.min()) / max(float(np.ptp(w)), 1e-300)
+            a01 = np.log10(1.0 + acc)
+            a01 = (a01 - a01.min()) / max(float(np.ptp(a01)), 1e-300)
+            r01 = np.where(rm, 1.0, 0.0)
+            panel = np.concatenate([_cmap(h01, np.zeros_like(pm0)),
+                                    _cmap(w01, np.zeros_like(pm0)),
+                                    _cmap(a01, np.zeros_like(pm0)),
+                                    _cmap(r01, ~rm)], axis=0)
+            _write_png(figs / f"fig2_arm{fig2_arm}_env_fields.png", panel)
 
-    out = data_dir / f"readout_s{args.seed}.json"
+        # fig3（附录）：k–轮廓曲线（手绘；色序=臂序）
+        _plot_lines(figs / f"fig3_silhouette_{tag}.png",
+                    {f"arm{a}": [report["arms"][a]["silhouette"][k] for k in range(2, 7)]
+                     for a in arms})
+
+    # 文件名避撞：legacy 默认臂集沿用旧名；其余（含 C 批）带臂号 tag
+    if arms == ARMS and not fixed_k:
+        out = data_dir / f"readout_s{args.seed}.json"
+    else:
+        out = data_dir / f"readout_s{args.seed}_a{tag}.json"
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ---- 控制台摘要 ----
     print(f"n_patch={n_patch} cells={report['patch_cells']} csv_all_flat={report['csv_all_flat']}")
     print(f"snapshot_identity: {cc}")
-    print("supply:", json.dumps(report["supply"]["cap_area_pct_vs_arm1"], ensure_ascii=False))
-    for a in ARMS:
+    print(f"supply(vs arm{base_arm}, cap_area):",
+          json.dumps(report["supply"]["cap_area_pct_vs_base"], ensure_ascii=False))
+    for a in arms:
         r = report["arms"][a]
         c2 = r["coherence"].get(2, {})
         c3 = r["coherence"].get(3, {})
         fmt = lambda c: (f"n={c.get('n_pairs')} pur={c.get('purity_obs', float('nan')):.4f} "
                          f"z={c.get('purity_z', float('nan')):.2f}" if c.get("n_pairs") else "n/a")
-        print(f"[arm{a} {r['arm_name']}] k*={r['kstar']} sil={r['silhouette']} "
+        print(f"[arm{a} {r['arm_name']}] k*={r['kstar']} main_k={r['main_k']} "
               f"sizes={r['cluster_sizes']}")
         print(f"    C-b d=2: {fmt(c2)} | d=3: {fmt(c3)}")
-    print("ARI matrix:")
-    for a in ARMS:
-        print("  ", " ".join(f"{ari_mat[f'{a}-{b}']:+.3f}" for b in ARMS))
+        if "corr_u_lat" in r:
+            print(f"    corr(u|lat)={r['corr_u_lat']:+.4f} "
+                  f"corr(temp|lat)={r.get('corr_temp_lat', float('nan')):+.4f}")
+    print("ARI matrix (main labels):")
+    for a in arms:
+        print("  ", " ".join(f"{ari_mat[f'{a}-{b}']:+.3f}" for b in arms))
+    if pairs:
+        print("pairs Δz (d=2 main / d=3 复验):")
+        for key, p_rec in report["pairs_delta_z"].items():
+            d2, d3 = p_rec.get("d2"), p_rec.get("d3")
+            s2 = (f"z {d2['z_null']:.2f}->{d2['z_treat']:.2f} Δz={d2['delta_z']:+.2f} "
+                  f"{'PASS' if d2['pass_dz_ge_3'] else 'fail'}") if d2 else "n/a"
+            s3 = f"Δz={d3['delta_z']:+.2f}" if d3 else "n/a"
+            ari = p_rec.get("ari_pair")
+            print(f"  {key}: d2[{s2}] d3[{s3}] ari={ari:.3f}" if ari is not None
+                  else f"  {key}: d2[{s2}] d3[{s3}] ari=n/a")
+    if "secondary_u_resid" in report:
+        sp = report["secondary_u_resid"].get("pairs", {})
+        print("secondary u-resid pairs:", json.dumps(
+            {k: {"dz'": round(v["delta_z_prime"], 2), "pass": v["pass_dz_ge_3"]}
+             for k, v in sp.items()}, ensure_ascii=False))
     print(f"-> {out}")
-    print(f"-> figs: {figs}")
+    if not args.no_figs:
+        print(f"-> figs: {figs}")
 
 
 if __name__ == "__main__":

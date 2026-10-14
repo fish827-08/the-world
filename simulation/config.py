@@ -1472,6 +1472,25 @@ class EnvFieldConfig:
     * 开档但 `water_sensitivity=0 ∧ cap_sensitivity=0` ⇒ 两个因子整块跳过（恒 1）
       ⇒ **同样逐位等价**（ENV-FIELD §二-5 的同型"回归安全"设计）。
 
+    🔴 去混杂选项 `uniform_base_t`（默认关；2026-10-13 接手指南验收件）
+    ----------------------------------------------------------------
+    * 动机 = ADR 教训 2「Magnus 纬度压印」：T 链的 `base_temperature(φ)` 是纬度函数 ⇒
+      即使 H 被置换，W 仍带纬度暗通道（四臂批实测 `corr(u,|lat|)` ≈ −0.93~−0.98）。
+    * 语义：`True` ⇒ `base_t` 置为**面积权全球均值常数**（只关梯度、不动全球均值——
+      面积权均温逐位保持）⇒ W 的纬度压印只剩"地形偶然残余"。
+    * `False`（默认）⇒ 走旧公式，**逐位不变**（默认关档 = 唯一回滚点；C7 基线不动）。
+
+    🔴 自然剖面选项 `insolation_profile`（默认关；2026-10-13 owner 令"调节到自然界一致"）
+    --------------------------------------------------------------------------------
+    * 动机 = 把纬度影响从**手定常数**（`t_pole/t_equator = −20/30`°C 线性 cosφ）换成
+      **自然界一致**：年平辐照数值积分 → 有效辐射温度 + 温室增量（一层 EBM）。
+    * 常数全为地球来源、零自由参数：`S0=1361 W/m²`（太阳常数）、`ε=23.44°`（黄赤交角）、
+      `α=0.29`（行星反照率）、`σ=5.670374419e-8 W·m⁻²·K⁻⁴`、`ΔT_gh=33 K`（温室增量）。
+      期望剖面：赤道 ≈ +28.6°C、极点 ≈ −23.0°C（与真实地球年平吻合）。
+    * 与 `uniform_base_t` **互斥**（fail-loud）：一个去梯度、一个换自然梯度，不可叠加。
+    * `False`（默认）⇒ 走旧公式，**逐位不变**（同一回滚点；只作用于 EnvField 内部、
+      不动 `LightAndTemperature.base_temperature` 本体）。
+
     🔴 fail-loud 组合（构造期，见 `sphere_engine` 接线；禁静默）
     ----------------------------------------------------------
     * `enabled ∧ simulation.use_sim_core` ⇒ 报错（Rust regrow 不吃新因子 ⇒ 静默 no-op，
@@ -1496,6 +1515,12 @@ class EnvFieldConfig:
     terrain_octaves: int = 6         # fBm 八度数（振幅 ×0.5、频率 ×2 每级）
     terrain_smooth: int = 2          # 路由前平滑遍数（真 8 邻居均值；抑制噪声级微洼）
     shuffle: bool = False            # 🔴 置换零模型（对照臂）：空间置换 H（保直方图、毁结构）
+    uniform_base_t: bool = False     # 🔴 去混杂臂选项（默认关）：True ⇒ 基温取"面积权全球均值"
+                                     #   （只关纬度梯度、不动全球均值；治 Magnus 纬度压印混杂——
+                                     #   见 ADR 教训 2「置换后水分场仍带纬度梯度」）
+    insolation_profile: bool = False # 🔴 自然剖面选项（默认关）：True ⇒ 基温取 EBM 年平气温剖面
+                                     #   （辐照数值积分；常数全为地球来源——见上方 docstring；
+                                     #   与 uniform_base_t 互斥）
     lapse_c: float = 20.0            # H∈[0,1] 全程温差（°C）：T = base_temperature − lapse×H
     orographic: float = 1.0          # 抬升增雨系数：Pr = q × (1 + orographic×H)
     et_frac: float = 0.5             # 蒸散比：Et = et_frac × q（q = Magnus 饱和水汽压，hPa）
@@ -1507,6 +1532,10 @@ class EnvFieldConfig:
     def __post_init__(self) -> None:
         assert isinstance(self.enabled, bool), "enabled 必须是布尔值"
         assert isinstance(self.shuffle, bool), "shuffle 必须是布尔值"
+        assert isinstance(self.uniform_base_t, bool), "uniform_base_t 必须是布尔值"
+        assert isinstance(self.insolation_profile, bool), "insolation_profile 必须是布尔值"
+        assert not (self.uniform_base_t and self.insolation_profile), \
+            "uniform_base_t 与 insolation_profile 互斥（去梯度 ≠ 自然梯度，不可叠加）"
         assert self.terrain_lattice >= 4, "terrain_lattice ≥ 4（太小 = 全场一个团块）"
         assert self.terrain_octaves >= 1, "terrain_octaves ≥ 1"
         assert self.terrain_smooth >= 0, "terrain_smooth ≥ 0"

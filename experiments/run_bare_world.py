@@ -9,6 +9,12 @@
     2 置换零模型（对照） 全规则 + H 空间置换（空间归因 null）
     3 地形（处理）       H→W→P；无河（runoff_gain=0）
     4 全规则（处理）     地形 + 河流汇流（runoff_gain=2.0）
+  【扩展臂 5–8：C 裁下去混杂/自然剖面候选（2026-10-13；跑批须 amend 预注册批准）】
+    5 置换+去纬度        5 = 2 的 base_t 换面积权全球均值（uniform_base_t；杀纬度梯度）
+    6 置换+自然剖面      6 = 2 的 base_t 换 EBM 年平气温剖面（insolation_profile）
+    7 全规则+自然剖面    7 = 4 的 base_t 换 EBM 剖面
+    8 全规则+去纬度      8 = 4 的 base_t 换面积权全球均值
+  （5–8 相对 2/4 只动 `base_t` 一项；1–4 逐键冻结不动——旧预注册行仍以本表为真源。）
   `water_sensitivity = cap_sensitivity = 1.0`（线性耦合 = 最小假设；AWM=1 归一由
   ENV 场自身保证、k_max=4.0 默认上钳）、`terrain_*`/`lapse_c`/`orographic`/`et_frac`
   全走 EnvFieldConfig 默认。
@@ -47,6 +53,7 @@ from simulation.sphere_engine import SphereEngine  # noqa: E402
 from tools.device_presets import add_device_arg, resolve_device  # noqa: E402
 
 #: 四臂定义（预注册引用本表；键名与 EnvFieldConfig 字段对齐）
+#: 1–4 = 原四臂（`2b02269` 起逐键冻结）；5–8 = C 裁下去混杂候选（只比 2/4 多 `base_t` 键）
 ARMS: dict[int, dict] = {
     1: {"name": "现状(对照)", "env": False, "shuffle": False,
         "runoff_gain": 0.0, "ws": 0.0, "cs": 0.0},
@@ -56,6 +63,14 @@ ARMS: dict[int, dict] = {
         "runoff_gain": 0.0, "ws": 1.0, "cs": 1.0},
     4: {"name": "全规则(处理)", "env": True, "shuffle": False,
         "runoff_gain": 2.0, "ws": 1.0, "cs": 1.0},
+    5: {"name": "置换+去纬度", "env": True, "shuffle": True,
+        "runoff_gain": 2.0, "ws": 1.0, "cs": 1.0, "base_t": "uniform"},
+    6: {"name": "置换+自然剖面", "env": True, "shuffle": True,
+        "runoff_gain": 2.0, "ws": 1.0, "cs": 1.0, "base_t": "insolation"},
+    7: {"name": "全规则+自然剖面", "env": True, "shuffle": False,
+        "runoff_gain": 2.0, "ws": 1.0, "cs": 1.0, "base_t": "insolation"},
+    8: {"name": "全规则+去纬度", "env": True, "shuffle": False,
+        "runoff_gain": 2.0, "ws": 1.0, "cs": 1.0, "base_t": "uniform"},
 }
 
 
@@ -80,6 +95,13 @@ def build_cfg(arm: int, seed: int, rows: int, cols: int, patches: int,
         e.runoff_gain = float(spec["runoff_gain"])
         e.water_sensitivity = float(spec["ws"])
         e.cap_sensitivity = float(spec["cs"])
+        base_t = spec.get("base_t", "classic")   # 5–8 臂用；1–4 无此键 ⇒ classic
+        if base_t == "uniform":
+            e.uniform_base_t = True
+        elif base_t == "insolation":
+            e.insolation_profile = True
+        elif base_t != "classic":
+            raise ValueError(f"未知 base_t 档：{base_t!r}（classic/uniform/insolation）")
     return cfg
 
 
@@ -208,7 +230,8 @@ def main(argv=None) -> None:
         pass
     ap = argparse.ArgumentParser(description="无生物纯场装置（四臂协议 §十五）")
     ap.add_argument("--arm", type=int, choices=sorted(ARMS), required=True,
-                    help="1 现状 | 2 置换零模型 | 3 地形 | 4 全规则")
+                    help="1 现状 | 2 置换零模型 | 3 地形 | 4 全规则 | 5 置换+去纬度 | "
+                         "6 置换+自然剖面 | 7 全规则+自然剖面 | 8 全规则+去纬度")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--ticks", type=int, default=2000)
     ap.add_argument("--sample", type=int, default=50, help="CSV 样点间隔（tick）")

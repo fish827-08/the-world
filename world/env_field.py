@@ -10,6 +10,11 @@
 ----------------------------------------------------------------------------------
     H  ← 3D 值噪声 fBm（球面采样；独立 rng 流，**不消费引擎 RNG**）
     T  = base_temperature(φ) − lapse_c×H            （气候态温度，°C）
+        └ `cfg.uniform_base_t=True`（去混杂选项，默认关）⇒ base_temperature(φ) 换成其
+          **面积权全球均值**常数（只关纬度梯度、不动全球均值；治 Magnus 纬度压印混杂）
+        └ `cfg.insolation_profile=True`（自然剖面选项，默认关）⇒ base_temperature(φ) 换成
+          **EBM 年平气温剖面**（辐照数值积分；常数全为地球来源 ⇒ 纬度影响与自然界一致）
+          （两选项互斥，fail-loud）
     q  = 6.11×exp(17.27T/(237.3+T))                 （Magnus 饱和水汽压，hPa）
     Pr = q×(1 + orographic×H)                       （抬升增雨）
     Et = et_frac×q                                  （蒸散）
@@ -66,6 +71,47 @@ _STREAM_NOISE = 0xE17F
 _STREAM_SHUFFLE = 0x5A17
 #: priority-flood 抬升步长（保 filled 沿接收者链严格下降 ⇒ 路由树无环）
 _FLOOD_EPS = 1e-6
+
+#: 一层 EBM 自然剖面常数（全为地球观测值；`insolation_profile` 选项用，零自由参数）
+_SOLAR_CONSTANT_WM2 = 1361.0        # 太阳常数 S0（W/m²）
+_OBLIQUITY_RAD = np.radians(23.44)  # 黄赤交角 ε
+_PLANETARY_ALBEDO = 0.29            # 行星反照率 α
+_SIGMA_SB = 5.670374419e-8          # 斯特藩–玻尔兹曼常数 σ（W·m⁻²·K⁻⁴）
+_GREENHOUSE_K = 33.0                # 温室增量 ΔT_gh（K，现代地球值）
+_DAYS_PER_YEAR = 365                # 年采样点数（等距覆盖整年）
+
+
+def _insolation_base_temperature(lat_rad: NDArray) -> NDArray:
+    """EBM 年平气温剖面（°C）：年平辐照数值积分 → 有效辐射温度 + 温室增量。
+
+    公式（圆轨道忽略偏心率；标准日均辐照）：
+        δ(d) = ε·sin(2πd/T)                    太阳赤纬（年内采样）
+        h0   = arccos(clip(−tanφ·tanδ, −1, 1)) 日落时角（含极昼/极夜）
+        H(d) = (S0/π)[h0·sinφ·sinδ + cosφ·cosδ·sin h0]   日均辐照（W/m²）
+        S̄    = mean_d H(d)                     年平辐照
+        T_s  = ((1−α)·S̄/σ)^(1/4) + ΔT_gh − 273.15        °C
+
+    期望锚点（真实地球）：S̄(赤道)≈415 W/m²、S̄(极点)≈177 W/m²；
+    T_s ≈ +28.6°C / −23.0°C。输入宜为**每行纬度**（≤ rows；本档调用即如此）；
+    逐日循环累积 ⇒ 对任意长度输入无 (n×365) 中间量。
+    """
+    phi = np.clip(np.asarray(lat_rad, dtype=np.float64),
+                  -(np.pi / 2.0 - 1e-6), np.pi / 2.0 - 1e-6)
+    tan_phi = np.tan(phi)
+    s_phi = np.sin(phi)
+    c_phi = np.cos(phi)
+    days = np.linspace(0.0, 2.0 * np.pi, _DAYS_PER_YEAR, endpoint=False)
+    s_mean = np.zeros(phi.shape, dtype=np.float64)
+    for t in days:
+        delta = _OBLIQUITY_RAD * np.sin(t)
+        tan_delta = np.tan(delta)
+        cos_h0 = np.clip(-tan_phi * tan_delta, -1.0, 1.0)
+        h0 = np.arccos(cos_h0)
+        s_mean += h0 * s_phi * np.sin(delta) + c_phi * np.cos(delta) * np.sin(h0)
+    s_mean *= _SOLAR_CONSTANT_WM2 / np.pi / _DAYS_PER_YEAR
+    t_eff = ((1.0 - _PLANETARY_ALBEDO) * s_mean / _SIGMA_SB) ** 0.25
+    return t_eff + _GREENHOUSE_K - 273.15
+
 
 
 def _value_noise_3d(rng, p: NDArray, lattice: int, freq: float) -> NDArray:
@@ -172,6 +218,22 @@ class EnvField:
 
         # ---- 2) 气候态温度与水量平衡（Magnus）----
         base_t = lt.base_temperature(cells)                  # 纬度基温（年气候态，°C）
+        if bool(cfg.uniform_base_t):
+            # 🔴 去混杂选项（`uniform_base_t`；默认关 = 不走本支 ⇒ 逐位不变）：
+            #   基温置**面积权全球均值**常数 —— 只杀纬度梯度、不抬降全球均值
+            #   （面积权均温逐位保持；动机 = ADR 教训 2「Magnus 纬度压印」：
+            #   T=base_t(φ)−lapse×H 过 Magnus 后 W 仍带纬度暗通道 ⇒ 置换零模型不纯）。
+            #   本支零 RNG 消费（在噪声/置换流之后）⇒ 开档不改引擎 RNG 序列。
+            _areas_t = world.cell_area(cells)
+            _t_awm = float(np.sum(base_t * _areas_t) / np.sum(_areas_t))
+            base_t = np.full(n, _t_awm, dtype=np.float64)
+        if bool(cfg.insolation_profile):
+            # 🔴 自然剖面选项（`insolation_profile`；默认关 = 不走本支 ⇒ 逐位不变）：
+            #   基温置 **EBM 年平气温剖面**（辐照数值积分；常数全为地球来源——太阳常数/
+            #   黄赤交角/反照率/玻尔兹曼/温室增量）⇒ 纬度影响与自然界一致，替代手定
+            #   t_pole/t_equator 线性 cosφ。剖面只依赖 |φ| ⇒ 按行算再广播（零 RNG 消费）。
+            _lat_row = np.asarray(world._lat, dtype=np.float64)
+            base_t = np.repeat(_insolation_base_temperature(_lat_row), cols)
         temp = base_t - float(cfg.lapse_c) * h
         np.clip(temp, _T_FLOOR, None, out=temp)              # 🔴 防极端配置除零
         self.temp = temp
