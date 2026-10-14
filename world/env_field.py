@@ -22,6 +22,10 @@
           （两选项互斥，fail-loud）
     q  = 6.11×exp(17.27T/(237.3+T))                 （Magnus 饱和水汽压，hPa）
     Pr = q×(1 + orographic×H)                       （抬升增雨）
+        └ 🔴 `cfg.c1_enabled=True`（默认关 ⇒ 整块跳过 = 逐位等价，§5.3）：
+          `Pr ×= band(φ)`，`band = 1 + A_wet·G((φ−φ_itcz)/σ_wet)
+          − A_dry·[G((φ−φ_dry)/σ_dry) + G((φ+φ_dry)/σ_dry)]`（G(x)=exp(−x²)），
+          并按**面积权均值 = 1** 归一（同 f_g/f_c 纪律）⇒ 只修降水的纬度形状，不碰 Et
     Et = et_frac×q                                  （蒸散）
     A  = D8 汇流累积 max(Pr−Et, 0)                    （priority-flood 路由树；
         默认档极点行 = 出水口；🔴 C0b 开档 ⇒ 种子 = 海洋格 ∪ 极点行，见下方「C0b 近似」）
@@ -273,6 +277,8 @@ class EnvField:
         "lake_mask", "fresh_lake_mask", "salt_lake_mask", "river_mask_legacy",
         "surface_type", "lake_count", "max_lake_cells", "max_lake_root",
         "max_lake_basin_cells", "conservation",
+        # ---- C1（默认关 ⇒ None ⇒ Pr 行逐位不变 = 逐位等价）----
+        "band",
     )
 
     def __init__(self, world: SphereWorld, lt: LightAndTemperature,
@@ -380,7 +386,31 @@ class EnvField:
         np.clip(temp, _T_FLOOR, None, out=temp)              # 🔴 防极端配置除零
         self.temp = temp
         q = _MAGNUS_C * np.exp(_MAGNUS_A * temp / (_MAGNUS_B + temp))
-        net = q * (1.0 + float(cfg.orographic) * h_eff - float(cfg.et_frac))
+        # ---- 2b) C1：静态副热带干槽（显式纬度调制；默认关 ⇒ 整块跳过 = 逐位等价）----
+        #   🔴 机理注（§5.3）：净产水 = max(Pr − Et, 0) ⇒ 只要副热带 band 压到
+        #     < et_frac/(1+orographic×H) ≤ et_frac，C1 **不依赖蒸发约束**即可造出零产水带；
+        #     “桶不再永远满”（蒸发受地面水约束）留给 C4a-2 做动态版。本机制只修降水侧，不碰 Et。
+        #   零 RNG 消费（band 只依赖纬度 + 面积权归一），且发生在噪声/置换流之后。
+        c1 = bool(cfg.c1_enabled)
+        self.band = None
+        if c1:
+            phi = np.degrees(lat_cell)
+            g_wet = np.exp(-((phi - float(cfg.itcz_deg)) / float(cfg.itcz_width_deg)) ** 2)
+            g_dry = (np.exp(-((phi - float(cfg.dry_deg)) / float(cfg.dry_width_deg)) ** 2)
+                     + np.exp(-((phi + float(cfg.dry_deg)) / float(cfg.dry_width_deg)) ** 2))
+            raw_band = (1.0 + float(cfg.wet_amp) * g_wet - float(cfg.dry_amp) * g_dry)
+            # 降水乘子非负：谷底压到 0（= 副热带无净产水）正是机制目的；负值无物理意义。
+            raw_band = np.maximum(raw_band, 0.0)
+            _m = float(np.sum(raw_band * areas) / np.sum(areas))
+            if _m <= 1e-12:
+                raise FloatingPointError(
+                    f"C1 band 的面积权均值 = {_m!r}（应 >0）—— 参数组合把全球压成单侧"
+                    "干槽？中止（不静默除零）。")
+            band = raw_band / _m                              # 面积权均值 = 1（对照干净）
+            self.band = band
+            net = q * (band * (1.0 + float(cfg.orographic) * h_eff) - float(cfg.et_frac))
+        else:
+            net = q * (1.0 + float(cfg.orographic) * h_eff - float(cfg.et_frac))
         yield_ = np.maximum(net, 0.0)                        # 径流产额（土壤赤字 ⇒ 无径流）
 
         # ---- 3) 路由面：平滑（真 8 邻居）+ priority-flood 填洼（Barnes 2014）----
@@ -703,6 +733,14 @@ class EnvField:
             out["closure_resid"] = float(self.conservation["closure_resid"])
             out["surface_counts"] = dict(self.conservation["surface_counts"])
             out["flood_filled_frac"] = float(self.flood_filled) / n   # 对旧 50.8% 失真读数
+        # ---- C1 开档读数（🔴 关档不新增键；band 归一与零产水带占比）----
+        if bool(self.cfg.c1_enabled):
+            a_sum = float(np.sum(areas))
+            out["c1_on"] = True
+            out["band_min"] = float(self.band.min())
+            out["band_max"] = float(self.band.max())
+            out["band_awm"] = float(np.sum(self.band * areas) / a_sum)
+            out["w_zero_frac"] = float(np.count_nonzero(self.w <= 0.0)) / n
         return out
 
     def __repr__(self) -> str:  # pragma: no cover - 诊断用

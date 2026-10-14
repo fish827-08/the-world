@@ -161,6 +161,33 @@ def variant_digests(ef: EnvField, layers: dict[str, np.ndarray]) -> dict[str, st
     return out
 
 
+def lat_profile(ef: EnvField, bin_deg: float = 10.0) -> list:
+    """|φ| 纬带剖面（C1 三层结构 + C0b 海陆对比的主读数；w==0 ⇔ yield==0）。"""
+    world = ef.world
+    lat_deg = np.abs(np.degrees(np.repeat(
+        np.asarray(world._lat, dtype=np.float64), world.cols)))
+    areas = world.cell_area(np.arange(world.n_cells, dtype=np.int64))
+    edges = np.arange(0.0, 90.0 + bin_deg, bin_deg)
+    idx = np.clip(np.searchsorted(edges, lat_deg, side="right") - 1,
+                  0, edges.size - 2)
+    rows = []
+    for k in range(edges.size - 1):
+        m = idx == k
+        if not bool(m.any()):
+            continue
+        rows.append({
+            "lat_lo": float(edges[k]), "lat_hi": float(edges[k + 1]),
+            "cells": int(m.sum()),
+            "w_awm": float(np.sum(ef.w[m] * areas[m]) / np.sum(areas[m])),
+            "w_zero_frac": float(np.count_nonzero(ef.w[m] <= 0.0) / m.sum()),
+            "band_mean": (float(ef.band[m].mean()) if ef.band is not None else None),
+            "ocean_frac": (float(ef.ocean_mask[m].mean())
+                           if getattr(ef, "ocean_mask", None) is not None else None),
+            "h_mean": float(ef.h[m].mean()),
+        })
+    return rows
+
+
 def build_env_field(rows: int, cols: int, seed: int, mode: str,
                    env_kw: dict) -> EnvField:
     if mode not in BASE_T_MODES:
@@ -244,6 +271,10 @@ def _parse_env_kw(a) -> dict:
         kw["c0b_enabled"] = True
     if a.c1:
         kw["c1_enabled"] = True
+    for nm in ("land_fraction", "dry_deg", "itcz_deg"):
+        v = getattr(a, nm, None)
+        if v is not None:
+            kw[nm] = float(v)
     return kw
 
 
@@ -261,6 +292,12 @@ def main(argv=None) -> None:
                     help="water=cap sensitivity（>0 ⇒ gf/cf 纳入 digest）")
     ap.add_argument("--c0b", action="store_true", help="开 C0b（真实海拔+海平面）")
     ap.add_argument("--c1", action="store_true", help="开 C1（静态副热带带）")
+    ap.add_argument("--land-fraction", dest="land_fraction", type=float, default=None,
+                    help="覆盖目标陆比（陆比扇扫 0.2/0.3/0.5 用）")
+    ap.add_argument("--dry-deg", dest="dry_deg", type=float, default=None,
+                    help="覆盖干槽中心纬度")
+    ap.add_argument("--itcz-deg", dest="itcz_deg", type=float, default=None,
+                    help="覆盖湿带中心纬度")
     ap.add_argument("--engine", action="store_true",
                     help="附引擎侧等价面（资源初始层 + RNG 流）")
     ap.add_argument("--ticks", type=int, default=0)
@@ -291,6 +328,7 @@ def main(argv=None) -> None:
         "mode": a.mode, "seed": a.seed, "rows": a.rows, "cols": a.cols,
         "env_kwargs": env_kw, "construct_s": construct_s,
         "env": env_report(ef),
+        "lat_profile": lat_profile(ef),
     }
     if a.engine:
         out["engine"] = engine_report(a.rows, a.cols, a.seed, a.mode, a.ticks, env_kw)
@@ -306,6 +344,11 @@ def main(argv=None) -> None:
           f"pit_first={pr['pit_first']} river_frac={pr['river_frac']:.4f}")
     if "c0b" in ev:
         print("  c0b: " + json.dumps(ev["c0b"], ensure_ascii=False, default=str))
+    print("  lat_profile (|φ| 分箱: w_awm / w_zero_frac / band_mean):")
+    for r in out["lat_profile"]:
+        bm = "-" if r["band_mean"] is None else f"{r['band_mean']:.3f}"
+        print(f"    [{r['lat_lo']:>2.0f},{r['lat_hi']:>2.0f}]  w={r['w_awm']:>9.4f}"
+              f"  zero={r['w_zero_frac']:.3f}  band={bm}")
     if a.engine:
         en = out["engine"]
         print(f"  engine: build={en['build_s']:.2f}s draws={en['rng_draws']} "

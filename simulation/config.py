@@ -1543,6 +1543,21 @@ class EnvFieldConfig:
     peak_altitude_m: float = 4500.0  # H=1 对应的真实海拔（米）；T 改用 Γ=6.5 ℃/km
     shelf_depth_m: float = 200.0     # 大陆架厚度（海平面以下 0～200 m 浅海；地球均深 ≈130 m）
     coast_gamma: float = 1.0         # 海岸复杂度重映射 e^γ（γ<1 海岸更碎；1.0 = 不重映射 = 逐位）
+    # ---- 🔴 C1（2026-10-14 动态天气路线 §5.3）：静态副热带沙漠（显式纬度调制带）----
+    #   默认关（`c1_enabled=False`）⇒ Pr 行不乘任何因子 ⇒ 既有全部场逐位不变。
+    #   形式：`Pr = q(T) × (1 + orographic×H) × band(φ)`，
+    #   `band(φ) = 1 + A_wet·G((φ−φ_itcz)/σ_wet) − A_dry·[G((φ−φ_dry)/σ_dry) + G((φ+φ_dry)/σ_dry)]`，
+    #   G(x)=exp(−x²)；南北两支干槽 ⇒ itcz=0 时剖面自然南北对称（未来 C2 季节摆动可让
+    #   φ_itcz 偏离 0 ⇒ 不对称分支已预留）。band 按**面积权均值 = 1** 归一（同 f_g/f_c 纪律）。
+    #   物理锚：Held-Hou 1980 副热带下沉支 20–30°（§2.1-①）；一维 EBM 没有湿度自由度
+    #   ⇒ 沙漠不能靠能量平衡自洽算出，必须显式纬度调制（§2.1-③ ⇒ 本组参数就是该调制）。
+    c1_enabled: bool = False         # 总开关；False ⇒ Pr 行逐位不变（C7 回滚点）
+    itcz_deg: float = 0.0            # 湿带中心纬度（度；0 = 赤道，C2 可接 δ(t) 摆动）
+    itcz_width_deg: float = 8.0      # 湿带宽 σ（度；实况 ITCZ 宽 ≈20 纬距 ⇒ σ≈8）
+    dry_deg: float = 27.0            # 干槽中心纬度（度；Held-Hou 20–30° 带内）
+    dry_width_deg: float = 12.0      # 干槽宽 σ（度）
+    wet_amp: float = 1.0             # 湿带增幅 A_wet（默认 1.0：赤道峰 ×2 再除面积权均值）
+    dry_amp: float = 1.0             # 干槽减幅 A_dry（默认 1.0 ⇒ 谷底 band=0 ⇒ yield=0）
 
     def __post_init__(self) -> None:
         assert isinstance(self.enabled, bool), "enabled 必须是布尔值"
@@ -1550,6 +1565,7 @@ class EnvFieldConfig:
         assert isinstance(self.uniform_base_t, bool), "uniform_base_t 必须是布尔值"
         assert isinstance(self.insolation_profile, bool), "insolation_profile 必须是布尔值"
         assert isinstance(self.c0b_enabled, bool), "c0b_enabled 必须是布尔值"
+        assert isinstance(self.c1_enabled, bool), "c1_enabled 必须是布尔值"
         assert not (self.uniform_base_t and self.insolation_profile), \
             "uniform_base_t 与 insolation_profile 互斥（去梯度 ≠ 自然梯度，不可叠加）"
         assert self.terrain_lattice >= 4, "terrain_lattice ≥ 4（太小 = 全场一个团块）"
@@ -1574,6 +1590,18 @@ class EnvFieldConfig:
         for nm in ("land_fraction", "peak_altitude_m", "shelf_depth_m", "coast_gamma"):
             v = float(getattr(self, nm))
             assert v == v and v < 1e12, f"{nm}={v} 非法（需有限非负尺度）"
+        # ---- C1 参数域（§5.3：纬度带形式 + 幅度按“谷底 yield=0”标定）----
+        assert 0.0 < self.itcz_width_deg <= 90.0, \
+            "itcz_width_deg ∈ (0,90]（σ ≤ 0 = 除零；>90 = 全球一条湿带，机制失效）"
+        assert 0.0 < self.dry_width_deg <= 90.0, "dry_width_deg ∈ (0,90]"
+        assert -90.0 <= self.itcz_deg <= 90.0, "itcz_deg ∈ [-90,90]（纬度）"
+        assert 0.0 <= self.dry_deg <= 90.0, "dry_deg ∈ [0,90]（南北两支干槽的纬度幅值）"
+        assert self.wet_amp >= 0.0, "wet_amp ≥ 0（湿带只能增雨）"
+        assert self.dry_amp >= 0.0, "dry_amp ≥ 0（干槽只能减；负值 = 把副热带改湿 ⇒ 反向机制）"
+        for nm in ("itcz_deg", "itcz_width_deg", "dry_deg", "dry_width_deg",
+                   "wet_amp", "dry_amp"):
+            v = float(getattr(self, nm))
+            assert v == v and abs(v) <= 500.0, f"{nm}={v} 非法（需有限且 |v| ≤ 500）"
         assert self.lapse_c >= 0.0, "lapse_c ≥ 0（递减率非负）"
         assert self.orographic >= 0.0, "orographic ≥ 0"
         assert self.et_frac >= 0.0, "et_frac ≥ 0"

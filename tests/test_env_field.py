@@ -25,6 +25,12 @@
     E22 C0b 旧档回退：无 c0b_* 键 ⇒ 默认关（R233 T-F 家族）；带键 ⇒ 逐字段还原
     E23 C0b-② 海洋掩码乘性入口：海格容量/存量/再生恒零 + 接线送达 + env_note 留痕
     E24 C0b-② 守卫：掩码形状错⇒构造期报错；env∧sparse 时两行 note 共存不互抹
+    E25 C1 关档逐位钉死：band=None + 既有层组合 digest 与基线全等
+    E26 C1 开档物理锚：纬带三层结构（赤道峰 / 20–30° 谷 谷底 yield≈0 / 温带次峰）
+    E27 C1 归一与只修降水侧：band 面积权均值=1；band·(1+oro·H)<et_frac 的格必为 w=0
+    E28 C1 机制真的在动：谷位跟 dry_deg 走（变异检查）
+    E29 C1 零 RNG + 与 C0b 组合：h/temp 层逐位不动；同开时三守恒仍成立
+    E30 C1 参数域断言 + 旧档回退默认关
 
 设计原则（教训库）：默认关 = 旧行为逐位一致（E1 钉死）；每条只动一个参数、
 断言"变化方向与量级"。
@@ -552,4 +558,130 @@ def test_e24_c0b_shape_guard_and_lazy_coexistence() -> None:
     e = SphereEngine(cfg)
     assert e.resources._lazy is False, "env 开档时资源侧惰性必须显式退场"
     assert "resource_lazy=off" in e.env_note and "env_c0b=on" in e.env_note, e.env_note
+
+
+# ---------------- E25–E30 C1（静态副热带沙漠：显式纬度调制带）----------------
+#   实施依据：同报告 §5.3。
+
+
+def _lat_bins(ef: EnvField, bin_deg: float = 10.0):
+    """|φ| 分箱的格均 w（w = max(Pr−Et,0)×汇流增益 ⇒ w==0 ⇔ 净产水为 0）+ 分箱索引。"""
+    world = ef.world
+    lat = np.abs(np.degrees(np.repeat(
+        np.asarray(world._lat, dtype=np.float64), world.cols)))
+    edges = np.arange(0.0, 90.0 + bin_deg, bin_deg)
+    idx = np.clip(np.searchsorted(edges, lat, side="right") - 1, 0, edges.size - 2)
+    return [float(ef.w[idx == k].mean()) if bool((idx == k).any()) else 0.0
+            for k in range(edges.size - 1)], idx
+
+
+def test_e25_c1_default_off_bit_equivalent() -> None:
+    """C1 默认关 ⇒ band=None（不参与任何计算）+ 既有层组合 digest 与关档基线全等。"""
+    assert EnvFieldConfig().c1_enabled is False, "C1 必须默认关"
+    for sens in (0.0, 1.0):
+        ef = _field(seed=42, water_sensitivity=sens, cap_sensitivity=sens)
+        assert ef.band is None
+        assert _digest_of(ef) == _C0B_OFF_DIGEST[("default", sens)], sens
+        assert "c1_on" not in ef.probe(), "关档 probe 不得新增键"
+    a = SimConfig(seed=42)
+    a.simulation.use_sim_core = False
+    b = SimConfig(seed=42)
+    b.simulation.use_sim_core = False
+    b.env_field.enabled = True
+    b.env_field.c1_enabled = True
+    assert SphereEngine(a).rng.draws == SphereEngine(b).rng.draws
+
+
+def test_e26_c1_three_layer_latitude_structure() -> None:
+    """§5.3 判据①：赤道峰 / 20–30° 谷（谷底 yield≈0）/ 温带次峰。"""
+    off = _field(seed=42)
+    on = _field(seed=42, c1_enabled=True)
+    prof, idx = _lat_bins(on)
+    prof_off, _ = _lat_bins(off)
+    eq, valley, mid = prof[0], prof[2], prof[4]          # 0–10° / 20–30° / 40–50°
+    assert eq == max(prof), f"赤道应为主峰（剖面 {['%.3f' % v for v in prof]}）"
+    assert valley == min(prof[:6]), f"20–30° 应为低带（剖面 {['%.3f' % v for v in prof]}）"
+    # 谷底 yield≈0：既远低于赤道峰，也远低于同纬旧档
+    assert valley < 1e-3 * eq, f"谷底 {valley} 应≈ 0（赤道 {eq}）"
+    assert valley < 0.05 * prof_off[2], "副热带应被压到旧档的 5% 以下"
+    # 温带次峰：谷后先升（局部极大）且低于赤道峰
+    assert mid > valley and mid > prof[3] and mid < eq, \
+        f"温带次峰不成立（谷 {valley} 30–40 {prof[3]} 40–50 {mid} 赤道 {eq}）"
+    assert prof[5] < mid, "次峰之后应重新随 q(T) 递减"
+
+
+def test_e27_c1_band_awm_one_and_only_precipitation_side() -> None:
+    """§5.3：band 面积权均值=1（同 f_g/f_c 纪律）；且只修降水侧不碰 Et。"""
+    on = _field(seed=42, c1_enabled=True)
+    areas = on.world.cell_area(np.arange(on.world.n_cells, dtype=np.int64))
+    awm = float(np.sum(on.band * areas) / np.sum(areas))
+    assert abs(awm - 1.0) <= 1e-12, f"band 面积权均值 = {awm!r}（应为 1）"
+    assert float(on.band.min()) >= 0.0, "降水乘子不得为负（负值无物理意义 ⇒ 已 clip）"
+    pr = on.probe()
+    assert pr["band_awm"] == pytest.approx(1.0, abs=1e-12)
+    # 只修降水侧：Et 仍 = et_frac×q（q 由 temp 定）⇒ band·(1+oro·H) < et_frac 的格必无净产水
+    h_eff = on.h_m / float(on.cfg.peak_altitude_m) \
+        if on.h_m is not None else on.h
+    dry = on.band * (1.0 + float(on.cfg.orographic) * h_eff) < float(on.cfg.et_frac)
+    assert bool((on.w[dry] == 0.0).all()), \
+        f"{int((on.w[dry] > 0).sum())} 格在干槽条件仍产水 ⇒ band 未只作用于 Pr"
+    assert int(dry.sum()) > 0, "干槽条件格数为 0 ⇒ 机制未生效"
+
+
+def test_e28_c1_valley_follows_dry_deg() -> None:
+    """变异检查：干槽中心纬度动了，零产水带必须跟着动（不是装饰）。"""
+    base = _field(seed=42, c1_enabled=True)
+    moved = _field(seed=42, c1_enabled=True, dry_deg=45.0)
+    prof_b, _ = _lat_bins(base)
+    prof_m, _ = _lat_bins(moved)
+    assert prof_b.index(min(prof_b[:6])) == 2, "默认档谷底应在 20–30°"
+    assert prof_m.index(min(prof_m[:6])) >= 4, f"dry_deg=45 档谷底应移到 40°+（{prof_m}）"
+    # 只动一个参数 ⇒ 其他参数逐位不动（噪声流/地形层不变）
+    assert np.array_equal(base.h, moved.h)
+
+
+def test_e29_c1_no_rng_and_coexists_with_c0b() -> None:
+    """零 RNG（band 只依纬度）+ 与 C0b 同开时三守恒仍成立、极海仍消失。"""
+    off = _field(seed=42)
+    on = _field(seed=42, c1_enabled=True)
+    assert np.array_equal(off.h, on.h), "C1 动到了噪声流"
+    assert np.array_equal(off.temp, on.temp), "C1 只修降水侧，不得改温度"
+    assert not np.array_equal(off.w, on.w), "C1 应改变水分场（否则 = 静默 no-op）"
+
+    both = _field(seed=42, c0b_enabled=True, c1_enabled=True)
+    cons = both.conservation
+    assert abs(cons["land_area_frac"] - 0.30) <= 0.005
+    assert cons["closure_resid"] <= 1e-9 * max(1.0, cons["yield_sum"])
+    assert cons["budget_resid"] <= 1e-9 * max(1.0, cons["land_yield"])
+    assert cons["area_complement_resid"] <= 1e-12
+    assert both.flood_filled * 20 < off.flood_filled, "C0b+C1 下极海失真仍须消失"
+    awm = float(np.sum(both.band * both.world.cell_area(
+        np.arange(both.world.n_cells, dtype=np.int64))) / np.sum(
+        both.world.cell_area(np.arange(both.world.n_cells, dtype=np.int64))))
+    assert abs(awm - 1.0) <= 1e-12
+
+
+def test_e30_c1_config_domain_and_old_archive_fallback() -> None:
+    """参数域 fail-loud + 旧档（无 c1_* 键）回退默认关。"""
+    for kw in (dict(c1_enabled=1), dict(itcz_width_deg=0.0), dict(dry_width_deg=-1.0),
+               dict(dry_deg=120.0), dict(itcz_deg=95.0), dict(wet_amp=-0.1),
+               dict(dry_amp=-0.1), dict(itcz_width_deg=float("nan"))):
+        with pytest.raises(AssertionError):
+            EnvFieldConfig(**kw)
+
+    data = SimConfig(seed=42).to_dict()
+    for key in ("c1_enabled", "itcz_deg", "itcz_width_deg", "dry_deg",
+                "dry_width_deg", "wet_amp", "dry_amp"):
+        data["env_field"].pop(key, None)
+    back = SimConfig.from_dict(data).env_field
+    default = EnvFieldConfig()
+    assert back.c1_enabled is False
+    assert back.dry_deg == default.dry_deg and back.itcz_width_deg == default.itcz_width_deg
+
+    cfg = SimConfig(seed=42)
+    cfg.env_field.c1_enabled = True
+    cfg.env_field.dry_deg = 25.0
+    cfg.env_field.dry_amp = 1.5
+    got = SimConfig.from_dict(cfg.to_dict()).env_field
+    assert got.c1_enabled is True and got.dry_deg == 25.0 and got.dry_amp == 1.5
 
