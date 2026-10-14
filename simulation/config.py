@@ -1531,23 +1531,49 @@ class EnvFieldConfig:
     water_sensitivity: float = 0.0   # 再生因子指数：f_g = u^ws / 面积权均值（0 ⇒ 整块跳过）
     cap_sensitivity: float = 0.0     # 容量因子指数：f_c = clip(u,0,k_max)^cs / 均值（0 ⇒ 跳过）
     k_max: float = 4.0               # 容量因子 clip 上界（河带封顶：cap×k_max^cs）
+    # ---- 🔴 C0b（2026-10-14 动态天气路线 §5.2）：真实海拔 + 海平面 ⇒ 海/湖/河/陆表面层 ----
+    #   默认关（`c0b_enabled=False`）⇒ 现有 H[0,1] 无量纲 + `lapse_c` 现象学递减 +
+    #   "极点行 = 唯一出水口"的 priority-flood **逐位不变**（C7 回滚点）。
+    #   口径：H 米制化（Γ=6.5 ℃/km 真实递减率）→ 按目标陆比取**面积权分位**定海平面
+    #   → priority-flood 种子由"极点行"改"海洋格（+极地点出边，见 env_field 注释）"
+    #   → 湖 = filled > 路由面 → 溢流链是否达海二分淡水/盐湖 → 河 = 终点∈{海,湖}∧acc≥P98。
+    #   ⚠️ 派生量（sea_level 等）不进配置——由 land_fraction 定义，避免"阈值与陆比打架"。
+    c0b_enabled: bool = False        # 总开关；False ⇒ H 仍 [0,1]、极点出水口、无表面层
+    land_fraction: float = 0.30      # 目标陆比（面积权；地球档 0.292）
+    peak_altitude_m: float = 4500.0  # H=1 对应的真实海拔（米）；T 改用 Γ=6.5 ℃/km
+    shelf_depth_m: float = 200.0     # 大陆架厚度（海平面以下 0～200 m 浅海；地球均深 ≈130 m）
+    coast_gamma: float = 1.0         # 海岸复杂度重映射 e^γ（γ<1 海岸更碎；1.0 = 不重映射 = 逐位）
 
     def __post_init__(self) -> None:
         assert isinstance(self.enabled, bool), "enabled 必须是布尔值"
         assert isinstance(self.shuffle, bool), "shuffle 必须是布尔值"
         assert isinstance(self.uniform_base_t, bool), "uniform_base_t 必须是布尔值"
         assert isinstance(self.insolation_profile, bool), "insolation_profile 必须是布尔值"
+        assert isinstance(self.c0b_enabled, bool), "c0b_enabled 必须是布尔值"
         assert not (self.uniform_base_t and self.insolation_profile), \
             "uniform_base_t 与 insolation_profile 互斥（去梯度 ≠ 自然梯度，不可叠加）"
         assert self.terrain_lattice >= 4, "terrain_lattice ≥ 4（太小 = 全场一个团块）"
         assert self.terrain_octaves >= 1, "terrain_octaves ≥ 1"
         assert self.terrain_smooth >= 0, "terrain_smooth ≥ 0"
         assert self.k_max >= 1.0, "k_max ≥ 1（< 1 会把富水格容量压低 = 反向机制）"
+        # ---- C0b 参数域（§5.2 建议新字段"全部默认关/安全值"+ 断言）----
+        assert 0.0 < self.land_fraction < 1.0, \
+            "land_fraction ∈ (0,1)（0/1 = 全球皆陆或皆海 ⇒ 海平面分位无定义）"
+        assert self.peak_altitude_m > 0.0, "peak_altitude_m > 0（H 米制化的标尺，≤0 = 无地形）"
+        assert self.shelf_depth_m >= 0.0, "shelf_depth_m ≥ 0（负厚度 = 大陆架定义反向）"
+        assert self.shelf_depth_m < self.peak_altitude_m, \
+            "shelf_depth_m < peak_altitude_m（否则全部海洋都被判成大陆架）"
+        assert self.coast_gamma > 0.0, "coast_gamma > 0（e^γ 重映射指数；≤0 会把地形压成常值）"
         # `v == v` 挡 NaN（config.py 不依赖 numpy ⇒ 不用 isnan；同 SmellConfig 先例）
         for nm in ("lapse_c", "orographic", "et_frac", "runoff_gain",
                    "water_sensitivity", "cap_sensitivity"):
             v = float(getattr(self, nm))
             assert v == v and abs(v) <= 100.0, f"{nm}={v} 非法（需有限且 |v| ≤ 100）"
+        # C0b 数值域：只查有限性（上限已由上面的 >0 / <peak 等断言分别把住；
+        #   海拔尺度可以远大于 100 ⇒ 不能复用上面那条 |v|≤100）
+        for nm in ("land_fraction", "peak_altitude_m", "shelf_depth_m", "coast_gamma"):
+            v = float(getattr(self, nm))
+            assert v == v and v < 1e12, f"{nm}={v} 非法（需有限非负尺度）"
         assert self.lapse_c >= 0.0, "lapse_c ≥ 0（递减率非负）"
         assert self.orographic >= 0.0, "orographic ≥ 0"
         assert self.et_frac >= 0.0, "et_frac ≥ 0"

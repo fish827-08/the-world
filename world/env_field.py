@@ -9,7 +9,11 @@
 流水线（全部**构造期**算一次 ⇒ 每 tick 零成本；不进快照 —— 从 config 确定性重建）
 ----------------------------------------------------------------------------------
     H  ← 3D 值噪声 fBm（球面采样；独立 rng 流，**不消费引擎 RNG**）
+        └ 🔴 `cfg.c0b_enabled=True`（默认关 ⇒ 整块跳过 = 逐位等价）：H 米制化
+          `h_m = h^coast_gamma × peak_altitude_m`（§5.2：海拔单位化是 C0b 前置）
+          并按**目标陆比取面积权分位**定海平面 `sea_level_m` ⇒ 海洋格集合 = 天然出水口
     T  = base_temperature(φ) − lapse_c×H            （气候态温度，°C）
+        └ 🔴 C0b 开档 ⇒ 换成真实递减率 `T = base − 6.5 ℃/km × h_m`（Γ 见 §2.1-⑥）
         └ `cfg.uniform_base_t=True`（去混杂选项，默认关）⇒ base_temperature(φ) 换成其
           **面积权全球均值**常数（只关纬度梯度、不动全球均值；治 Magnus 纬度压印混杂）
         └ `cfg.insolation_profile`（自然剖面；**默认开 = 正式世界默认档**，裁定一 2026-10-14）
@@ -19,10 +23,26 @@
     q  = 6.11×exp(17.27T/(237.3+T))                 （Magnus 饱和水汽压，hPa）
     Pr = q×(1 + orographic×H)                       （抬升增雨）
     Et = et_frac×q                                  （蒸散）
-    A  = D8 汇流累积 max(Pr−Et, 0)                    （priority-flood 路由树；极点行 = 出水口）
+    A  = D8 汇流累积 max(Pr−Et, 0)                    （priority-flood 路由树；
+        默认档极点行 = 出水口；🔴 C0b 开档 ⇒ 种子 = 海洋格 ∪ 极点行，见下方「C0b 近似」）
     W  = max(Pr−Et, 0) × (1 + runoff_gain×A/(A+A_ref))   （汇流带更湿；A_ref = 99 分位）
     f_g = u^ws / 面积权均值            （再生因子；u = W/W_ref，W_ref = W 的面积权均值）
     f_c = clip(u,0,k_max)^cs / 面积权均值（容量因子）
+    🔴 C0b 开档追加产出（纯读数层，不改上面任何一条公式）：
+        ocean/land/shelf/lake(淡水/盐湖)/river ⇒ `surface_type`（uint8 编码）+ 三条守恒不变量
+
+🔴 C0b 的结构性近似（实现层声明，不许扩读；§5.2 + §2.3-②）
+--------------------------------------------------------------
+* **极点行必须与海洋格一起作 priority-flood 种子**：`_nb_table` 里极点行除规范槽
+  （col 0）外全是 `-1` 占位，且相邻纬度带的邻居经 `rc_to_flat` 坍缩**只指回规范槽**
+  ⇒ 非规范极槽在邻居图上**孤立**，不作种子就永远打不开 ⇒ 触发既有 fail-loud
+  （"仅覆盖 M/N 格"）。与旧口径的区别 = 极点不再决定全球填洼面（旧档 50.8% 被抬成
+  "极海"），只在**极地点自身高程**处充当局部出边 ⇒ 不达海的洼地由此成为内流盆地。
+* **湖的淡/咸二分在本模型下退化**：填洼面上每格的接收者链严格下降 ⇒ 链终点只可能是
+  "海洋格"或"非海洋极点根"；湖必有溢流口（priority-flood 保证），故湖自身永不是终点。
+  照 §5.2 字面规则实现：溢流链达海 ⇒ 过水淡水湖，不达海（终止于内流盆地）⇒ 盐湖。
+* **嵌套洼地按"单层溢流面"近似**（§2.3-②：depression hierarchy 留待需要时）：
+  同一溢流口（链上第一个非洼地格）的洼地格合并记为一个湖。
 
 🔴 两条写死的口径（防"数字没出处"）
 ------------------------------------
@@ -72,6 +92,22 @@ _STREAM_NOISE = 0xE17F
 _STREAM_SHUFFLE = 0x5A17
 #: priority-flood 抬升步长（保 filled 沿接收者链严格下降 ⇒ 路由树无环）
 _FLOOD_EPS = 1e-6
+#: C0b 真实环境直减率 Γ = 6.5 ℃/km（§2.1-⑥：干 9.8 / 湿 6.0 / 环境 6.5 ℃/km；
+#:   `c0b_enabled` 开档时替代现象学常数 `lapse_c`（H∈[0,1] 全程温差 20 ℃）——
+#:   出处 = 报告 §5.2「把 lapse_c=20 的现象学常数换成真实海拔尺度与真实递减率」）
+_LAPSE_C_PER_KM = 6.5
+
+#: C0b `surface_type` 编码（🔴 载体层，永不进判据前置 = ENV-FIELD §四-4 红线 2；
+#:   也是 §2.3-④ 热物性三件套（α/c/k）未来逐格赋值的挂载点）
+SURFACE_LAND = 0
+SURFACE_OCEAN = 1
+SURFACE_SHELF = 2
+SURFACE_RIVER = 3
+SURFACE_LAKE_FRESH = 4
+SURFACE_LAKE_SALT = 5
+#: 溢流链终点类别（§5.2「河终点全为海/湖/内流盆地」）
+OUTLET_SEA = 0
+OUTLET_INLAND = 1
 
 #: 一层 EBM 自然剖面常数（全为地球观测值；`insolation_profile` 选项用，零自由参数）
 _SOLAR_CONSTANT_WM2 = 1361.0        # 太阳常数 S0（W/m²）
@@ -156,6 +192,47 @@ def _value_noise_3d(rng, p: NDArray, lattice: int, freq: float) -> NDArray:
     return y0v + (y1v - y0v) * tz
 
 
+def _area_threshold_below(values: NDArray[np.float64], areas: NDArray[np.float64],
+                          frac_below: float) -> float:
+    """面积权分位阈值：使「面积权 ≤ 阈值」的面积占比尽量贴近 `frac_below`（§2.3-①）。
+
+    为何用面积权而不是格数分位：等距圆柱投影下格面积 ∝ cosφ，极区格小 ⇒
+    按格数取分位会得到**错误的全球面积比**（§5.2 守恒①要的是面积比）。
+
+    离散网格上阈必然落在某格上 ⇒ 面积比误差 ≤ 该格面积占比（实测 ≈1e-6 量级），
+    故“恒等到 1e-9”不可严格成立——实现拆成两条可严格校核的不变量：
+      ①a 海比 + 陆比 == 1（分划互补，1e-9）；
+      ①b |实现陆比 − 目标陆比| ≤ 单格面积（实测值进 probe，验收按 ±0.5%）。
+    确定性：`argsort(kind="stable")` + `argmin`（平手取首个）⇒ **零 RNG 消费**。
+    """
+    order = np.argsort(values, kind="stable")
+    asc = values[order]
+    cum = np.cumsum(areas[order])
+    k = int(np.argmin(np.abs(cum - frac_below * float(cum[-1]))))
+    return float(asc[k])
+
+
+def _pointer_jump(link: NDArray[np.int64]) -> NDArray[np.int64]:
+    """指针跳步（路径压缩）：返回每格沿 `link` 前进到的**吸收点**（link[i]==i 的格）。
+
+    用途（C0b，两者都是 O(n log 深度) 的**向量化**实现，零 Python 标量循环）：
+      * `link = 接收者（根指向自身）` ⇒ 每格的**汇流终点**（root）→ 流域闭合校核；
+      * `link = 洼地格→接收者、非洼地格→自身` ⇒ 湖格的**第一个下游非洼地格 = 溢流口**。
+    正确性：`link` 沿填洼面严格下降 ⇒ 无环 ⇒ 不动点存在；每轮 `link = link[link]`
+    把到不动点的距离**折半** ⇒ ≤ ⌈log2 n⌉+1 轮收敛（超上限 = 图有环 ⇒ fail-loud）。
+    """
+    s = np.asarray(link, dtype=np.int64).copy()
+    for _ in range(64):                        # log2(460800) ≈ 19 ⇒ 64 轮是宽裕上界
+        nxt = s[s]
+        if np.array_equal(nxt, s):
+            return s
+        s = nxt
+    raise FloatingPointError(
+        "C0b 指针跳步 64 轮未收敛（沿接收者链应严格下降 ⇒ 图无环）——"
+        "路由树异常，中止（不静默给错标签）。"
+    )
+
+
 class EnvField:
     """一次构造、全静态的地形—水分—产能因子场（引擎构造期建好，之后只读）。
 
@@ -172,6 +249,18 @@ class EnvField:
     filled : NDArray[float64] (n_cells,) —— 填洼面（priority-flood 输出；只进路由，不进物理量）。
     receivers : NDArray[int64] (n_cells,) —— 路由树父节点（`filled` 面 D8 最陡下降；-1 = 出水口）。
     pit_first, flood_filled : int —— 平滑面局部极小值数（洼地首数）/ 被淹没抬升格数（诊断）。
+
+    🔴 以下均为 **C0b 开档专属**（`c0b_enabled=False` ⇒ 一律 `None`，且不参与任何计算）
+    h_m : NDArray[float64] (n,) —— 真实海拔（米）= h^coast_gamma × peak_altitude_m。
+    sea_level_m : float —— 海平面（米），由 `land_fraction` 的**面积权分位**定义。
+    ocean_mask / land_mask / shelf_mask : NDArray[bool] (n,) —— 海 / 陆 / 大陆架（浅海分段）。
+    lake_mask : NDArray[bool] (n,) —— 湖格（= 洼地格 ∧ 非海；与 `flood_filled` 同语义）。
+    fresh_lake_mask / salt_lake_mask : NDArray[bool] (n,) —— 溢流链达海 / 不达海（§5.2）。
+    river_mask_legacy : NDArray[bool] (n,) —— 旧「acc ≥ P98」读数层（开档下仍保留，供兼容对照）。
+    surface_type : NDArray[uint8] (n,) —— 海/陆/湖/河表面类型层（🔴 载体层，不进判据前置）。
+    lake_count / max_lake_cells / max_lake_basin_cells : int —— 湖数（按溢流口合并）/
+        最大湖格数 / 最大湖所在流域的格数（流域闭合校核用）。
+    conservation : dict —— §5.2 三条守恒不变量的实测值与残差。
     """
 
     __slots__ = (
@@ -179,6 +268,11 @@ class EnvField:
         "h", "h_routed", "temp", "w", "acc", "river_mask", "receivers",
         "w_ref", "pit_first", "flood_filled", "filled",
         "_gf", "_cf",
+        # ---- C0b（默认关 ⇒ 全 None ⇒ 不进任何计算 = 逐位等价）----
+        "h_m", "sea_level_m", "ocean_mask", "land_mask", "shelf_mask",
+        "lake_mask", "fresh_lake_mask", "salt_lake_mask", "river_mask_legacy",
+        "surface_type", "lake_count", "max_lake_cells", "max_lake_root",
+        "max_lake_basin_cells", "conservation",
     )
 
     def __init__(self, world: SphereWorld, lt: LightAndTemperature,
@@ -223,6 +317,43 @@ class EnvField:
             h = h[rng_sh.permutation(n)]
         self.h = h
 
+        # ---- 1b) C0b：真实海拔（H 米制化）+ 面积权分位定海平面（默认关 ⇒ 整块跳过）----
+        #   🔴 `self.h` 保持"原始归一地形 [0,1]"不动 ⇒ 开/关档 `h` 层逐位可比，
+        #     米制高程另存 `h_m`（归因干净：变化只可能来自 h_m/海平面，不来自噪声层）。
+        areas = world.cell_area(cells)                   # 面积权（海平面分位 + W_ref 归一用）
+        c0b = bool(cfg.c0b_enabled)
+        self.h_m = None
+        self.sea_level_m = None
+        self.ocean_mask = None
+        self.land_mask = None
+        self.shelf_mask = None
+        self.lake_mask = None
+        self.fresh_lake_mask = None
+        self.salt_lake_mask = None
+        self.river_mask_legacy = None
+        self.surface_type = None
+        self.lake_count = None
+        self.max_lake_cells = None
+        self.max_lake_root = None
+        self.max_lake_basin_cells = None
+        self.conservation = None
+        h_eff = h                                        # 关档 = h 本体 ⇒ 后续逐位不变
+        if c0b:
+            gamma = float(cfg.coast_gamma)
+            if gamma != 1.0:
+                # e^γ 海岸复杂度重映射（γ<1 ⇒ 低地被抬高 ⇒ 海岸更碎、陆比升高；§2.3-①）
+                h_eff = np.power(h, gamma)
+            h_m = h_eff * float(cfg.peak_altitude_m)     # 真实海拔（米）
+            sea_level_m = _area_threshold_below(
+                h_m, areas, 1.0 - float(cfg.land_fraction))
+            ocean = h_m <= sea_level_m
+            self.h_m = h_m
+            self.sea_level_m = float(sea_level_m)
+            self.ocean_mask = ocean
+            self.land_mask = ~ocean
+            # 大陆架 = 海洋 ∧ 海平面以下 0～shelf_depth_m（§2.3-①：坡折外缘均深 ≈130 m）
+            self.shelf_mask = ocean & (h_m > sea_level_m - float(cfg.shelf_depth_m))
+
         # ---- 2) 气候态温度与水量平衡（Magnus）----
         base_t = lt.base_temperature(cells)                  # 纬度基温（年气候态，°C）
         if bool(cfg.uniform_base_t):
@@ -242,11 +373,14 @@ class EnvField:
             #   t_pole/t_equator 线性 cosφ。剖面只依赖 |φ| ⇒ 按行算再广播（零 RNG 消费）。
             _lat_row = np.asarray(world._lat, dtype=np.float64)
             base_t = np.repeat(_insolation_base_temperature(_lat_row), cols)
-        temp = base_t - float(cfg.lapse_c) * h
+        temp = (base_t - (_LAPSE_C_PER_KM / 1000.0) * h_m) if c0b \
+            else (base_t - float(cfg.lapse_c) * h_eff)
+        #   ↑ C0b 开档 ⇒ 真实递减率 Γ=6.5 ℃/km × 真实海拔（替代 `lapse_c=20` 的现象学常数，
+        #     §5.2）；关档 ⇒ `h_eff is h` ⇒ 与旧式 `base_t − lapse_c×h` 逐位相同。
         np.clip(temp, _T_FLOOR, None, out=temp)              # 🔴 防极端配置除零
         self.temp = temp
         q = _MAGNUS_C * np.exp(_MAGNUS_A * temp / (_MAGNUS_B + temp))
-        net = q * (1.0 + float(cfg.orographic) * h - float(cfg.et_frac))
+        net = q * (1.0 + float(cfg.orographic) * h_eff - float(cfg.et_frac))
         yield_ = np.maximum(net, 0.0)                        # 径流产额（土壤赤字 ⇒ 无径流）
 
         # ---- 3) 路由面：平滑（真 8 邻居）+ priority-flood 填洼（Barnes 2014）----
@@ -256,7 +390,7 @@ class EnvField:
         cnt = valid.sum(axis=1).astype(np.float64)
         pole_rows = cnt == 0.0                               # 极点行（真拓扑邻居 = 整行）
 
-        h_r = h.copy()
+        h_r = h_eff.copy()
         if int(cfg.terrain_smooth) > 0:
             alpha = 0.5
             for _ in range(int(cfg.terrain_smooth)):
@@ -282,9 +416,32 @@ class EnvField:
         done = bytearray(n)
         filled_l = h_list[:]
         heap: list = []
-        for i in np.flatnonzero(pole_rows).tolist():
+        # 🔴 种子集：关档 = 极点行（旧口径，逐位不变）；C0b 开档 = 海洋格 ∪ 极点行
+        #   （§5.2"取消极点唯一出水口"；极点行仍须一并作种——非规范极槽在邻居图上
+        #   孤立，不作种子就永远打不开 ⇒ 触发下方 fail-loud；详见模块头「C0b 的结构性近似」）
+        if not c0b:
+            seed_mask = pole_rows
+            sea_interior = None
+        else:
+            # 海洋格全部标 done（filled = 自身高程），但**只有海岸格入堆**：
+            #   洋面内部格的邻居全部已 done ⇒ 弹它会空转（却把堆深从“前线级”抬到
+            #   “全球级”⇒ 每次 push/pop 变慢）。只入海岸格与全入堆**逐位等价**：
+            #   陆格的首次开启者 = 它的海洋邻居中 filled 最小者（堆按 filled 升序弹出），
+            #   而该海洋邻居必然是海岸格（它已有陆邻居 = 本格）⇒ 结果不变。
+            sea_cells = np.flatnonzero(ocean)
+            nb_sea = nb[sea_cells]
+            has_land_nb = np.any((nb_sea >= 0) & ~ocean[np.where(nb_sea >= 0, nb_sea, 0)],
+                                 axis=1)
+            seed_mask = pole_rows.copy()
+            seed_mask[sea_cells[has_land_nb]] = True
+            sea_interior = sea_cells[~has_land_nb]
+        for i in np.flatnonzero(seed_mask).tolist():
             done[i] = 1
             heap.append((h_list[i], i))
+        if sea_interior is not None:
+            # 洋面内部格：标 done、不入堆（上面已论证与全入堆逐位等价）
+            for i in sea_interior.tolist():
+                done[i] = 1
         heapq.heapify(heap)
         while heap:
             fv, i = heapq.heappop(heap)
@@ -315,6 +472,10 @@ class EnvField:
         jmin = np.argmin(filled_nb, axis=1)                  # 平手取首列 ⇒ 确定性
         row_i = np.arange(n)
         receivers = np.where(valid[row_i, jmin], nb[row_i, jmin], -1).astype(np.int64)
+        if c0b:
+            # 🔴 海洋格 = 天然出水口：水量在海岸**离场**（不再在洋面上向下游搬运）
+            #   ⇒ 下游累加/终点分类都以海岸为界（§5.2「海面即天然出口集合」）。
+            receivers[ocean] = -1
 
         # 诊断：平滑面局部极小值数（"洼地首数"，填洼前的计数）
         v_nb = h_r[safe_nb]
@@ -343,10 +504,110 @@ class EnvField:
             a_ref = 1.0                                      # 全零场兜底（配置异常，防 0/0）
         amp_r = 1.0 + float(cfg.runoff_gain) * acc / (acc + a_ref)
         self.w = yield_ * amp_r
-        self.river_mask = acc >= float(np.percentile(acc, 98.0))
+        acc_p98 = float(np.percentile(acc, 98.0))
+        self.river_mask = acc >= acc_p98          # 关档 = 旧「acc ≥ P98」读数层，逐位不变
+
+        # ---- 4b) C0b：海/陆/湖/河表面类型层 + 三条守恒不变量（§5.2；默认关 ⇒ 整块跳过）----
+        #   🔴 全部算法向量化（指针跳步 + unique + bincount）⇒ **零新增 RNG 消费**、
+        #   零 Python 标量循环；复杂度 O(n log n)，在§5.2 的「+<0.5 s @s2」预算内。
+        if c0b:
+            land = self.land_mask
+            self.river_mask_legacy = acc >= acc_p98      # 旧 P98 读数层保留兼容
+            # 洼地格 = 被填洼抬升的格（与 `flood_filled` 同一条判据 ⇒ 复用语义）；湖 = 洼地 ∧ 非海
+            depression = filled > h_r + 1e-12
+            lake = depression & land
+            self.lake_mask = lake
+            # 每格的汇流终点 root（沿接收者链走到出水口）与湖格的溢流口（链上第一个非湖格）
+            root = _pointer_jump(np.where(receivers >= 0, receivers, cells))
+            reaches_sea = ocean[root]
+            spill = _pointer_jump(np.where(lake & (receivers >= 0), receivers, cells))
+            fresh = lake & reaches_sea
+            salt = lake & ~reaches_sea
+            self.fresh_lake_mask = fresh
+            self.salt_lake_mask = salt
+            # 河 = 陆地汇流格 ∧ acc ≥ P98（河道不含水面）；终点必为海/湖/内流盆地三类之一
+            self.river_mask = (acc >= acc_p98) & land & ~lake
+            # 🔴 表面类型层（载体层，永不进判据前置 = ENV-FIELD §四-4 红线 2）
+            st = np.full(n, SURFACE_LAND, dtype=np.uint8)
+            st[ocean] = SURFACE_OCEAN
+            st[self.shelf_mask] = SURFACE_SHELF
+            st[self.river_mask] = SURFACE_RIVER
+            st[fresh] = SURFACE_LAKE_FRESH
+            st[salt] = SURFACE_LAKE_SALT
+            self.surface_type = st
+            # 湖数/最大湖（按溢流口分组；unique/argmax 平手取首 ⇒ 确定性）
+            if lake.any():
+                uniq, cnt_lk = np.unique(spill[lake], return_counts=True)
+                self.lake_count = int(uniq.size)
+                self.max_lake_cells = int(cnt_lk.max())
+                big = int(uniq[int(np.argmax(cnt_lk))])
+                r_star = int(root[int(np.flatnonzero(lake & (spill == big))[0])])
+            else:
+                self.lake_count = 0
+                self.max_lake_cells = 0
+                r_star = -1
+            self.max_lake_root = r_star
+            root_counts = np.bincount(root, minlength=n)
+            self.max_lake_basin_cells = (int(root_counts[r_star]) if r_star >= 0 else 0)
+
+            # ---- §5.2 三条守恒不变量（构造期一次核账；残差入 probe + 单测）----
+            area_sum = float(areas.sum())
+            land_area_frac = float(areas[land].sum()) / area_sum
+            ocean_area_frac = float(areas[ocean].sum()) / area_sum
+            root_cells = receivers < 0
+            basin_yield = np.bincount(root, weights=yield_, minlength=n)
+            sea_roots = root_cells & ocean
+            inland_roots = root_cells & land
+            tot_yield = float(yield_.sum())
+            tot_root_acc = float(acc[root_cells].sum())
+            land_yield = float(yield_[land].sum())
+            runoff_to_sea = float((acc[sea_roots] - yield_[sea_roots]).sum())
+            inland_hold = float(acc[inland_roots].sum())
+            self.conservation = {
+                "land_area_frac": land_area_frac,
+                "ocean_area_frac": ocean_area_frac,
+                # ①a 海陆面积比互补恒等（分划，可严格到 1e-9）
+                "area_complement_resid": abs(land_area_frac + ocean_area_frac - 1.0),
+                # ①b 目标陆比偏差（离散阈必然落在某格 ⇒ 不可严格 1e-9；实测值归档）
+                "land_frac_target": float(cfg.land_fraction),
+                "land_frac_resid": abs(land_area_frac - float(cfg.land_fraction)),
+                # ② 流域闭合：Σ全局产额 = Σ各终点 acc；且 陆地产水 = 入海径流 + 内流终点蓄
+                "yield_sum": tot_yield,
+                "root_acc_sum": tot_root_acc,
+                "closure_resid": abs(tot_yield - tot_root_acc),
+                "land_yield": land_yield,
+                "runoff_to_sea": runoff_to_sea,
+                "inland_hold": inland_hold,
+                "budget_resid": abs(land_yield - runoff_to_sea - inland_hold),
+                # ③ surface_type 计数与掩码逐位互证（下面当场校验，不靠事后读）
+                "surface_counts": {str(int(k)): int(v) for k, v in
+                                   enumerate(np.bincount(st, minlength=6))},
+                "root_cells": int(root_cells.sum()),
+                "ocean_roots": int(sea_roots.sum()),
+                "inland_roots": int(inland_roots.sum()),
+                "max_lake_root": r_star,
+                "max_lake_basin_cells": self.max_lake_basin_cells,
+                "max_lake_basin_yield": (float(basin_yield[r_star])
+                                         if r_star >= 0 else 0.0),
+                "max_lake_basin_acc": (float(acc[r_star]) if r_star >= 0 else 0.0),
+            }
+            # 🔴 结构性自洽校验（③ 的硬面）：失败 = 标签层写错，宁炸不静默
+            scale = max(1.0, abs(tot_yield))
+            if self.conservation["area_complement_resid"] > 1e-9:
+                raise FloatingPointError(
+                    f"C0b 守恒①a 破坏：海比+陆比 = {land_area_frac + ocean_area_frac!r}（应 1）")
+            if self.conservation["closure_resid"] > 1e-6 * scale:
+                raise FloatingPointError(
+                    f"C0b 守恒② 破坏：Σyield={tot_yield!r} vs Σacc[终点]={tot_root_acc!r}"
+                    "（汇流累加与链结构不一致）——中止。")
+            if int((self.river_mask & (lake | ocean)).sum()) or \
+                    int((salt & fresh).sum()) or int((lake & ocean).sum()):
+                raise FloatingPointError(
+                    "C0b 守恒③ 破坏：河/湖/海 掩码不互斥（surface_type 必与掩码逐位一致）。")
+            if int((self.shelf_mask & ~ocean).sum()):
+                raise FloatingPointError("C0b 大陆架掩码越出海洋集合——定义错，中止。")
 
         # ---- 5) 因子（按面积权均值 = 1 归一；sensitivity=0 ⇒ None = 整块跳过）----
-        areas = world.cell_area(cells)
         self.w_ref = float(np.sum(self.w * areas) / np.sum(areas))
         if not np.isfinite(self.w_ref) or self.w_ref <= 0.0:
             raise FloatingPointError(
@@ -420,6 +681,28 @@ class EnvField:
                 out[f"{tag}_min"] = float(f.min())
                 out[f"{tag}_p99"] = float(np.percentile(f, 99.0))
                 out[f"{tag}_max"] = float(f.max())
+        # ---- C0b 开档读数（🔴 关档时不新增任何键 ⇒ 旧 probe/manifest 逐位不变）----
+        if bool(self.cfg.c0b_enabled):
+            out["c0b_on"] = True
+            out["sea_level_m"] = self.sea_level_m
+            out["land_area_frac"] = float(self.conservation["land_area_frac"])
+            out["ocean_area_frac"] = float(self.conservation["ocean_area_frac"])
+            out["shelf_cells"] = int(self.shelf_mask.sum())
+            out["lake_cells"] = int(self.lake_mask.sum())
+            out["lake_count"] = int(self.lake_count)
+            out["fresh_lake_cells"] = int(self.fresh_lake_mask.sum())
+            out["salt_lake_cells"] = int(self.salt_lake_mask.sum())
+            out["max_lake_cells"] = int(self.max_lake_cells)
+            out["max_lake_basin_cells"] = int(self.max_lake_basin_cells)
+            out["river_cells_c0b"] = int(self.river_mask.sum())
+            out["river_cells_legacy_p98"] = int(self.river_mask_legacy.sum())
+            out["ocean_roots"] = int(self.conservation["ocean_roots"])
+            out["inland_roots"] = int(self.conservation["inland_roots"])
+            out["runoff_to_sea"] = float(self.conservation["runoff_to_sea"])
+            out["inland_hold"] = float(self.conservation["inland_hold"])
+            out["closure_resid"] = float(self.conservation["closure_resid"])
+            out["surface_counts"] = dict(self.conservation["surface_counts"])
+            out["flood_filled_frac"] = float(self.flood_filled) / n   # 对旧 50.8% 失真读数
         return out
 
     def __repr__(self) -> str:  # pragma: no cover - 诊断用

@@ -15,6 +15,14 @@
     E12 自然剖面默认开（裁定一）：显式 False（classic）⇒ temp 逐位旧公式；双开 ⇒ fail-loud 双层
     E13 EBM 剖面物理锚点：赤道 ≈ +28.6°C / 极点 ≈ −23.0°C（真实地球带）＋对称＋单调＋有限
     E14 自然剖面生效 + 接线：temp 逐位 = EBM 剖面 − lapse×H；噪声流不动；引擎送达冒烟
+    E15 C0b 关档逐位钉死：既有层组合 digest 不变 + 新层全 None + RNG 消费数不变
+    E16 C0b 开档物理锚：面积权陆比落目标（§5.2 判据）+ "极海"失真消失
+    E17 C0b 三条守恒不变量：①海陆面积比 ②流域闭合（含最大湖单流域）③计数与掩码互证
+    E18 C0b 表面类型层齐全：海/陆/大陆架/河/湖均有格 + 互斥 + 与掩码逐位一致
+    E19 C0b 零 RNG：开档 `h` 逐位不变 + 同 seed 可复现 + 换陆比不动噪声流
+    E20 C0b 参数域断言 + 类型守卫（fail-loud，不许静默降级）
+    E21 C0b 组合闸：c0b ∧ sim_core ⇒ NotImplementedError；c0b ∧ rd ⇒ ValueError
+    E22 C0b 旧档回退：无 c0b_* 键 ⇒ 默认关（R233 T-F 家族）；带键 ⇒ 逐字段还原
 
 设计原则（教训库）：默认关 = 旧行为逐位一致（E1 钉死）；每条只动一个参数、
 断言"变化方向与量级"。
@@ -27,7 +35,11 @@ import pytest
 
 from simulation.config import EnvFieldConfig, SimConfig
 from simulation.sphere_engine import SphereEngine
-from world.env_field import EnvField, _insolation_base_temperature
+from tools.env_field_digest import SCALARS, digest_layers, layer_dict
+from world.env_field import (
+    EnvField, SURFACE_LAND, SURFACE_LAKE_FRESH, SURFACE_LAKE_SALT, SURFACE_OCEAN,
+    SURFACE_RIVER, SURFACE_SHELF, _insolation_base_temperature,
+)
 from world.light_and_temperature import LightAndTemperature
 from world.sphere_world import SphereWorld
 
@@ -296,4 +308,211 @@ def test_e14_insolation_profile_effect_and_wiring() -> None:
     assert bool(e.env_field.cfg.insolation_profile) is True, "开关未送达 EnvField"
     for _ in range(5):
         e.step()
+
+
+# ---------------- E15–E23 C0b（真实海拔 + 海平面 ⇒ 海/湖/河/陆表面层）----------------
+#   实施依据：`docs/技术文档/技术-动态天气路线评估与选型-20261014.md` §5.2。
+#   验收层级：场级、秒级（构造期静态 ⇒ 不需机时报批）。
+
+#: 关档（`c0b_enabled=False`）60×120/seed42 既有层组合 digest（C7 回滚点；
+#:   口径 = `tools/env_field_digest.py` 模块头：图层固定序 + 标量 "%.17g"）
+_C0B_OFF_DIGEST = {
+    ("classic", 0.0): "ae6ce6c912762aa9f06419300c17783dc4c3f499920d8d764825fb59ad5b83a1",
+    ("classic", 1.0): "c669b0c231051336dbb583438224710a86050e05b64219822e3d66cf55cb2a2d",
+    ("default", 0.0): "3cfd06bdb516565a8b5d58848479af7036a613f1330d44a4f9d592847ea9794e",
+    ("default", 1.0): "b3576603217c6c0851c1d6b0249be816ec74973038abb6eb027b21d7cd3a0983",
+}
+
+#: C0b 开档专属属性（关档必须全 None ⇒ "不进任何计算"的可观测证据）
+_C0B_ATTRS = ("h_m", "sea_level_m", "ocean_mask", "land_mask", "shelf_mask",
+              "lake_mask", "fresh_lake_mask", "salt_lake_mask", "river_mask_legacy",
+              "surface_type", "lake_count", "max_lake_cells", "max_lake_root",
+              "max_lake_basin_cells", "conservation")
+
+
+def _digest_of(ef: EnvField) -> str:
+    return digest_layers(layer_dict(ef), {n: getattr(ef, n) for n in SCALARS})
+
+
+def test_e15_c0b_default_off_bit_equivalent() -> None:
+    """C0b 默认关 ⇒ 既有全部层组合 digest 逐位钉死 + 新层全 None + 引擎 RNG 消费数不变。"""
+    assert EnvFieldConfig().c0b_enabled is False, "C0b 必须默认关"
+    for mode, insolation in (("classic", False), ("default", True)):
+        for sens in (0.0, 1.0):
+            ef = _field(seed=42, insolation_profile=insolation,
+                        water_sensitivity=sens, cap_sensitivity=sens)
+            assert _digest_of(ef) == _C0B_OFF_DIGEST[(mode, sens)], (mode, sens)
+            for attr in _C0B_ATTRS:
+                assert getattr(ef, attr) is None, f"关档 {attr} 应 None"
+            assert "c0b_on" not in ef.probe(), "关档 probe 不得新增键（旧 manifest 逐位不变）"
+    a = SimConfig(seed=42)
+    a.simulation.use_sim_core = False
+    b = SimConfig(seed=42)
+    b.simulation.use_sim_core = False
+    b.env_field.enabled = True
+    b.env_field.c0b_enabled = True
+    assert SphereEngine(a).rng.draws == SphereEngine(b).rng.draws, \
+        "C0b 新增 RNG 消费（地形走独立流 ⇒ 引擎序列必须不动）"
+
+
+def test_e16_c0b_land_ratio_and_polar_sea_gone() -> None:
+    """开档物理锚：面积权陆比落目标（±0.5%）+ "极海"失真消失 + 真实递减率。"""
+    off = _field(seed=42)                                   # 关档：极点 = 唯一出水口
+    on = _field(seed=42, c0b_enabled=True)
+    cons = on.conservation
+    assert abs(cons["land_area_frac"] - 0.30) <= 0.005, cons["land_area_frac"]
+    assert abs(cons["ocean_area_frac"] - 0.70) <= 0.005, cons["ocean_area_frac"]
+    assert bool(on.ocean_mask.any()) and bool(on.land_mask.any())
+    # 🔴 极海失真消失：关档 seed42 被抬成"极海"的格 60×120 = 40.0%（s2 = 50.8%）
+    assert off.flood_filled > 1000 and on.flood_filled * 20 < off.flood_filled, \
+        f"flood_filled {off.flood_filled} -> {on.flood_filled}（应掉两量级以上）"
+    # 开档被抬升的格全部在陆上（海格自身不填洼）⇒ 湖格数 == flood_filled
+    assert int(on.lake_mask.sum()) == on.flood_filled
+    # 真实递减率 Γ=6.5 ℃/km × 真实海拔（替代 lapse_c=20 的现象学常数）
+    lat_row = np.asarray(on.world._lat, dtype=np.float64)
+    ref = np.repeat(_insolation_base_temperature(lat_row), on.world.cols) \
+        - (6.5 / 1000.0) * on.h_m
+    np.clip(ref, -60.0, None, out=ref)
+    assert np.array_equal(on.temp, ref), "开档 temp 未等于 EBM 剖面 − 6.5℃/km × h_m"
+    assert abs(on.h_m.max() - 4500.0) <= 1e-9, "h_m 峰值应落在 peak_altitude_m"
+
+
+def test_e17_c0b_conservation_three_invariants() -> None:
+    """§5.2 三条守恒不变量（构造期一次核账；含最大湖单流域闭合）。"""
+    ef = _field(seed=42, c0b_enabled=True)
+    cons = ef.conservation
+    # ①a 海陆面积比互补恒等（分划；①b 目标偏差已由 E16 ±0.5% 把住）
+    assert cons["area_complement_resid"] <= 1e-12
+    # ② 流域闭合：Σyield == Σacc[终点]（bincount 独立重算 vs 顺序累加）
+    assert cons["closure_resid"] <= 1e-9 * max(1.0, cons["yield_sum"])
+    # ②b 记账：陆地产水 == 入海径流 + 内流终点蓄
+    assert cons["budget_resid"] <= 1e-9 * max(1.0, cons["land_yield"])
+    # ③ surface_type 计数与掩码逐位互证（独立重算）
+    counts = np.bincount(ef.surface_type, minlength=6)
+    assert int(counts[SURFACE_OCEAN] + counts[SURFACE_SHELF]) == int(ef.ocean_mask.sum())
+    assert int(counts[SURFACE_SHELF]) == int(ef.shelf_mask.sum())
+    assert int(counts[SURFACE_LAKE_FRESH]) == int(ef.fresh_lake_mask.sum())
+    assert int(counts[SURFACE_LAKE_SALT]) == int(ef.salt_lake_mask.sum())
+    assert int(counts[SURFACE_RIVER]) == int(ef.river_mask.sum())
+    assert int(counts.sum()) == ef.surface_type.size
+    # ③b 大陆架 ⊆ 海；海格自身即出水口（receivers == -1）
+    assert not bool((ef.shelf_mask & ~ef.ocean_mask).any())
+    assert bool((ef.receivers[ef.ocean_mask] == -1).all())
+
+    world = SphereWorld(240, 480)
+    lt = LightAndTemperature(world)
+    big = EnvField(world, lt, EnvFieldConfig(enabled=True, c0b_enabled=True),
+                   base_seed=42)
+    if big.max_lake_cells > 0:                               # 最大湖单流域闭合
+        c2 = big.conservation
+        assert abs(c2["max_lake_basin_yield"] - c2["max_lake_basin_acc"]) \
+            <= 1e-9 * max(1.0, c2["max_lake_basin_acc"])
+        assert c2["max_lake_basin_cells"] >= big.max_lake_cells
+
+
+def test_e18_c0b_surface_labels_present_and_exclusive() -> None:
+    """表面类型层齐全 + 互斥 + 新河层是旧 P98 读数层的陆地子集。"""
+    world = SphereWorld(240, 480)
+    lt = LightAndTemperature(world)
+    ef = EnvField(world, lt, EnvFieldConfig(enabled=True, c0b_enabled=True),
+                  base_seed=42)
+    st = ef.surface_type
+    for code, name in ((SURFACE_OCEAN, "海"), (SURFACE_SHELF, "大陆架"),
+                       (SURFACE_LAND, "陆"), (SURFACE_RIVER, "河"),
+                       (SURFACE_LAKE_FRESH, "淡水湖")):
+        assert int((st == code).sum()) > 0, f"{name} 标签为空"
+    assert ef.lake_count > 0 and ef.max_lake_cells > 0
+    # 互斥（surface_type 每格只属一类的前提）
+    assert not bool((ef.river_mask & ef.lake_mask).any())
+    assert not bool((ef.river_mask & ef.ocean_mask).any())
+    assert not bool((ef.lake_mask & ef.ocean_mask).any())
+    assert not bool((ef.salt_lake_mask & ef.fresh_lake_mask).any())
+    # 🔴 盐湖与"不达海终点"严格同现。结构注：填洼面上每条链只能终止于
+    #   「海洋格」或「非海洋极点根」⇒ inland_roots == 0 时盐湖必为 0（本模型
+    #   下的结构退化，不是实现缺陷；已列入实施汇报的交裁项）。
+    if ef.conservation["inland_roots"] == 0:
+        assert int(ef.salt_lake_mask.sum()) == 0
+    # 旧 P98 读数层保留兼容：新河层 ⊆ 旧层（只额外去掉水面）
+    assert int((ef.river_mask & ~ef.river_mask_legacy).sum()) == 0
+
+
+def test_e19_c0b_adds_no_rng_consumption() -> None:
+    """零新增 RNG：开档 `h` 逐位不变；同 seed 可复现；换陆比只改海陆划界。"""
+    off = _field(seed=42)
+    a = _field(seed=42, c0b_enabled=True)
+    b = _field(seed=42, c0b_enabled=True)
+    assert np.array_equal(off.h, a.h), "C0b 动到了噪声流（RNG 顺序契约）"
+    for attr in ("h", "temp", "w", "acc", "filled", "receivers", "surface_type"):
+        assert np.array_equal(getattr(a, attr), getattr(b, attr)), attr
+    c = _field(seed=42, c0b_enabled=True, land_fraction=0.5)
+    assert np.array_equal(c.h, off.h), "换陆比动到了噪声流"
+    assert np.array_equal(c.temp, a.temp), "换陆比不得改温度（只改海陆划界）"
+    assert c.conservation["land_area_frac"] > a.conservation["land_area_frac"], \
+        "陆比扫参方向错（0.5 档应更多陆）"
+
+
+def test_e20_c0b_config_domain_assertions() -> None:
+    """参数域 + 类型守卫（fail-loud；不许静默当 truthy / 不许无定义阈值）。"""
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(c0b_enabled=1)                        # 非布尔
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(land_fraction=0.0)
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(land_fraction=1.0)
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(peak_altitude_m=0.0)
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(shelf_depth_m=-1.0)
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(shelf_depth_m=5000.0)                 # ≥ 默认 peak 4500
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(coast_gamma=0.0)
+    with pytest.raises(AssertionError):
+        EnvFieldConfig(coast_gamma=float("nan"))
+    ok = EnvFieldConfig(c0b_enabled=True, land_fraction=0.292,
+                        peak_altitude_m=8848.0, shelf_depth_m=200.0, coast_gamma=0.7)
+    assert ok.coast_gamma == 0.7
+
+
+def test_e21_c0b_combo_gates_fail_loud() -> None:
+    """两条既有组合闸对 C0b 同样生效（宁炸不静默 no-op）。"""
+    cfg = SimConfig(seed=42)
+    cfg.simulation.use_sim_core = True
+    cfg.env_field.enabled = True
+    cfg.env_field.c0b_enabled = True
+    with pytest.raises(NotImplementedError):
+        SphereEngine(cfg)
+
+    cfg2 = SimConfig(seed=42)
+    cfg2.simulation.use_sim_core = False
+    cfg2.env_field.enabled = True
+    cfg2.env_field.c0b_enabled = True
+    cfg2.resource_dynamics.enabled = True
+    with pytest.raises(ValueError):
+        SphereEngine(cfg2)
+
+
+def test_e22_c0b_old_archive_falls_back_to_off() -> None:
+    """旧存档（无 c0b_* 键）⇒ 全部回退默认关；带键 ⇒ 逐字段还原（R233 T-F 家族防线）。"""
+    data = SimConfig(seed=42).to_dict()
+    for key in ("c0b_enabled", "land_fraction", "peak_altitude_m",
+                "shelf_depth_m", "coast_gamma"):
+        data["env_field"].pop(key, None)
+    back = SimConfig.from_dict(data).env_field
+    default = EnvFieldConfig()
+    assert back.c0b_enabled is False
+    assert back.land_fraction == default.land_fraction
+    assert back.peak_altitude_m == default.peak_altitude_m
+    assert back.shelf_depth_m == default.shelf_depth_m
+    assert back.coast_gamma == default.coast_gamma
+
+    cfg = SimConfig(seed=42)
+    cfg.env_field.c0b_enabled = True
+    cfg.env_field.land_fraction = 0.42
+    cfg.env_field.coast_gamma = 0.8
+    got = SimConfig.from_dict(cfg.to_dict()).env_field
+    assert got.c0b_enabled is True and got.land_fraction == 0.42 and got.coast_gamma == 0.8
+
+
+# 🔴 E23（C0b-②：海洋掩码乘性入口）在 ② 那一笔提交里随 `resource_field`/引擎接线同时入库。
 

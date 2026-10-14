@@ -280,6 +280,12 @@ KNOWN: dict[str, str] = {
     "env_field.runoff_gain": INVARIANT,       # 径流增益系数（无量纲）
     "env_field.cap_sensitivity": INVARIANT,   # 产能因子指数（无量纲）
     "env_field.water_sensitivity": INVARIANT, # 水分因子指数（无量纲）
+    # ---- C0b（2026-10-14 动态天气路线 §5.2）：海拔尺度 + 海平面分位 + 海岸复杂度----
+    #   全部是**构造期静态几何量**（零 tick 成本、不进任何每 tick 循环）⇒ INVARIANT。
+    "env_field.land_fraction": INVARIANT,     # 目标陆比（面积权比例，无量纲）
+    "env_field.peak_altitude_m": INVARIANT,   # H=1 对应海拔（米；空间尺度）
+    "env_field.shelf_depth_m": INVARIANT,     # 大陆架厚度（米；空间尺度）
+    "env_field.coast_gamma": INVARIANT,       # e^γ 海岸重映射指数（无量纲）
     # ======================================================================
     # 🔴 `organisms.move_cost` —— **必须单列，不许归入四类中任何一类**
     # ======================================================================
