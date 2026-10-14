@@ -95,12 +95,13 @@ def build_cfg(arm: int, seed: int, rows: int, cols: int, patches: int,
         e.runoff_gain = float(spec["runoff_gain"])
         e.water_sensitivity = float(spec["ws"])
         e.cap_sensitivity = float(spec["cs"])
-        base_t = spec.get("base_t", "classic")   # 5–8 臂用；1–4 无此键 ⇒ classic
+        # 1–4 臂逐键冻结在 classic：2026-10-14 起 insolation 为正式世界默认 ⇒ 此处显式钉回
+        # （5/8 臂 uniform 同时关 insolation；6/7 臂显式开；防默认漂移破坏旧批可比性）
+        base_t = spec.get("base_t", "classic")
+        e.insolation_profile = (base_t == "insolation")
         if base_t == "uniform":
             e.uniform_base_t = True
-        elif base_t == "insolation":
-            e.insolation_profile = True
-        elif base_t != "classic":
+        elif base_t not in ("classic", "insolation"):
             raise ValueError(f"未知 base_t 档：{base_t!r}（classic/uniform/insolation）")
     return cfg
 

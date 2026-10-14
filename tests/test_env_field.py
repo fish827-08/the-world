@@ -12,7 +12,7 @@
     E9 去混杂选项默认关：uniform_base_t=False ⇒ temp 逐位等于旧公式（回滚点钉死）
     E10 去混杂选项生效：uniform_base_t=True ⇒ |corr(u,|lat|)| 显著消退 + 噪声流不动 + 面积权均温保持
     E11 引擎接线：uniform_base_t 经 SimConfig → SphereEngine → EnvField 送达（防静默退回默认）
-    E12 自然剖面默认关 + 互斥：insolation_profile=False ⇒ temp 逐位旧公式；与 uniform 双开 ⇒ fail-loud
+    E12 自然剖面默认开（裁定一）：显式 False（classic）⇒ temp 逐位旧公式；双开 ⇒ fail-loud 双层
     E13 EBM 剖面物理锚点：赤道 ≈ +28.6°C / 极点 ≈ −23.0°C（真实地球带）＋对称＋单调＋有限
     E14 自然剖面生效 + 接线：temp 逐位 = EBM 剖面 − lapse×H；噪声流不动；引擎送达冒烟
 
@@ -162,12 +162,13 @@ def test_e8_factor_gating_and_runoff_monotone() -> None:
 # ---------------- E9 去混杂选项 uniform_base_t（默认关 = 旧公式逐位）----------------
 
 def test_e9_uniform_base_t_default_off_bit_equivalent() -> None:
-    """默认关 ⇒ `temp` 必须逐位等于旧公式 `clip(base_t(φ) − lapse×H, −60)`。
+    """uniform 默认关 + classic 档（显式）⇒ `temp` 逐位等于旧公式 `clip(base_t(φ) − lapse×H, −60)`。
 
-    这是本选项的"默认关 = 唯一回滚点"钉子：任何把默认路径改走 uniform 分支的
-    改动都会在此立刻变红（数值逐位比较，非 allclose）。
+    本测试同时钉两件事：uniform 选项默认关（不许静默启用）＋ classic 档逐位旧公式
+    （C7 回滚点保真，数值逐位比较非 allclose）。2026-10-14 裁定一后默认档=insolation，
+    故此处显式钉 classic 才走到该公式。
     """
-    ef = _field(water_sensitivity=1.0, cap_sensitivity=1.0)
+    ef = _field(water_sensitivity=1.0, cap_sensitivity=1.0, insolation_profile=False)
     assert ef.cfg.uniform_base_t is False, "去混杂选项必须默认关"
     cells = np.arange(ef.world.n_cells, dtype=np.int64)
     ref = ef.lt.base_temperature(cells) - float(ef.cfg.lapse_c) * ef.h
@@ -181,11 +182,13 @@ def test_e9_uniform_base_t_default_off_bit_equivalent() -> None:
 def test_e10_uniform_base_t_removes_latitude_imprint() -> None:
     """开档 ⇒ W 的纬度压印显著消退（治 ADR 教训 2 的 Magnus 混杂）。
 
-    断言"变化方向与量级"（同 E4 风格）：默认档 |corr(u,|lat|)| 强（≈0.9 级），
+    断言"变化方向与量级"（同 E4 风格）：classic 对照档 |corr(u,|lat|)| 强（≈0.9 级），
     开档后应塌到噪声水平（地形偶然残余）。同种子下噪声流逐位不动（h 同 ⇒ RNG 顺序零变化）。
+    两档均钉 classic：uniform 只去梯度不动均值，前提是两档同一 base_t 出发。
     """
-    off = _field(water_sensitivity=1.0, cap_sensitivity=1.0)
-    on = _field(water_sensitivity=1.0, cap_sensitivity=1.0, uniform_base_t=True)
+    off = _field(water_sensitivity=1.0, cap_sensitivity=1.0, insolation_profile=False)
+    on = _field(water_sensitivity=1.0, cap_sensitivity=1.0,
+                uniform_base_t=True, insolation_profile=False)
     world = off.world
     alat = np.abs(np.repeat(np.asarray(world._lat, dtype=np.float64), world.cols))
 
@@ -216,6 +219,7 @@ def test_e11_engine_wiring_accepts_uniform_base_t() -> None:
     cfg = SimConfig(seed=42)
     cfg.simulation.use_sim_core = False
     cfg.env_field.enabled = True
+    cfg.env_field.insolation_profile = False   # 默认档已翻 insolation（裁定一）⇒ 显式关（互斥）
     cfg.env_field.uniform_base_t = True
     cfg.env_field.water_sensitivity = 1.0
     cfg.env_field.cap_sensitivity = 1.0
@@ -226,20 +230,26 @@ def test_e11_engine_wiring_accepts_uniform_base_t() -> None:
         e.step()
 
 
-# ---------------- E12–E14 自然剖面选项 insolation_profile（默认关）----------------
+# -------- E12–E14 自然剖面选项 insolation_profile（裁定一 2026-10-14：默认开 = 正式世界默认档）--------
 
-def test_e12_insolation_profile_default_off_and_mutex() -> None:
-    """默认关 ⇒ `temp` 逐位等于旧公式；类型守卫；与 uniform 双开 ⇒ fail-loud。"""
+def test_e12_insolation_profile_default_on_and_mutex() -> None:
+    """默认档 = insolation（裁定一）；显式 False = classic 档逐位旧公式；互斥双层 fail-loud。"""
     ef = _field(water_sensitivity=1.0, cap_sensitivity=1.0)
-    assert ef.cfg.insolation_profile is False, "自然剖面选项必须默认关"
-    cells = np.arange(ef.world.n_cells, dtype=np.int64)
-    ref = ef.lt.base_temperature(cells) - float(ef.cfg.lapse_c) * ef.h
+    assert ef.cfg.insolation_profile is True, "自然剖面应为正式世界默认档（裁定一）"
+    ef_old = _field(water_sensitivity=1.0, cap_sensitivity=1.0, insolation_profile=False)
+    cells = np.arange(ef_old.world.n_cells, dtype=np.int64)
+    ref = ef_old.lt.base_temperature(cells) - float(ef_old.cfg.lapse_c) * ef_old.h
     np.clip(ref, -60.0, None, out=ref)
-    assert np.array_equal(ef.temp, ref), "默认档 temp 偏离旧公式（逐位）"
+    assert np.array_equal(ef_old.temp, ref), "classic 档 temp 偏离旧公式（逐位）"
     with pytest.raises(AssertionError):
         EnvFieldConfig(insolation_profile=1)                          # 类型守卫
     with pytest.raises(AssertionError):
-        EnvFieldConfig(uniform_base_t=True, insolation_profile=True)  # 互斥（fail-loud）
+        EnvFieldConfig(uniform_base_t=True, insolation_profile=True)  # 互斥（config 层）
+    # 互斥第二层：post-init 赋值绕过 __post_init__ ⇒ 引擎侧兜底必须 fail-loud（防静默覆盖）
+    cfg_bad = EnvFieldConfig(enabled=True)
+    cfg_bad.uniform_base_t = True
+    with pytest.raises(ValueError):
+        EnvField(ef_old.world, ef_old.lt, cfg_bad, base_seed=42)
 
 
 def test_e13_ebm_profile_physical_anchors() -> None:
@@ -264,7 +274,7 @@ def test_e13_ebm_profile_physical_anchors() -> None:
 
 def test_e14_insolation_profile_effect_and_wiring() -> None:
     """生效：`temp` 逐位 = EBM 剖面 − lapse×H；噪声流不动；引擎接线送达冒烟。"""
-    off = _field(water_sensitivity=1.0, cap_sensitivity=1.0)
+    off = _field(water_sensitivity=1.0, cap_sensitivity=1.0, insolation_profile=False)
     on = _field(water_sensitivity=1.0, cap_sensitivity=1.0, insolation_profile=True)
     world = off.world
     assert np.array_equal(off.h, on.h), "insolation_profile 动到了噪声流（RNG 顺序契约）"

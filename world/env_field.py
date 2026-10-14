@@ -12,8 +12,9 @@
     T  = base_temperature(φ) − lapse_c×H            （气候态温度，°C）
         └ `cfg.uniform_base_t=True`（去混杂选项，默认关）⇒ base_temperature(φ) 换成其
           **面积权全球均值**常数（只关纬度梯度、不动全球均值；治 Magnus 纬度压印混杂）
-        └ `cfg.insolation_profile=True`（自然剖面选项，默认关）⇒ base_temperature(φ) 换成
-          **EBM 年平气温剖面**（辐照数值积分；常数全为地球来源 ⇒ 纬度影响与自然界一致）
+        └ `cfg.insolation_profile`（自然剖面；**默认开 = 正式世界默认档**，裁定一 2026-10-14）
+          ⇒ base_temperature(φ) 换成 **EBM 年平气温剖面**（辐照数值积分；常数全为地球来源
+          ⇒ 纬度影响与自然界一致）；显式 False = classic 档（C7 回滚点，逐位旧公式）
           （两选项互斥，fail-loud）
     q  = 6.11×exp(17.27T/(237.3+T))                 （Magnus 饱和水汽压，hPa）
     Pr = q×(1 + orographic×H)                       （抬升增雨）
@@ -185,6 +186,12 @@ class EnvField:
         self.world = world
         self.lt = lt
         self.cfg = cfg
+        if bool(cfg.uniform_base_t) and bool(cfg.insolation_profile):
+            raise ValueError(
+                "uniform_base_t 与 insolation_profile 互斥：同开时温度分支顺序执行会静默"
+                "以 insolation 覆盖 uniform ⇒ 宁炸不静默（config 层 __post_init__ 拦截不了"
+                " post-init 赋值，故引擎侧兜底）。"
+            )
         n = world.n_cells
         cells = np.arange(n, dtype=np.int64)
 
@@ -228,7 +235,8 @@ class EnvField:
             _t_awm = float(np.sum(base_t * _areas_t) / np.sum(_areas_t))
             base_t = np.full(n, _t_awm, dtype=np.float64)
         if bool(cfg.insolation_profile):
-            # 🔴 自然剖面选项（`insolation_profile`；默认关 = 不走本支 ⇒ 逐位不变）：
+            # 🔴 自然剖面（`insolation_profile`；**默认开 = 正式世界默认档**，裁定一 2026-10-14；
+            #   显式 False = classic 档逐位回滚点）：
             #   基温置 **EBM 年平气温剖面**（辐照数值积分；常数全为地球来源——太阳常数/
             #   黄赤交角/反照率/玻尔兹曼/温室增量）⇒ 纬度影响与自然界一致，替代手定
             #   t_pole/t_equator 线性 cosφ。剖面只依赖 |φ| ⇒ 按行算再广播（零 RNG 消费）。
