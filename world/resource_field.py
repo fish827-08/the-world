@@ -62,6 +62,10 @@ class ResourceField:
     _env_growth : NDArray[float64] | None
         纯斑块世界 ENV 场的再生因子（`world/env_field.py`；None = 机制关 ⇒ 整块跳过）。
         容量因子不存属性：构造期一次性乘进 `_capacity`（初始填充随之继承）。
+    _env_ocean : NDArray[float64] | None
+        🔴 C0b-② 海洋掩码乘性入口（`docs/技术文档/技术-动态天气路线评估与选型-20261014.md` §5.2）：
+        海格 = 0.0 / 陆格 = 1.0 的**逐元素乘子**（同 patch/bg 掩码族 ⇒ 子集执行与全场执行逐元素同式）。
+        None = C0b 关 ⇒ 整块跳过 = 逐位等价。海面不是产出陆上食物的土地 ⇒ 容量/再生双双置零。
     """
 
     __slots__ = (
@@ -88,6 +92,8 @@ class ResourceField:
         "_dirty_mask",
         # ---- 纯斑块世界 ENV 场：再生因子（None = 机制关 ⇒ 整块跳过 = 逐位等价）----
         "_env_growth",
+        # ---- C0b-②：海洋掩码乘性入口（None = 机制关 ⇒ 整块跳过 = 逐位等价）----
+        "_env_ocean",
     )
 
     def __init__(
@@ -117,6 +123,8 @@ class ResourceField:
         # ---- 纯斑块世界 ENV 场（2026-10-11；默认 None = 机制关 ⇒ 逐位等价）----
         env_growth_factor=None,
         env_capacity_factor=None,
+        # ---- C0b-②（2026-10-14；默认 None = 机制关 ⇒ 逐位等价）----
+        env_ocean_mask=None,
     ) -> None:
         """铺好初始食物。
 
@@ -183,6 +191,18 @@ class ResourceField:
 
         self._env_growth = _chk(env_growth_factor, "env_growth_factor")
         _env_cf = _chk(env_capacity_factor, "env_capacity_factor")
+
+        # 🔴 C0b-②：海洋掩码 → 只读乘子（0.0 海 / 1.0 陆）。构造期一次性乘进容量、
+        #   每 tick 逐元素乘进再生 ⇒ 与 `_env_growth` 同一子集语义论证。
+        #   乘 0.0 与置 0.0 对有限非负容量逐位相同（不引入 NaN，也不引入符号分岔）。
+        if env_ocean_mask is None:
+            self._env_ocean = None
+        else:
+            om = np.asarray(env_ocean_mask, dtype=bool)
+            if om.shape != (world.n_cells,):
+                raise ValueError(
+                    f"env_ocean_mask 形状必须 (n_cells,)={world.n_cells}，收到 {om.shape}")
+            self._env_ocean = np.where(om, 0.0, 1.0)
 
         areas = world.cell_area(np.arange(world.n_cells))
         base_cap = areas * capacity_per_area
@@ -258,6 +278,9 @@ class ResourceField:
                 # ENV 容量因子：乘在**最终容量层**（斑块/背景倍率之上）；下面的初始填充
                 #   （`_grid = _capacity × fill`）自然继承新容量 ⇒ 初始存量无需另改。
                 self._capacity = self._capacity * _env_cf
+            if self._env_ocean is not None:
+                # C0b-②：同一容量层再乘海洋乘子（海面零容量 ⇒ 初始存量也自动归零）
+                self._capacity = self._capacity * self._env_ocean
             # 4) 再生守恒：patch_mult × patch_frac + bg_mult × bg_frac = 1
             #   ⚠️ 同上：背景归零时该守恒式**不再成立**（这是 13.5 的目的）⇒ 直接取 0.0。
             patch_frac = patch_area / total_area
@@ -282,6 +305,8 @@ class ResourceField:
             self._capacity = base_cap
             if _env_cf is not None:
                 self._capacity = self._capacity * _env_cf
+            if self._env_ocean is not None:
+                self._capacity = self._capacity * self._env_ocean   # C0b-②
             self._grid = self._capacity * initial_fill   # sparse:init（构造期）
             self._patch_mask = None
             self._patch_regrowth_mult = 1.0
@@ -616,6 +641,11 @@ class ResourceField:
         if self._env_growth is not None:
             gf = self._env_growth if idx is None else self._env_growth[cells]
             growth = growth * gf
+        # ---- C0b-②：海洋格再生置零（默认 None ⇒ 整块跳过 = 逐位等价）----
+        #   子集语义：纯逐元素乘（无归约/分支）⇒ 子集执行与全场执行逐元素同式（同 `_env_growth`）。
+        if self._env_ocean is not None:
+            om = self._env_ocean if idx is None else self._env_ocean[cells]
+            growth = growth * om
         return growth
 
     # ---- 快照 / 调试 ---------------------------------------------------------

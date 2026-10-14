@@ -23,6 +23,8 @@
     E20 C0b 参数域断言 + 类型守卫（fail-loud，不许静默降级）
     E21 C0b 组合闸：c0b ∧ sim_core ⇒ NotImplementedError；c0b ∧ rd ⇒ ValueError
     E22 C0b 旧档回退：无 c0b_* 键 ⇒ 默认关（R233 T-F 家族）；带键 ⇒ 逐字段还原
+    E23 C0b-② 海洋掩码乘性入口：海格容量/存量/再生恒零 + 接线送达 + env_note 留痕
+    E24 C0b-② 守卫：掩码形状错⇒构造期报错；env∧sparse 时两行 note 共存不互抹
 
 设计原则（教训库）：默认关 = 旧行为逐位一致（E1 钉死）；每条只动一个参数、
 断言"变化方向与量级"。
@@ -514,5 +516,40 @@ def test_e22_c0b_old_archive_falls_back_to_off() -> None:
     assert got.c0b_enabled is True and got.land_fraction == 0.42 and got.coast_gamma == 0.8
 
 
-# 🔴 E23（C0b-②：海洋掩码乘性入口）在 ② 那一笔提交里随 `resource_field`/引擎接线同时入库。
+def test_e23_c0b_ocean_mask_zeroes_capacity_and_regrowth() -> None:
+    """C0b-②：海洋掩码乘性入口送达资源场 ⇒ 海格容量/存量/再生恒零。"""
+    cfg = SimConfig(seed=42)
+    cfg.simulation.use_sim_core = False
+    cfg.env_field.enabled = True
+    cfg.env_field.c0b_enabled = True
+    e = SphereEngine(cfg)
+    ocean = e.env_field.ocean_mask
+    assert e.resources._env_ocean is not None, "海洋乘子未送达资源场（接线漏传 ⇒ 死字段）"
+    assert bool(np.all(e.resources._capacity[ocean] == 0.0))
+    assert bool(np.all(e.resources._grid[ocean] == 0.0))
+    assert bool(np.any(e.resources._capacity[~ocean] > 0.0)), "陆格容量被整体清零"
+    for _ in range(3):
+        e.step()
+    assert bool(np.all(e.resources._grid[ocean] == 0.0)), "海格再生未置零（C0b-② 静默 no-op）"
+    assert e.env_note and "env_c0b=on" in e.env_note, "开档标记未落 env_note（manifest 需留痕）"
+
+
+def test_e24_c0b_shape_guard_and_lazy_coexistence() -> None:
+    """② 的守卫与共存：掩码形状错 ⇒ 构造期报错；env∧sparse 的两行 note 不互相抹掉。"""
+    from world.resource_field import ResourceField
+    from world.light_and_temperature import LightAndTemperature as LT
+
+    world = SphereWorld(_ROWS, _COLS)
+    lt = LT(world)
+    with pytest.raises(ValueError):
+        ResourceField(world, lt, env_ocean_mask=np.zeros(_ROWS, dtype=bool))
+
+    cfg = SimConfig(seed=42)
+    cfg.simulation.use_sim_core = False
+    cfg.simulation.sparse_fields = True
+    cfg.env_field.enabled = True
+    cfg.env_field.c0b_enabled = True
+    e = SphereEngine(cfg)
+    assert e.resources._lazy is False, "env 开档时资源侧惰性必须显式退场"
+    assert "resource_lazy=off" in e.env_note and "env_c0b=on" in e.env_note, e.env_note
 
