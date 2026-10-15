@@ -88,11 +88,11 @@ cd ..
 # 快速自检（约 2 秒，49 例：ENV 场 + Rust 对拍 + 基因注册表）
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest tests/test_env_field.py tests/test_sim_core.py tests/test_genes_registry.py -q
 
-# 全量（本机约 9–10 分钟）：预期 ~1377 passed / ~52 failed / 9 skipped
+# 全量（本机约 11 分钟）：预期 1499 passed / 1 failed / 9 skipped（唯一红 = T2b，见下）
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest tests/ -q --ignore=tests/test_broker.py
 ```
 
-⏱️ 全量 9–10 分钟（537–571 s 实测窗口），若工具/子代理单命令有 ~10 分钟超时上限，用**分段跑法**（对账时把两段的失败集**合并**看）：
+⏱️ 全量 9–11 分钟（537–674 s 实测窗口），若工具/子代理单命令有 ~10 分钟超时上限，用**分段跑法**（对账时把两段的失败集**合并**看）：
 
 ```bash
 F=$(ls tests/test_*.py | grep -v test_broker); H=$(( $(echo "$F" | wc -l) / 2 ))
@@ -100,13 +100,14 @@ PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest $(echo "$F" | head -n 
 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest $(echo "$F" | tail -n +$((H+1))) -q
 ```
 
-**~52 个失败是存量环境族，不是代码缺陷**（`[实测]` 2026-10-13，537s；复测 571s 同集合；含 broker 档 = 1383/52/9）：
+**存量六族 52 红已于 2026-10-16 清零**（`[实测]` 默认模式 1499/1/9、UTF-8 模式同为 1 failed；分支 `fix/test-suite-reds` 待 owner 裁；逐名明细见 `docs/汇报/汇报-20261016-测试红族清零.md`）：
 
-- 52 个固定失败：`test_f_r21_presets` ×36 + `test_r278_p3_device_flush` ×7（其中 1 例是 ULP 最末位）+ `test_r287_s3_sample_resume` ×4 + `test_221_snap_shard` ×3 + `test_r98_nonascii_print` ×1 + `test_f_r10_f_r12` ×1。
-  根因：子进程 stdout 写 UTF-8，父进程 `subprocess.run(text=True)` 未指定 encoding ⇒ 在中文 Windows 上按 locale **GBK 解码**报 `UnicodeDecodeError`。
-- 另 1 个并发 flake：`test_r110_criteria.py::test_concurrent_start_exactly_one_wins`（负载下偶发；触发时总数 1376/53/9；隔离复跑 11/11 绿）。
+- 解码族 50 例（`test_f_r21_presets` ×36 + `test_r278_p3_device_flush` ×6 + `test_r287_s3_sample_resume` ×4 + `test_221_snap_shard` ×3 + `test_f_r10_f_r12` ×1）：父进程 `subprocess.run(text=True)` 未指定 encoding ⇒ 在中文 Windows 上按 locale **GBK 解码**子进程的 UTF-8 输出（Python 3.14 表现为 reader thread 解码崩、流截断 / `r.stdout=None`）。修法 = **双钉 UTF-8**（env `PYTHONIOENCODING=utf-8` + `run(encoding="utf-8")`）——**新写 subprocess 测试照此双钉**，勿只钉一半。
+- `test_r98_nonascii_print` ×1：16 个文件 print 含 GBK 不可编码字符且无 reconfigure 调用点 ⇒ 按 R216 裁定一模式补入口兜底。
+- 唯一遗留红 = `test_r278_p3_device_flush.py::test_T2b_s2_default_csv_equals_baseline`（1–2 ULP）：夹具系异地生成、本机 venv 不可复现（四时代代码输出逐位一致，见汇报 §四），A/B/C 已交 owner，**未动容差**。
+- 另 1 个并发 flake：`test_r110_criteria.py::test_concurrent_start_exactly_one_wins`（负载下偶发；隔离复跑绿；锁写窗口根因已定位，修它要动 batch_runner 语义 ⇒ 维持现状）。
 
-**对账纪律**：只看「失败集合是否与上述清单一致、零新增」，不看 pass 数绝对值（pass 随测试增长）。在 UTF-8 locale 的 Linux/macOS 上 GBK 族多数会转绿。
+**对账纪律**：只看「失败集合是否与上述清单一致、零新增」，不看 pass 数绝对值（pass 随测试增长）。在 UTF-8 locale 的 Linux/macOS 上无 GBK 族问题；本机复核实测：解码族转绿的真条件是 `PYTHONUTF8=1`（UTF-8 模式），仅 `PYTHONIOENCODING=utf-8` 不够（它只改流编码、不改 `subprocess` 的 locale 解码）。
 
 ### 1.5 最小实验
 
@@ -141,7 +142,7 @@ print('ticks:', len(stats), '| pop:', stats[-1].population)"
 | `failed to run the Python interpreter ... (os error 231)` | 受限/沙箱环境里 pyo3-build-config 无法 spawn Python | 只做编译自检：`PYO3_NO_PYTHON=1 cargo check --release --features pyo3/extension-module,pyo3/abi3-py314`（不产 .pyd；`sim_core/BUILD.md §3`） |
 | 收集期硬失败「sim_core 扩展未安装」 | 没编译扩展 | 做 §1.3 |
 | Linux 构建链接错误 | 缺库路径 | `LIBRARY_PATH=/opt/python3.12/lib`（AGENTS.md 构建命令） |
-| 全量测试 ~53 失败 | 存量环境族 | 见 §1.4 清单与对账纪律 |
+| 全量测试 1 failed（T2b ULP，A/B/C 交 owner） | 唯一遗留红，非代码回归 | 见 §1.4 清单与对账纪律 |
 
 ---
 
