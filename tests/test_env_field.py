@@ -31,6 +31,7 @@
     E28 C1 机制真的在动：谷位跟 dry_deg 走（变异检查）
     E29 C1 零 RNG + 与 C0b 组合：h/temp 层逐位不动；同开时三守恒仍成立
     E30 C1 参数域断言 + 旧档回退默认关
+    E31 C0b α/c/k 热物性备料表：六类表面齐全、取值正定（查表常量，不接计算路径）
 
 设计原则（教训库）：默认关 = 旧行为逐位一致（E1 钉死）；每条只动一个参数、
 断言"变化方向与量级"。
@@ -46,7 +47,7 @@ from simulation.sphere_engine import SphereEngine
 from tools.env_field_digest import SCALARS, digest_layers, layer_dict
 from world.env_field import (
     EnvField, SURFACE_LAND, SURFACE_LAKE_FRESH, SURFACE_LAKE_SALT, SURFACE_OCEAN,
-    SURFACE_RIVER, SURFACE_SHELF, _insolation_base_temperature,
+    SURFACE_RIVER, SURFACE_SHELF, SURFACE_THERMOPHYSICS, _insolation_base_temperature,
 )
 from world.light_and_temperature import LightAndTemperature
 from world.sphere_world import SphereWorld
@@ -684,4 +685,19 @@ def test_e30_c1_config_domain_and_old_archive_fallback() -> None:
     cfg.env_field.dry_amp = 1.5
     got = SimConfig.from_dict(cfg.to_dict()).env_field
     assert got.c1_enabled is True and got.dry_deg == 25.0 and got.dry_amp == 1.5
+
+
+# ---------------- E31 C0b α/c/k 热物性备料表（查表常量，不接计算路径）----------------
+#   裁定完工项（4b9ac66）：只备"surface_type→参数"常量，逐格赋值与能量平衡属 C4a-1。
+
+
+def test_e31_surface_thermophysics_table_full_coverage() -> None:
+    """surface_type→(α,c,k) 六类齐全、取值正定（报告 §2.3-④ 备料；防未来新增类型漏补行）。"""
+    assert set(SURFACE_THERMOPHYSICS) == {
+        SURFACE_LAND, SURFACE_OCEAN, SURFACE_SHELF, SURFACE_RIVER,
+        SURFACE_LAKE_FRESH, SURFACE_LAKE_SALT,
+    }, "六类表面必须各有 (α,c,k) 行（新增表面类型 ⇒ 同步补表）"
+    for st, (alpha, c, k) in SURFACE_THERMOPHYSICS.items():
+        assert 0.0 < alpha < 1.0, f"surface_type={st} 反照率越界：{alpha}"
+        assert 0.0 < c < 1e4 and 0.0 < k < 10.0, f"surface_type={st} 热物性越界：(c={c}, k={k})"
 

@@ -113,6 +113,21 @@ SURFACE_LAKE_SALT = 5
 OUTLET_SEA = 0
 OUTLET_INLAND = 1
 
+#: C4a-1 表面热物性三件套**备料**（报告 §2.3-④ 全表；🔴 纯查表常量 ⇒ 本期**不接任何计算
+#:   路径**——逐格赋值与能量平衡属 C4a-1 = 审后第二批，勿提前接线）：
+#:   surface_type → (α 反照率, c 比热 J·kg⁻¹·K⁻¹, k 导热率 W·m⁻¹·K⁻¹)（表内区间取代表值）。
+#:   取值行：陆 = 裸土 0.17 / 湿土 1480 / 湿土 1.0；海·大陆架·盐湖 = 海水（0.06 / 3993 / 0.606）；
+#:   河·淡水湖 = 淡水（0.06 / 4182 / 0.606）。海洋有效热容量（50 m 混合层 C=ρch≈2×10⁸
+#:   J·m⁻²·K⁻¹）同表备查，随 C4a-1 定混合层深度后再用。
+SURFACE_THERMOPHYSICS: dict[int, tuple[float, float, float]] = {
+    SURFACE_LAND:       (0.17, 1480.0, 1.0),
+    SURFACE_OCEAN:      (0.06, 3993.0, 0.606),
+    SURFACE_SHELF:      (0.06, 3993.0, 0.606),
+    SURFACE_RIVER:      (0.06, 4182.0, 0.606),
+    SURFACE_LAKE_FRESH: (0.06, 4182.0, 0.606),
+    SURFACE_LAKE_SALT:  (0.06, 3993.0, 0.606),
+}
+
 #: 一层 EBM 自然剖面常数（全为地球观测值；`insolation_profile` 选项用，零自由参数）
 _SOLAR_CONSTANT_WM2 = 1361.0        # 太阳常数 S0（W/m²）
 _OBLIQUITY_RAD = np.radians(23.44)  # 黄赤交角 ε
@@ -347,7 +362,8 @@ class EnvField:
         if c0b:
             gamma = float(cfg.coast_gamma)
             if gamma != 1.0:
-                # e^γ 海岸复杂度重映射（γ<1 ⇒ 低地被抬高 ⇒ 海岸更碎、陆比升高；§2.3-①）
+                # h^γ 海岸复杂度重映射（收口更正 2026-10-16：实现为 h^γ 而非字面 e^γ；
+                # γ<1 ⇒ 低地被抬高 ⇒ 海岸更碎、陆比升高；§2.3-①）
                 h_eff = np.power(h, gamma)
             h_m = h_eff * float(cfg.peak_altitude_m)     # 真实海拔（米）
             sea_level_m = _area_threshold_below(
