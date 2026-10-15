@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -60,11 +61,25 @@ _FLAG_RE = re.compile(r"(--[A-Za-z0-9][-A-Za-z0-9]*)")
 _HELP_CACHE: dict[str, set[str]] = {}
 
 
+def _utf8_env() -> dict:
+    """子进程环境双钉 UTF-8（2026-10-16 解码族 50 红根因修复；R98 同族纪律）。
+
+    父侧 `subprocess.run(text=True)` 不带 `encoding=` 时按 locale（中文 Windows=GBK）解码；
+    受控脚本入口 reconfigure 成 UTF-8 ⇒ 父按 GBK 解 UTF-8 字节 ⇒ 流被解残/断言红。
+    双钉 = ① env `PYTHONIOENCODING=utf-8`（子进程 stdout/stderr 恒 UTF-8，
+    不依赖目标脚本自带 reconfigure）② `run(encoding="utf-8")`（父侧按 UTF-8 解）。
+    """
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def _script_flags(script: str) -> set[str]:
     """目标脚本支持的开关全集（取自 `--help`）。"""
     if script not in _HELP_CACHE:
         out = subprocess.run([PY, str(ROOT / script), "--help"],
-                             capture_output=True, text=True, cwd=str(ROOT))
+                             capture_output=True, text=True, cwd=str(ROOT),
+                             encoding="utf-8", env=_utf8_env())
         text = (out.stdout or "") + (out.stderr or "")
         _HELP_CACHE[script] = set(_FLAG_RE.findall(text))
         # 兜底：`--help` 本身
@@ -210,5 +225,5 @@ def test_resolved_py_is_the_running_interpreter_in_worktrees():
     """
     assert Path(PY).is_file(), f"PY 指向不存在的解释器：{PY}"
     out = subprocess.run([PY, "-c", "print(1)"], capture_output=True, text=True,
-                         cwd=str(ROOT))
+                         cwd=str(ROOT), encoding="utf-8", env=_utf8_env())
     assert out.returncode == 0 and out.stdout.strip() == "1"

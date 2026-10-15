@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -43,8 +44,13 @@ TAG = run_tag(60, 120, 30, 42, 1.0, 1.195)
 
 
 def _cli(args: list[str], *, expect_ok: bool = True) -> subprocess.CompletedProcess:
+    # 双钉 UTF-8（2026-10-16 解码族修复）：子进程恒 UTF-8 + 父侧按 UTF-8 解。
+    # 断言解析中文 stdout（"续跑" / "@ tick 40 → 60" / "本机负责 **2/4** 个 run"）。
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     r = subprocess.run([PY, "experiments/steady_k_probe.py", *args], cwd=str(ROOT),
-                       capture_output=True, text=True, timeout=1200)
+                       capture_output=True, text=True, timeout=1200,
+                       encoding="utf-8", env=env)
     if expect_ok:
         assert r.returncode == 0, f"CLI 失败：{r.stdout[-400:]}\n{r.stderr[-1200:]}"
     return r

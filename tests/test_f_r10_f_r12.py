@@ -203,8 +203,12 @@ def test_resume_rejects_13_4_arm_identity_mismatch(tmp_path):
     assert subprocess.call(base, cwd=str(ROOT), stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL) == 0, "段一（A 臂）应跑完"
     # 段二传 corpse-enabled（与段一 A 臂不符）⇒ 硬失败
+    # 双钉 UTF-8（2026-10-16 解码族修复）：断言解析中文输出（"corpse_enabled 冲突"）。
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     r = subprocess.run(base + ["--ticks", "200", "--corpse-enabled"],
-                       cwd=str(ROOT), capture_output=True, text=True)
+                       cwd=str(ROOT), capture_output=True, text=True,
+                       encoding="utf-8", env=env)
     assert r.returncode != 0, "臂身份冲突必须硬失败"
     assert "corpse_enabled 冲突" in (r.stdout + r.stderr)
     # 段二不传（与段一一致）⇒ 正常续跑
