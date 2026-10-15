@@ -894,6 +894,10 @@ class SphereEngine:
                                if self.env_field is not None else None),
             env_capacity_factor=(self.env_field.capacity_factor()
                                  if self.env_field is not None else None),
+            # 🔴 C0b-②（2026-10-14 动态天气路线 §5.2）：海洋掩码乘性入口。
+            #   必须显式透传（同 13.5① 死字段家族：不传 ⇒ 静默无变化）；关档 ⇒ None ⇒ 逐位等价。
+            env_ocean_mask=(getattr(self.env_field, "ocean_mask", None)
+                            if self.env_field is not None else None),
         )
         # 田字格信号场（L2/L3）：生物可写入/读取 16 种标记模式
         # 🔴 P0.0 A1（2026-09-26）：寿命原为硬编码 `duration=50`，现读配置
@@ -1319,6 +1323,10 @@ class SphereEngine:
                                and not _ef_on)
         if _ef_on and _sparse_cfg:
             self.env_note = "resource_lazy=off(reason=env_field)"
+        if _ef_on and bool(getattr(self.env_field.cfg, "c0b_enabled", False)):
+            # 🔴 C0b 开档标记（§5.2「接线透传新字段 + env_note 追加一行」）——
+            #   与上一行共存 ⇒ 不抹掉 `resource_lazy=off`（E7 断言该子串仍在）。
+            self.env_note = ((self.env_note + " ") if self.env_note else "") + "env_c0b=on"
         if self._sparse_fields:
             self.resources.enable_lazy()
         if _sparse_cfg:
