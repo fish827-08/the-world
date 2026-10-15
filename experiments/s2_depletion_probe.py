@@ -49,6 +49,14 @@ from experiments.steady_k_probe import make_cfg, apply_post_build
 # 🔴 R278 §三 P3：装置预设档防呆（S2/S3 单一真源）
 from tools.device_presets import add_device_arg, resolve_device
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print ⇒ rc=1 假失败；F-R15 族）---
+# 2026-10-16 存量测试红族清零：本文件 print 含 GBK 不可编码字符且无兜底 ⇒ 全域扫描器红。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 
 # S1 1.195 档基线配置（tools/s1_rgm_scan.py 的 T4 字典 + build_cmd）。
 # 控制臂必须逐字段对齐，否则 K≈915 / 饿死占比 0.22–0.30 不可复现。
