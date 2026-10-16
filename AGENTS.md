@@ -129,15 +129,15 @@ g15 任何判读**之前**必须先过生态门：**≥5 seed 中多数存活至
 
 ## 测试状态（**2026-10-16 实测**；全量 `tests/` ≈9–11 分钟）
 
-- **全量（标准命令，`--ignore=tests/test_broker.py`）**：**1499 passed / 1 failed / 9 skipped**（`[实测]` 2026-10-16 默认模式，674 s，1509 collected）；UTF-8 模式（`PYTHONUTF8=1`）同为 1 failed（同一例）。唯一红 = `test_r278_p3_device_flush.py::test_T2b_s2_default_csv_equals_baseline`（ULP 类，**停手交 owner 裁**，A/B/C 见 `docs/汇报/汇报-20261016-测试红族清零.md` §四）。含 broker 档需 fastapi/uvicorn/websockets。
-- **存量六族 52 红已于 2026-10-16 清零**（分支 `fix/test-suite-reds` 已推 gitee 待 owner 裁；提交 `d466fa4` 解码族 50 例 + `3b123fb` r98 16 文件）：
+- **全量（标准命令，`--ignore=tests/test_broker.py`）**：**1499 passed / 1 failed / 9 skipped**（`[实测]` 2026-10-16 默认模式，674 s，1509 collected）；UTF-8 模式（`PYTHONUTF8=1`）同为 1 failed（同一例）。唯一红 = `test_r278_p3_device_flush.py::test_T2b_s2_default_csv_equals_baseline`（ULP 类，**停手交 owner 裁**，A/B/C 见 `docs/汇报/汇报-20261016-测试红族清零.md` §五）。含 broker 档需 fastapi/uvicorn/websockets。
+- **存量六族 52 红已于 2026-10-16 清零**（分支 `fix/test-suite-reds` 已并 main：merge `7263619`，owner 10-16 批准；提交 `d466fa4` 解码族 50 例 + `3b123fb` r98 16 文件）：
   - 解码族 50 例（`test_f_r21_presets` ×36 + `test_r278_p3_device_flush` ×6 + `test_r287_s3_sample_resume` ×4 + `test_221_snap_shard` ×3 + `test_f_r10_f_r12` ×1）：父侧 `subprocess.run(text=True)` 未指定 encoding ⇒ 中文 Windows 按 GBK 解码子进程 UTF-8 输出（Python 3.14 表现为 reader thread 解码崩、流截断 / `r.stdout=None`）⇒ 双钉修复（env `PYTHONIOENCODING=utf-8` + `run(encoding="utf-8")`），两种模式均绿。
   - `test_r98_nonascii_print` ×1：16 个文件 print 含 GBK 不可编码字符且无 reconfigure 调用点 ⇒ 按 R216 裁定一模式补入口兜底（`observatory/api.py` 落 `main()`，其余 15 个落最后一个顶层 import 之后）。
   - ⚠️ 真·裸环境（无任何 env 前缀）下另有 3 例**子进程侧** GBK 崩溃（s3 探针只 reconfigure 了 stdout，stderr 的 `⚠️` 等在裸环境不可编码）——它们会被"标准命令"的 `PYTHONIOENCODING=utf-8` 前缀 mask，故历史账面只有 52；双钉同时覆盖两种模式，终验默认模式 0 例复现。
 - **T2b（ULP 最末位）非代码回归**：四个时代代码（`74be528^` 改造前 / `74be528` / `27a2698^` / HEAD）微缩档输出**逐位一致**，唯 `tests/fixtures/p3_s2_default_baseline.csv` 差 1–2 ULP ⇒ 夹具系异地生成（R278 P3 云端交付）、本机 venv 不可复现。**未动期望值/容差**，选项见汇报 §四。
 - 另有 1 例并发 flake：`test_r110_criteria.py::test_concurrent_start_exactly_one_wins`（负载下偶发；隔离复跑绿；根因 = `acquire_lock` 的 `O_EXCL` 建锁与写 payload 之间的读窗口，修它要改 batch_runner 锁接管语义 ⇒ 按纪律维持现状）。
 - **对账纪律**：与失败**集合**逐名对比（零新增才算过），不看总数（pass 数随测试增长）；新写 subprocess 测试两侧钉 UTF-8（env `PYTHONIOENCODING=utf-8` + `run(encoding="utf-8")`）。
-- 快速子集（≈2 秒，49 例）：`test_env_field.py` + `test_sim_core.py` + `test_genes_registry.py` ⇒ 49 passed。更多口径见 `ONBOARDING.md` §1.4。
+- 快速子集（≈4 秒，72 例）：`test_env_field.py` + `test_sim_core.py` + `test_genes_registry.py` ⇒ 72 passed。更多口径见 `ONBOARDING.md` §1.4。
 
 ## 当前阶段（**2026-10-13 更正**；活文档：`docs/项目状态.md` §三）
 
