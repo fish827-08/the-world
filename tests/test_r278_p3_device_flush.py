@@ -45,10 +45,14 @@ def _run(probe: str, args: list[str], out: Path, seed: str = "165") -> subproces
     env = dict(os.environ)
     env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
                MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+    # 双钉 UTF-8（2026-10-16 解码族修复）：子进程 stdout/stderr 恒 UTF-8 +
+    # 父侧按 UTF-8 解。探针回显/冲突提示走 stderr，断言直接解析中文 ⇒ 不钉即红。
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, "-u", "-m", probe, *args, "--seeds", seed,
          "--ticks", str(TICKS), "--out", str(out)],
-        cwd=str(REPO), env=env, capture_output=True, text=True)
+        cwd=str(REPO), env=env, capture_output=True, text=True,
+        encoding="utf-8")
 
 
 def _rows(p: Path) -> list[dict]:

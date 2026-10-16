@@ -1745,6 +1745,14 @@ def _serve(host: str, port: int) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # R98 纪律：Windows GBK 控制台兜底（2026-10-16 存量测试红族清零）。
+    # 本文件 print 的 ⚠️/🔴 在 GBK 控制台不可编码 ⇒ rc=1 假失败。落 main() 而非模块级：
+    # api.py 会被测试 import（模块级 reconfigure 会污染宿主进程的流）。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
     raw = list(sys.argv[1:] if argv is None else argv)
     # supervise 子命令：`--` 之后的参数归脚本，由 supervise_main 自己切
     if raw and raw[0] == "supervise":

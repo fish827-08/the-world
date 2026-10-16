@@ -21,6 +21,14 @@ from experiments.steady_k_probe import make_cfg, apply_post_build
 from simulation.sphere_engine import SphereEngine
 from simulation.genes import Gene
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print ⇒ rc=1 假失败；F-R15 族）---
+# 2026-10-16 存量测试红族清零：本文件 print 含 GBK 不可编码字符且无兜底 ⇒ 全域扫描器红。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 B = dict(rows=480, cols=960, patches=1700, pop=10000,
          speed_max=0.125, gain=0.125, subdiv=80, k=2.5, max_count=30000, rgm=1.195,
          bg_low_prod_frac=0.4, bg_low_cap_mult=0.05)

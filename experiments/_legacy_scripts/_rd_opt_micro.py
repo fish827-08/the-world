@@ -13,6 +13,15 @@
 import time
 import numpy as np
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print ⇒ rc=1 假失败；F-R15 族）---
+# 2026-10-16 存量测试红族清零：本文件 print 含 GBK 不可编码字符且无兜底 ⇒ 全域扫描器红。
+import sys
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 rng = np.random.default_rng(20260930)
 n = 460_800
 n_dead, n_rest, n_eaten, n_patch = 4589, 1061, 1980, 12805

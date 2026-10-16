@@ -9,6 +9,14 @@ from world.resource_dynamics import ResourceDynamics
 from world.resource_field import ResourceField
 from world.signal_field import SignalField
 
+# --- R98 纪律：Windows GBK 控制台兜底（非 ASCII print ⇒ rc=1 假失败；F-R15 族）---
+# 2026-10-16 存量测试红族清零：本文件 print 含 GBK 不可编码字符且无兜底 ⇒ 全域扫描器红。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # 非 TTY / 旧解释器：不因诊断能力缺失而阻断运行
+
 stats = {}
 def wrap_any(obj, name, tag):
     if not hasattr(obj, name):
