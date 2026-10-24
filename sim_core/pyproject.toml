@@ -1,0 +1,18 @@
+# 让 maturin 用本项目 Cargo 工程构建 sim_core 扩展（模块三 · 文件 2）。
+# 构建：cd sim_core && maturin develop --release   （把 sim_core 装进当前 Python 环境）
+# 校验：python -c "import sim_core; print(sim_core.__name__)"
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sim-core"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "digital-life-sphere 的 Rust 加速核（数值热路径）"
+license = { text = "Apache-2.0" }
+
+[tool.maturin]
+# 用 Cargo 工程名作为模块名；release 构建并剥离符号，减小 .pyd 体积
+module-name = "sim_core"
+features = ["pyo3/extension-module"]

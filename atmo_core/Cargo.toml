@@ -1,0 +1,25 @@
+# atmo_core —— 大气动力核心（乙方案）Rust crate + PyO3 扩展
+#
+# 契约：atmo/INTERFACE.md（v0.1.0-draft）。本 crate 只做「纯函数式」的大气推进：
+#   给定网格/状态/边界场/步长 ⇒ 推进一个确定性子步；不含辐射/湿/云/耦合。
+#
+# 依赖与 sim_core 保持一致（pyo3 0.26 / numpy 0.26），便于同一 venv 共存。
+# ⚠️ 不引入 sin/cos 的第三方数学库：确定性函数在 src/detmath.rs 里自实现（原因见该文件头）。
+[package]
+name = "atmo_core"
+version = "0.1.0"
+edition = "2021"
+description = "the-world 大气动力核心（球面干动力；乙方案）"
+license = "Apache-2.0"
+
+[lib]
+name = "atmo_core"
+crate-type = ["cdylib", "rlib"]   # rlib 让 cargo test 能链接
+
+[dependencies]
+pyo3 = "0.26"
+numpy = "0.26"
+
+[profile.release]
+lto = true
+codegen-units = 1

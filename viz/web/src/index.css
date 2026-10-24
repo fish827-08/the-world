@@ -1,0 +1,128 @@
+/* ============================================================
+   the-world · 观测台 —— 全局设计令牌（mission-control 仪器面板）
+   基色沿用既有深空暗调（与 WorldGlobe 一致），扩展出：
+     · 三套字体（仪表标题 / 正文 / 数据等宽）
+     · 双强调色：琥珀 = 数据·测量，青 = 实时·控制
+     · 状态色：running / ok / pending / failed
+   仅新增变量，不删除既有 token（App.css / WorldGlobe 依赖）。
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- 表面 / 线条（既有，保留） ---- */
+  --bg: #0e1116;
+  --bg-2: #151a21;
+  --bg-3: #1d2532;
+  --fg: #e6e9ef;
+  --dim: #8b93a3;
+  --accent: #ffd166;
+  --line: #27303f;
+  --danger: #ff6b6b;
+
+  /* ---- 新增表面 ---- */
+  --bg-panel: #12171f;
+  --bg-inset: #0a0d12;
+  --line-2: #35415a;
+  --grid-line: rgba(122, 154, 205, 0.055);
+
+  /* ---- 双强调 + 状态色 ---- */
+  --accent-2: #4cc9f0; /* 青：实时 / 控制 / 交互高亮 */
+  --run: #4cc9f0; /* running */
+  --ok: #57cc99; /* finished / exit_ok */
+  --warn: #ffd166; /* pending */
+  --failed: #ff6b6b; /* failed / exit_nonzero */
+
+  /* ---- 辉光 ---- */
+  --glow-amber: 0 0 0 1px rgba(255, 209, 102, 0.22), 0 0 16px rgba(255, 209, 102, 0.1);
+  --glow-cyan: 0 0 0 1px rgba(76, 201, 240, 0.28), 0 0 16px rgba(76, 201, 240, 0.16);
+  --glow-red: 0 0 0 1px rgba(255, 107, 107, 0.3), 0 0 16px rgba(255, 107, 107, 0.14);
+
+  /* ---- 字体（离线优雅回退系统栈） ---- */
+  --font-display: "Chakra Petch", "IBM Plex Sans", "Microsoft YaHei", "PingFang SC",
+    system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, "Courier New",
+    monospace;
+
+  font-family: var(--font-body);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--font-mono);
+}
+
+/* 数据读数统一等宽表格数字，避免跳动 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: rgba(255, 209, 102, 0.28);
+  color: #fff;
+}
+
+/* 滚动条：细、暗、仪器感 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #46557a;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 尊重降低动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

@@ -1,0 +1,21 @@
+the-world
+Copyright 2026 the-world contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party components are not vendored in this repository. They are installed separately by the
+user and remain under their own licenses. A summary and attribution list is provided in
+THIRD-PARTY-NOTICES.md.
+
+Special notes:
+
+- SpeedyWeather.jl (optional atmospheric integration under atmo_julia/) is licensed under
+  EUPL-1.2. It is an external dependency and is not distributed in this repository. Any use of
+  the optional integration is governed by EUPL-1.2 in addition to this project's Apache-2.0
+  license for its own code.
+
+- exoplasim (GPL-2.0) is not part of this distribution. The optional experiment script that
+  imported it in-process is excluded from the public snapshot.
+
+- Apache ECharts is licensed under Apache-2.0 and carries its own upstream NOTICE; it is consumed
+  as an npm dependency and is not vendored here.

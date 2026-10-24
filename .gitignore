@@ -1,0 +1,184 @@
+# AI Code 开发规则（仅本地保留，不提交）
+AI-CODE-DEVELOPMENT-RULES.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Rust
+target/
+Cargo.lock
+
+# 实验结果与数据（不入库）
+results/
+*.csv
+*.json
+!pyproject.toml
+# 🔴 例外（2026-09-19，R127 C8）：`experiments/prerequisites.json` 是**手写的源文件**
+# （每批的机器可读前提声明），不是跑批产物 ⇒ 必须入库。
+# ⚠️ 负向规则**必须写在 `*.json` 之后**（后来者胜）——本项目在 D-23a 已为此付过学费。
+!experiments/prerequisites.json
+
+# 前端
+node_modules/
+dist/
+*.map
+
+# IDE
+.idea/
+.vscode/
+*.iml
+# 构建日志（临时产物）
+build_log.txt
+
+
+# Rust 编译产物
+sim_core.so
+sim_core/target/
+
+# 实验输出与临时可视化
+long_run_result.txt
+language-path.html
+long_run_l4l5_result.txt
+
+# 快照运行时文件
+snapshot.npz
+long_run_*.csv
+long_run_*.txt
+
+_rerun_logs/*
+# 本地重跑包装（机器本地路径，从不入库）；2026-10-13 归档 moved to experiments/archive/_artifacts/
+experiments/**/local_rerun_d2x.bat
+
+# === 2026-10-03 R342 文件存放规则：归档区（代码快照/桌面残留，体积大且可重新生成）===
+# 🔴 落点纪律：一律进 `_archive/`（本目录），❌ 不要进 `_trash_local/`
+#    （后者未入库 ⇒ 别人复现不了，等于没整理）
+#    依据：_share/规则-文件存放.md
+内部归档
+_archive/桌面残留-*/
+# 旧设计稿/旧路线稿的归档批次（2026-10-03 由 `_trash_local/_design_drafts_*` 移入）
+_archive/设计旧稿-*/
+
+# 🔴 `_trash_local/` = 临时草稿区（R342 规则①「临时文件用完即删」）
+#    入 ignore 的理由：它**污染 `git status`**（10-03 实测 1 912 个游离文件 ⇒ 真改动被淹没，
+#    复核线的审核帖亦独立指出同一问题）⇒ 协作效率受损。
+#    ⚠️ **但它不是垃圾桶**：需要复现的判读/编排脚本已收编进 `experiments/_legacy_scripts/`（含溯源表）。
+#    依据：_share/规则-文件存放.md §三
+_trash_local/
+
+# === 2026-09-12 迁移后：本地副本/备份/独立仓库（不入主仓） ===
+.git.backup-*/
+_review/
+_backup_full_*/
+_clockcheck/
+_wt_*/
+digital_life/
+
+# === 2026-09-13 修正：评估线工作区须入库（AGENT.md §一定义） ===
+# _eval/（内评工作区）、_web_eval/（联网线工作区）、_roadmap/、_advice/
+# 此前被误加 ignore，导致 CHARTER/GATE-CRITERIA/BASELINE/FINDINGS 未受版本控制
+# ⇒ 已移出 ignore，恢复正常跟踪
+
+# === 2026-09-13 仓库瘦身：实验数据移入独立数据仓库 the-world-data ===
+data/snapshots/
+*.npz
+
+# === 2026-09-13 其他不入库项 ===
+.git-rewrite/
+.workbuddy/
+digital-life-sphere/
+
+the-world-data/
+
+# 2026-09-13 恢复过程残留
+_reclone_tmp/
+.git.corrupt-*/
+
+# === D-23a（F-R7）：放开"单一最新快照"目录，使断点状态可入库 ===
+# 背景：R19 快照被忽略 ⇒ 本地接不上、只能从 0 重跑（白丢 ~9h）。
+# ⚠️ gitignore 后写者优先 ⇒ 这段必须放在 `*.npz` 之后才生效。
+# ❌ 切勿放开 *.npz 通配：120 个/run × 4 MB ≈ 480 MB/run，会把仓库再撑爆。
+!_rerun_logs/snap/
+!_rerun_logs/snap/*.npz
+!_rerun_logs/snap/*.pkl
+# R221 §四：run meta（续跑用 run 身份 + k）与快照**同行**，跨机分片要一起带走
+!_rerun_logs/snap/*.json
+
+# === R237（2026-09-27）：冒烟产物不入库 ===
+# T-F 的续跑冒烟（`rd_resume_smoke.py --out .../snap/smoke_*`）会在**子目录**里产生
+# `.snapshot*` 侧车（pkl/json）—— 上面的 `!_rerun_logs/snap/*.pkl` 通配符**不跨目录**，
+# 所以它们会以"未跟踪"身份常驻，把 `shutdown_gate.py` 的"工作区干净"一项长期挂红。
+# 冒烟产物可再生（重跑一条命令即有），**不入库**；正式批的快照（`snap/<preset>/`）不受影响。
+_rerun_logs/snap/smoke_*/
+
+# === R111：写入锁（同机机制，锁文件不入库；说明见 _share/.locks/README.md）===
+_share/.locks/*.lock
+_share/.locks/_retired/
+
+# === R278 §三 P3（2026-09-30，开发线）：单测基线 fixture 入库 ===
+# 背景：`*.csv` / `*.json` 通配把 `tests/fixtures/` 下的**测试基线**也吞了，
+# 而 P3 的"默认行为不变"单测需要一个**改造前版本产出**的对照基线（无法现场生成）。
+# ⇒ 只打开 `tests/fixtures/` 这一层，**不放宽** `*.csv` 全局通配。
+# ⚠️ gitignore 后写者优先 ⇒ 必须放在上面 `*.csv` / `*.json` 之后。
+!tests/fixtures/
+!tests/fixtures/*.csv
+!tests/fixtures/*.json
+
+# === 协作线：测试临时目录（pytest --basetemp；F-R10 家族下用 git clean/rm 清理）===
+_tmp_pytest_collab/
+_tmp_pytest_*/
+_pt_*/
+_share/.locks/*.post-journal.json
+
+# === R359（2026-10-03）：任务卡隔离工作树（collab-toolkit/tools/worktree.py）===
+# 路径固定 = `工作树/<卡号>`，分支 `task/<卡号>`；提交活在分支上，目录只是检出。
+# 🔴 必须忽略：否则 1912 个游离文件那种事再来一遍（R343 教训：游离文件淹没真改动）。
+# ⚠️ 只忽略**目录**，不要忽略 `工作树` 这个父名本身（便于日后人眼排查）。
+工作树/
+
+# === WORKTREE-SIGN（2026-10-04）：本树署名文件（collab-toolkit/tools/git_id.py）===
+# `worktree.py setup --role <键>` 生成的 GIT_CONFIG_* env 注入行 —— 属会话环境而非仓库内容
+# ⇒ 必须忽略（同 R343 游离文件教训）。
+.qoder-sign.env
+
+# === 2026-10-10：Qoder 运行时目录（会话/点数/技能运行态）===
+# 属工具运行时状态，非项目内容 ⇒ 必须忽略（否则污染 git status）。
+.qoder-collab-runtime/
+.qoder-credits/
+.qoder-user-skill-runtime/
+
+# === 2026-10-16：.qoder/ 整目录（IDE 会话上下文 .session-context.*.json + IDE 管理工作树）===
+# 同属运行时状态，非项目内容 ⇒ 必须忽略（否则 `?? .qoder/` 长期污染 git status）。
+.qoder/
+
+# ---- B3.3 测试卫生：临时根落在仓库内时的产物（逃生门 WB_ALLOW_TMP_IN_REPO=1 的副作用）
+tmp*/
+pytest-of-*/
+# B5.0-② 托管临时目录的兜底（进程异常退出时可能残留）
+wb_ep_*/
+
+# === 2026-10-20：仓库根目录"只放工程文件"纪律（owner 令）===
+# 根目录只允许：.gitignore / 内部工程指南 / 内部历史文档 / 内部接手指南 / 内部项目概览 / pytest.ini / README*
+# 任何实验产物（csv/json/npz/log/png/svg/txt）一律不得落在根目录 ⇒ 下面按扩展名兜底拦截。
+# 正确落点：_rerun_logs/<日期>-<任务>/（临时/可复现）或 results/（入库产物，走 data 仓）或 内部汇报/附图/。
+/*.csv
+/*.json
+/*.npz
+/*.log
+/*.png
+/*.svg
+/*.txt
+/*.parquet
+/*.pkl
+/*.npy
+# 白名单例外：发布所需的依赖清单（工程文件，非实验产物）
+!/requirements.txt
+
+# 公开快照构建目录（临时产物，不入主仓）
+/_public_export/
+

@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use or reference this project, please cite it as below."
+title: "the-world: a deterministic spherical digital-life simulation platform"
+abstract: >-
+  A deterministic spherical digital-life simulation platform with a Python engine and a
+  Rust/PyO3 numerical core. The project investigated whether signal use and other behavioural
+  structure could arise under selection without an explicit fitness function or an LLM in the
+  simulation loop. It closed on 2026-10-24; end-to-end emergence was not established, while
+  mechanism-layer results, negative results, and a reusable methodology are documented.
+authors:
+  - name: "the-world contributors"
+date-released: "2026-10-24"
+license: Apache-2.0
+repository-code: "https://github.com/fish827-08/the-world"
+version: "1.0.0"
+keywords:
+  - digital life
+  - agent-based simulation
+  - spherical grid
+  - evolution
+  - reproducibility

@@ -1,0 +1,66 @@
+{
+  "params": {
+    "rows": 20,
+    "cols": 40,
+    "patches": 6,
+    "pop": 30,
+    "seeds": "165",
+    "ticks": 10,
+    "sample": 5,
+    "rgm": 1.195,
+    "bg_low_prod_frac": 0.0,
+    "bg_low_cap_mult": 0.0,
+    "sparse_fields": false,
+    "smell_channels": "",
+    "use_in_move": false,
+    "arms": "off",
+    "out": "tests/fixtures/p3_s2_default_baseline.csv"
+  },
+  "summary": [
+    {
+      "seed": 165,
+      "arm": "off",
+      "stop": "tick \u7528\u5c3d",
+      "K_final": 27,
+      "global_sat": 0.9948259956408906,
+      "cap_lost_frac": 1.1102230246251565e-16,
+      "patch_sat_init_var": 6.733752554818934e-08,
+      "patch_sat_init_var_tail": 0.0,
+      "patch_sat_var": 6.733752554818934e-08,
+      "patch_sat_var_tail": 0.0,
+      "patch_abs_food_var": 30213566.14390415,
+      "patch_sat_range": 0.0005189895010428991,
+      "n_patches": 2,
+      "d_starv": 0,
+      "d_pred": 3,
+      "wall_s": 0.0,
+      "l0_peak_dead": 0,
+      "l0_peak_rest": 0,
+      "l0_peak_demoted": 0,
+      "l0_any_dead": 0,
+      "l0_any_rest": 0,
+      "l0_any_demoted": 0,
+      "l1_visited_patch_n": 2,
+      "l1_visited_patch_frac": 1.0,
+      "l1_first_visit_median": 1.0,
+      "l2_visited_gini": 0.4178595664245257,
+      "l2_visited_var": 30213566.143904146,
+      "l2_total_var": 30213566.143904146,
+      "l2_between_share": 0.0,
+      "l2_visited_frac": 1.0,
+      "l3_forage_sum": 358.721,
+      "l3_intake_per_capita": 1.30444,
+      "l3_net_sum": -437.28299999999996,
+      "l3_net_per_capita": -1.5901199999999998,
+      "l3_pop_mean": 27.5
+    }
+  ],
+  "criterion_2": {
+    "per_seed": {},
+    "overall": {
+      "off_var_init_mean": null,
+      "on_var_init_mean": null,
+      "verdict_on_gt_off_init": null
+    }
+  }
+}

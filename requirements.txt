@@ -1,0 +1,11 @@
+# Core runtime and test dependencies (tested with Python 3.14, numpy 2.5.x, pytest 9.x).
+# Third-party packages keep their own licenses; see THIRD-PARTY-NOTICES.md.
+numpy>=2.0,<3
+pytest>=8,<10
+maturin>=1.5,<2
+
+# Optional: observatory API, WebSocket broker, and their tests.
+fastapi>=0.100
+uvicorn>=0.20
+websockets>=10
+pydantic>=2

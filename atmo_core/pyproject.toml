@@ -1,0 +1,16 @@
+# 让 maturin 用本 Cargo 工程构建 atmo_core 扩展。
+# 构建：cd atmo_core && PYTHONIOENCODING=utf-8 ..\..\.venv\Scripts\python.exe -m maturin develop --release
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "atmo-core"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "the-world 大气动力核心（球面干动力）"
+license = { text = "Apache-2.0" }
+
+[tool.maturin]
+module-name = "atmo_core"
+features = ["pyo3/extension-module"]

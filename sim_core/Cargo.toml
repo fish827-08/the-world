@@ -1,0 +1,27 @@
+# 模块三：Sim-core（Rust 加速核）—— Cargo 工程配置
+#
+# 职责（见 内部项目概览 3.3）：把引擎真正发热的批量数值运算搬进 Rust，
+# Python 侧 import sim_core 无感调用。本文件是模块三的文件 1（骨架）。
+# 依赖说明：
+#   - pyo3  ：Python ↔ Rust 桥（extension-module：编译成 .pyd 给 Python import）
+#   - numpy ：与 Python 侧 NumPy 数组零拷贝互转
+#   - rayon ：批量并行（后续实现数值管线时引入）
+[package]
+name = "sim_core"
+version = "0.1.0"
+edition = "2021"
+description = "digital-life-sphere 的 Rust 加速核（数值热路径）"
+license = "Apache-2.0"
+
+[lib]
+name = "sim_core"
+crate-type = ["cdylib"]  # .pyd / .so 扩展，供 Python import
+
+[dependencies]
+pyo3 = "0.26"
+numpy = "0.26"
+rayon = "1.10"
+
+[profile.release]
+lto = true
+codegen-units = 1
